@@ -5,18 +5,23 @@
       "name": "Run Extension",
       "type": "extensionHost",
       "request": "launch",
-      // Open this repo as the test workspace. Without a folder argument the
-      // Extension Development Host starts with NO folder open, every ws_* tool
-      // correctly refuses ("no workspace folder is open"), and the extension
-      // looks broken when it is behaving exactly as designed.
+      // Open sample-workspace/ as the test workspace. Without a folder argument
+      // the Extension Development Host starts with NO folder open, every ws_*
+      // tool correctly refuses ("no workspace folder is open"), and the
+      // extension looks broken when it is behaving exactly as designed.
       //
-      // --new-window is what makes that reliable: VSCode will otherwise reuse
-      // an Extension Development Host that is already running, folder argument
-      // and all, so a stale empty window silently wins.
+      // NOT this repo: it is large enough to start a second TypeScript language
+      // server, `npm run watch` rewrites dist/ underneath it, and it is usually
+      // already open in another window. Doing that once killed the extension
+      // host. sample-workspace/ is tiny and purpose-built — see its README.
+      //
+      // --new-window is what makes the folder argument stick at all: VSCode
+      // otherwise reuses a development host that is already running, so a stale
+      // empty window silently wins and the folder is never opened.
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
         "--new-window",
-        "${workspaceFolder}"
+        "${workspaceFolder}/sample-workspace"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.cjs"],
       "preLaunchTask": "npm: watch"

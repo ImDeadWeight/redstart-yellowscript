@@ -1,0 +1,12 @@
+# Everything the packaged .vsix does not need. `dist/extension.cjs` is the
+# whole shipped payload — sources, tests, and the toolchain stay out.
+.vscode/**
+.vscode-test/**
+src/**
+docs/**
+node_modules/**
+esbuild.mjs
+tsconfig.json
+.gitignore
+**/*.map
+**/*.test.ts

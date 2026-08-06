@@ -18,6 +18,9 @@ import { NestHttpError } from '../nest/types.ts'
 import { tokensPerSecond, type StreamTimings } from '../nest/streaming.ts'
 import type { ChatCompletionRequest, NestClient } from '../nest/client.ts'
 import type { ChatMessageView, HostMessage, TurnStats } from './protocol.ts'
+import { runAgentLoop } from '../agent/loop.ts'
+import type { ToolRegistry } from '../tools/registry.ts'
+import type { ToolContext } from '../tools/types.ts'
 
 /**
  * How the assistant's own thinking is treated on the NEXT request.
@@ -38,6 +41,17 @@ export interface SessionDeps {
   emit: (message: HostMessage) => void
   /** Injected so tests get deterministic ids. */
   newId?: () => string
+  /**
+   * The ws_* tools, and the workspace they act on.
+   *
+   * Optional, and absent means a plain conversation with no tools — which is
+   * not a degraded mode but a legitimate one: with no folder open there is
+   * nothing for a workspace tool to do, and offering tools that can only
+   * refuse teaches the model to keep trying them. It also keeps every Phase 1
+   * test meaningful without rewriting them around a registry.
+   */
+  tools?: () => ToolRegistry | null
+  toolContext?: () => ToolContext
 }
 
 export class ChatSession {
@@ -124,23 +138,59 @@ export class ChatSession {
     this.controller = controller
 
     try {
-      const result = await client.streamChatCompletion(
-        this.buildRequest(),
-        {
-          onContent: (chunk) => {
-            turn.content += chunk
-            this.deps.emit({ type: 'turn/delta', id: turn.id, channel: 'content', text: chunk })
-          },
-          onReasoning: (chunk) => {
-            turn.reasoning = (turn.reasoning ?? '') + chunk
-            this.deps.emit({ type: 'turn/delta', id: turn.id, channel: 'reasoning', text: chunk })
-          },
-          onModel: (model) => {
-            this.model = model
-          },
+      const handlers = {
+        onContent: (chunk: string) => {
+          turn.content += chunk
+          this.deps.emit({ type: 'turn/delta', id: turn.id, channel: 'content', text: chunk })
         },
-        controller.signal,
-      )
+        onReasoning: (chunk: string) => {
+          turn.reasoning = (turn.reasoning ?? '') + chunk
+          this.deps.emit({ type: 'turn/delta', id: turn.id, channel: 'reasoning', text: chunk })
+        },
+        onModel: (model: string) => {
+          this.model = model
+        },
+      }
+
+      // The seam. With tools available the turn becomes a loop — stream,
+      // execute, feed results back — and without them it stays the single
+      // round trip Phase 1 shipped. Everything after this point is identical
+      // either way, which is the whole reason the loop returns a
+      // StreamResult-shaped object.
+      const registry = this.deps.tools?.() ?? null
+      const result = registry
+        ? await runAgentLoop({
+            client,
+            request: this.buildRequest(),
+            tools: registry,
+            toolContext: this.deps.toolContext?.() ?? { workspaceRoots: [] },
+            signal: controller.signal,
+            handlers: {
+              ...handlers,
+              onToolCall: (call, recovered) => {
+                this.deps.emit({
+                  type: 'tool/call',
+                  turnId: turn.id,
+                  callId: call.id,
+                  name: call.function.name,
+                  arguments: call.function.arguments,
+                  recovered,
+                })
+              },
+              onToolResult: (call, toolResult) => {
+                this.deps.emit({
+                  type: 'tool/result',
+                  turnId: turn.id,
+                  callId: call.id,
+                  name: call.function.name,
+                  summary: toolResult.summary,
+                  isError: toolResult.isError,
+                  truncated: toolResult.truncated,
+                })
+              },
+            },
+          })
+        : await client.streamChatCompletion(this.buildRequest(), handlers, controller.signal)
 
       turn.streaming = false
       turn.aborted = result.aborted

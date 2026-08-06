@@ -88,6 +88,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   session = new ChatSession({
     getClient: () => manager?.activeClient ?? null,
     onUnauthorized: () => manager?.handleUnauthorized(),
+    // Resolved per turn, not captured once: a user can add or remove a folder
+    // mid-conversation, and with no folder open the tools are withheld
+    // entirely rather than offered in a state where they can only refuse.
+    tools: () => (workspaceRoots().length > 0 ? (tools ?? null) : null),
+    toolContext: () => ({ workspaceRoots: workspaceRoots() }),
     emit: (message) => {
       chatView?.post(message)
       // The status bar shows the generation rate of the most recent turn — the

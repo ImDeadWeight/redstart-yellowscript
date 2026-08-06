@@ -123,6 +123,24 @@ export type HostMessage =
   | { type: 'turn/delta'; id: string; channel: StreamChannel; text: string }
   | { type: 'turn/completed'; id: string; stats?: TurnStats; aborted?: boolean }
   | { type: 'turn/failed'; id: string; message: string }
+  // Tool activity gets its own message types rather than a third text channel.
+  // A tool call is STRUCTURE, and `turn/delta` carries text — repurposing it
+  // would mean the renderer parsing prose to find out what ran. Both carry the
+  // turn id so a late message from an aborted turn cannot attach itself to the
+  // turn that replaced it.
+  | { type: 'tool/call'; turnId: string; callId: string; name: string; arguments: string; recovered: boolean }
+  | {
+      type: 'tool/result'
+      turnId: string
+      callId: string
+      name: string
+      /** One line for the card. The full output goes to the model, not here —
+       *  a 20k-character file listing is not something to render in a chat
+       *  bubble, and the user can open the file themselves. */
+      summary: string
+      isError: boolean
+      truncated: boolean
+    }
   /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
 

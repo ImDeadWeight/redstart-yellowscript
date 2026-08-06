@@ -1,10 +1,14 @@
-import { test, describe, beforeEach } from 'node:test'
+import { test, describe, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 import { ChatSession } from './session.ts'
 import type { HostMessage } from './protocol.ts'
 import type { ChatCompletionRequest, NestClient, StreamHandlers, StreamResult } from '../nest/client.ts'
 import { NestHttpError } from '../nest/types.ts'
+import { createToolRegistry } from '../tools/registry.ts'
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -390,5 +394,124 @@ describe('ChatSession — reset', () => {
 
     await h.session.send('hi')
     assert.equal(observed?.aborted, true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The Phase 2 seam: with tools available, a turn becomes a loop.
+// ---------------------------------------------------------------------------
+
+describe('ChatSession with tools', () => {
+  const workspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-session-')))
+  fs.writeFileSync(path.join(workspace, 'note.txt'), 'the answer is 42\n')
+  after(() => fs.rmSync(workspace, { recursive: true, force: true }))
+
+  const registry = () =>
+    createToolRegistry({
+      ripgrepPath: null,
+      diagnostics: () => [],
+      editorState: () => ({
+        activeFile: null,
+        languageId: null,
+        isDirty: false,
+        cursor: null,
+        selection: null,
+        openFiles: [],
+      }),
+    })
+
+  /** Calls a tool on the first round trip, answers on the second. */
+  const readsThenAnswers = (): StreamScript => {
+    let call = 0
+    return async (_req, handlers) => {
+      call++
+      if (call === 1) {
+        return emptyResult({
+          toolCalls: [
+            { index: 0, id: 'c1', function: { name: 'ws_read_file', arguments: '{"path":"note.txt"}' } },
+          ],
+        })
+      }
+      handlers.onContent?.('It says 42.')
+      return emptyResult({ content: 'It says 42.' })
+    }
+  }
+
+  function withTools(script: StreamScript) {
+    const emitted: HostMessage[] = []
+    const session = new ChatSession({
+      getClient: () => fakeClient(script),
+      onUnauthorized: () => {},
+      emit: (message) => emitted.push(message),
+      newId: (() => {
+        let n = 0
+        return () => `id-${++n}`
+      })(),
+      tools: () => registry(),
+      toolContext: () => ({ workspaceRoots: [workspace] }),
+    })
+    return { session, emitted }
+  }
+
+  test('executes a tool call and answers from its result', async () => {
+    const h = withTools(readsThenAnswers())
+    await h.session.send('what does note.txt say?')
+
+    const turn = h.session.snapshot().find((message) => message.role === 'assistant')
+    assert.match(turn?.content ?? '', /It says 42\./)
+  })
+
+  test('emits tool/call and tool/result carrying the turn id', async () => {
+    // Structure gets its own message types — the renderer must not have to
+    // parse prose to find out what ran. The turn id is what stops a late
+    // message attaching to the turn that replaced it.
+    const h = withTools(readsThenAnswers())
+    await h.session.send('read it')
+
+    const call = h.emitted.find((m) => m.type === 'tool/call')
+    assert.ok(call && call.type === 'tool/call')
+    assert.equal(call.name, 'ws_read_file')
+    assert.equal(call.recovered, false)
+
+    const result = h.emitted.find((m) => m.type === 'tool/result')
+    assert.ok(result && result.type === 'tool/result')
+    assert.equal(result.isError, false)
+    assert.equal(result.callId, call.callId)
+    assert.equal(result.turnId, call.turnId)
+  })
+
+  test('sends the tool payload to the Nest', async () => {
+    // Sending tools is also what makes the gateway claim Nest capabilities.
+    let seen: ChatCompletionRequest | undefined
+    const h = withTools(async (request, handlers) => {
+      seen = request
+      handlers.onContent?.('done')
+      return emptyResult({ content: 'done' })
+    })
+    await h.session.send('hello')
+
+    const tools = seen?.tools as Array<{ function: { name: string } }> | undefined
+    assert.ok(tools?.some((entry) => entry.function.name === 'ws_read_file'))
+  })
+
+  test('withholding the registry keeps the Phase 1 single round trip', async () => {
+    // With no folder open the tools can only refuse, so they are not offered.
+    let seen: ChatCompletionRequest | undefined
+    const emitted: HostMessage[] = []
+    const session = new ChatSession({
+      getClient: () =>
+        fakeClient(async (request, handlers) => {
+          seen = request
+          handlers.onContent?.('plain answer')
+          return emptyResult({ content: 'plain answer' })
+        }),
+      onUnauthorized: () => {},
+      emit: (message) => emitted.push(message),
+      tools: () => null,
+    })
+    await session.send('hi')
+
+    assert.equal(seen?.tools, undefined)
+    assert.ok(!emitted.some((m) => m.type === 'tool/call'))
   })
 })

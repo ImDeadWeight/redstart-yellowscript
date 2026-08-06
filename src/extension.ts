@@ -20,7 +20,7 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
-import type { SessionSnapshot } from './chat/protocol.ts'
+import type { HostMessage, SessionSnapshot } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
@@ -100,6 +100,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
         statusBar?.setModel(session?.currentModel ?? null, message.stats.tokensPerSecond)
       }
+      logToolActivity(message)
     },
   })
 
@@ -165,6 +166,34 @@ export function deactivate(): void {
   session = undefined
   chatView = undefined
   manager = undefined
+}
+
+/**
+ * Record what the model actually did with its tools.
+ *
+ * `recovered` is the fact worth having. It says the model did NOT emit a
+ * structured `tool_calls` field and the call had to be salvaged out of its text
+ * or its reasoning — which is the difference between llama.cpp parsing this
+ * model's chat template correctly and the fallback carrying the whole feature.
+ * That is a per-model property, invisible from the panel, and the thing to check
+ * first when switching models or when the agent starts behaving oddly.
+ *
+ * Arguments are logged trimmed: they are model-authored and can be a whole file
+ * of content on a Phase 3 write call.
+ */
+function logToolActivity(message: HostMessage): void {
+  if (message.type === 'tool/call') {
+    const args = message.arguments.length > 300 ? `${message.arguments.slice(0, 300)}…` : message.arguments
+    output?.info(
+      `tool call: ${message.name}(${args})` +
+        (message.recovered ? '  [RECOVERED from text — no structured tool_calls]' : ''),
+    )
+  } else if (message.type === 'tool/result') {
+    output?.info(
+      `tool result: ${message.name} -> ${message.isError ? 'ERROR' : 'ok'}` +
+        `${message.truncated ? ', truncated' : ''} — ${message.summary}`,
+    )
+  }
 }
 
 /**

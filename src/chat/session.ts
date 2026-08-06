@@ -19,6 +19,7 @@ import { tokensPerSecond, type StreamTimings } from '../nest/streaming.ts'
 import type { ChatCompletionRequest, NestClient } from '../nest/client.ts'
 import type { ChatMessageView, HostMessage, TurnStats } from './protocol.ts'
 import { runAgentLoop } from '../agent/loop.ts'
+import { buildSystemPrompt } from '../agent/system-prompt.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext } from '../tools/types.ts'
 
@@ -161,7 +162,7 @@ export class ChatSession {
       const result = registry
         ? await runAgentLoop({
             client,
-            request: this.buildRequest(),
+            request: this.buildRequest(registry),
             tools: registry,
             toolContext: this.deps.toolContext?.() ?? { workspaceRoots: [] },
             signal: controller.signal,
@@ -190,7 +191,7 @@ export class ChatSession {
               },
             },
           })
-        : await client.streamChatCompletion(this.buildRequest(), handlers, controller.signal)
+        : await client.streamChatCompletion(this.buildRequest(null), handlers, controller.signal)
 
       turn.streaming = false
       turn.aborted = result.aborted
@@ -245,8 +246,15 @@ export class ChatSession {
    * assistant said, and dropping it would leave the user's follow-up
    * ("continue") with nothing to refer to.
    */
-  private buildRequest(): ChatCompletionRequest {
+  private buildRequest(registry: ToolRegistry | null): ChatCompletionRequest {
     const messages: ChatCompletionRequest['messages'] = []
+
+    // Only when tools are actually going out. Without them the gateway sends
+    // bare identity text and there is no over-claim to narrow; adding a system
+    // message anyway would spend context correcting something nobody said.
+    if (registry) {
+      messages.push({ role: 'system', content: buildSystemPrompt(registry.names) })
+    }
 
     for (const message of this.messages) {
       if (message.role === 'assistant') {

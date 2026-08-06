@@ -494,6 +494,24 @@ describe('ChatSession with tools', () => {
     assert.ok(tools?.some((entry) => entry.function.name === 'ws_read_file'))
   })
 
+  test('sends a system message scoping what is actually available', async () => {
+    // The gateway's own injected context describes what NEST has configured,
+    // not what this client forwards — it told the model it could create .docx
+    // files. This narrows the claim; the gateway merges rather than duplicating.
+    let seen: ChatCompletionRequest | undefined
+    const h = withTools(async (request, handlers) => {
+      seen = request
+      handlers.onContent?.('ok')
+      return emptyResult({ content: 'ok' })
+    })
+    await h.session.send('hello')
+
+    const system = seen?.messages[0]
+    assert.equal(system?.role, 'system')
+    assert.match(system?.content ?? '', /ws_read_file/)
+    assert.match(system?.content ?? '', /list is complete/i)
+  })
+
   test('withholding the registry keeps the Phase 1 single round trip', async () => {
     // With no folder open the tools can only refuse, so they are not offered.
     let seen: ChatCompletionRequest | undefined
@@ -513,5 +531,9 @@ describe('ChatSession with tools', () => {
 
     assert.equal(seen?.tools, undefined)
     assert.ok(!emitted.some((m) => m.type === 'tool/call'))
+    // And no system message: with no tools going out the gateway sends bare
+    // identity text, so there is no over-claim to correct and no reason to
+    // spend context correcting it.
+    assert.ok(!seen?.messages.some((message) => message.role === 'system'))
   })
 })

@@ -65,10 +65,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnostics: diagnosticsProvider,
     editorState: editorStateProvider,
   })
+  const roots = workspaceRoots()
   output.info(
     `tools: ${tools.names.length} registered (${tools.names.join(', ')}); ` +
-      `search backend: ${ripgrepPath === null ? 'DEGRADED — ripgrep not found' : 'ripgrep'}`,
+      `search backend: ${ripgrepPath === null ? 'DEGRADED — ripgrep not found' : 'ripgrep'}; ` +
+      `workspace folders: ${roots.length}`,
   )
+  if (roots.length === 0) {
+    // Worth stating plainly. With no folder open every ws_* tool refuses by
+    // design, and that reads as a broken extension unless it is spelled out.
+    output.warn('No workspace folder is open — every ws_* tool will refuse until one is.')
+  }
   if (ripgrepPath === null) {
     // Worth a log line with the appRoot: the layout has changed between VSCode
     // versions before, and this is the fact needed to add the new one.
@@ -368,53 +375,55 @@ async function showStatusCommand(): Promise<void> {
  * tool that reads their files.
  */
 async function inspectToolsCommand(): Promise<void> {
-  if (!tools) return
+  // Show the channel FIRST. Every failure below is then visible in it, rather
+  // than the command appearing to do nothing — which is exactly what an earlier
+  // version of this did when it returned early without saying so.
+  output?.show(true)
+  output?.info('--- Inspect Workspace Tools ---')
 
-  const roots = workspaceRoots()
-  if (roots.length === 0) {
-    vscode.window.showWarningMessage(
-      'Yellowscript tools need an open folder — nothing is in scope right now.',
-    )
+  if (!tools) {
+    output?.error('The tool registry was never built. The extension did not activate cleanly.')
+    vscode.window.showErrorMessage('Yellowscript: tools are not available — see the output channel.')
     return
   }
 
-  const backend = ripgrepPath === null ? 'degraded (no ripgrep)' : 'ripgrep'
-  const picked = await vscode.window.showQuickPick(
-    tools.tools.map((tool) => ({
-      label: tool.definition.name,
-      detail: tool.definition.description.slice(0, 120),
-      name: tool.definition.name,
-    })),
-    {
-      title: `Workspace tools — search backend: ${backend}`,
-      placeHolder: `${roots.length} folder(s) in scope. Pick a tool to run.`,
-    },
-  )
-  if (!picked) return
+  const roots = workspaceRoots()
+  output?.info(`workspace folders: ${roots.length > 0 ? roots.join(', ') : '(none open)'}`)
+  output?.info(`search backend: ${ripgrepPath === null ? 'DEGRADED — ripgrep not found' : ripgrepPath}`)
+  output?.info(`registered: ${tools.names.join(', ')}`)
 
-  const schema = tools.get(picked.name)?.definition.inputSchema
-  const required = (schema?.required ?? []).join(', ')
-  const rawArguments = await vscode.window.showInputBox({
-    title: `${picked.name} — arguments`,
-    prompt: required ? `JSON arguments (required: ${required})` : 'JSON arguments (none required)',
-    value: '{}',
-    ignoreFocusOut: true,
-  })
-  if (rawArguments === undefined) return
+  if (roots.length === 0) {
+    output?.warn('No folder is open, so every tool will refuse. Open a folder and run this again.')
+    return
+  }
 
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Window, title: `Running ${picked.name}…` },
-    () => tools!.execute(picked.name, rawArguments, { workspaceRoots: roots }),
-  )
+  // Run the zero-argument tools and one filesystem probe. These are the checks
+  // that cannot be made from a unit test: ws_diagnostics and ws_editor_context
+  // read live VSCode state through the providers, and this is the only place
+  // that wiring gets exercised outside an agent turn.
+  const probes: Array<{ name: string; args: string }> = [
+    { name: 'ws_editor_context', args: '{}' },
+    { name: 'ws_diagnostics', args: '{}' },
+    { name: 'ws_list_directory', args: '{"path":"."}' },
+    { name: 'ws_glob', args: '{"pattern":"**/*.ts"}' },
+  ]
 
-  // The full result goes to the output channel — it is the model's-eye view and
-  // is frequently longer than a notification can hold.
-  output?.info(
-    `${picked.name}(${rawArguments}) -> ${result.isError ? 'ERROR' : 'ok'}${result.truncated ? ', truncated' : ''}\n${result.content}`,
-  )
-  output?.show(true)
+  for (const probe of probes) {
+    try {
+      const result = await tools.execute(probe.name, probe.args, { workspaceRoots: roots })
+      const status = result.isError ? 'ERROR' : 'ok'
+      output?.info(
+        `\n=== ${probe.name}(${probe.args}) -> ${status}${result.truncated ? ', truncated' : ''} ===\n${result.content}`,
+      )
+    } catch (err) {
+      // A tool throwing is a bug — the contract says failures come back as
+      // results. Surface it loudly rather than swallowing it.
+      output?.error(`${probe.name} THREW (this is a bug, not a refusal)`, err)
+    }
+  }
 
-  if (result.isError) vscode.window.showWarningMessage(`${picked.name}: ${result.summary}`)
+  output?.info('\n--- done ---')
+  vscode.window.showInformationMessage('Yellowscript: tool report written to the output channel.')
 }
 
 /** Manual fallback for a Nest discovery can't see (different subnet, VPN). */

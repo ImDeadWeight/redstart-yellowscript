@@ -5,7 +5,19 @@
       "name": "Run Extension",
       "type": "extensionHost",
       "request": "launch",
-      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      // Open this repo as the test workspace. Without a folder argument the
+      // Extension Development Host starts with NO folder open, every ws_* tool
+      // correctly refuses ("no workspace folder is open"), and the extension
+      // looks broken when it is behaving exactly as designed.
+      //
+      // --new-window is what makes that reliable: VSCode will otherwise reuse
+      // an Extension Development Host that is already running, folder argument
+      // and all, so a stale empty window silently wins.
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--new-window",
+        "${workspaceFolder}"
+      ],
       "outFiles": ["${workspaceFolder}/dist/**/*.cjs"],
       "preLaunchTask": "npm: watch"
     }

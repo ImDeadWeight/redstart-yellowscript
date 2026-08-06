@@ -79,6 +79,11 @@
         "command": "redstartYellowscript.showStatus",
         "title": "Show Connection Status",
         "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.inspectTools",
+        "title": "Inspect Workspace Tools",
+        "category": "Yellowscript"
       }
     ],
     "configuration": {

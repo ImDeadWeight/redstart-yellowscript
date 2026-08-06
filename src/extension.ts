@@ -24,6 +24,13 @@ import { NestClient, normalizeBaseUrl } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider } from './ui/chat-view.ts'
+import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
+import {
+  diagnosticsProvider,
+  editorStateProvider,
+  resolveRipgrep,
+  workspaceRoots,
+} from './ui/tool-providers.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -32,6 +39,10 @@ let statusBar: StatusBar | undefined
 let output: vscode.LogOutputChannel | undefined
 let session: ChatSession | undefined
 let chatView: ChatViewProvider | undefined
+let tools: ToolRegistry | undefined
+/** Resolved once — the binary does not move while the window is open, and
+ *  probing the filesystem on every search would be wasteful. */
+let ripgrepPath: string | null = null
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
@@ -43,6 +54,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     createClient: (baseUrl) => new NestClient(baseUrl),
     discover: createDiscovery(() => config().get<number>('discovery.timeoutMs', 400)),
   })
+
+  // The ws_* tools. Built at activation so a missing ripgrep is a known,
+  // reportable state rather than a surprise on the first search — the search
+  // tools drop to literal matching and say so in the description the model
+  // plans against. Nothing sends these to the Nest yet; that is 2.3.
+  ripgrepPath = resolveRipgrep()
+  tools = createToolRegistry({
+    ripgrepPath,
+    diagnostics: diagnosticsProvider,
+    editorState: editorStateProvider,
+  })
+  output.info(
+    `tools: ${tools.names.length} registered (${tools.names.join(', ')}); ` +
+      `search backend: ${ripgrepPath === null ? 'DEGRADED — ripgrep not found' : 'ripgrep'}`,
+  )
+  if (ripgrepPath === null) {
+    // Worth a log line with the appRoot: the layout has changed between VSCode
+    // versions before, and this is the fact needed to add the new one.
+    output.warn(`ripgrep was not found under appRoot ${vscode.env.appRoot}`)
+  } else {
+    output.debug(`ripgrep: ${ripgrepPath}`)
+  }
 
   session = new ChatSession({
     getClient: () => manager?.activeClient ?? null,
@@ -100,6 +133,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.signOut', signOutCommand),
     vscode.commands.registerCommand('redstartYellowscript.showStatus', showStatusCommand),
     vscode.commands.registerCommand('redstartYellowscript.newChat', newChatCommand),
+    vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
@@ -322,6 +356,65 @@ async function showStatusCommand(): Promise<void> {
     case 'Enter URL…':
       return promptForServerUrl()
   }
+}
+
+/**
+ * Run a ws_* tool by hand and show what the model would receive.
+ *
+ * This is the only way to exercise the VSCode-backed providers — diagnostics
+ * and editor context — outside an agent turn, since unit tests cannot reach the
+ * real `vscode` API. It doubles as the answer to "what can the agent actually
+ * see in this workspace?", which is a fair question for a user to ask about a
+ * tool that reads their files.
+ */
+async function inspectToolsCommand(): Promise<void> {
+  if (!tools) return
+
+  const roots = workspaceRoots()
+  if (roots.length === 0) {
+    vscode.window.showWarningMessage(
+      'Yellowscript tools need an open folder — nothing is in scope right now.',
+    )
+    return
+  }
+
+  const backend = ripgrepPath === null ? 'degraded (no ripgrep)' : 'ripgrep'
+  const picked = await vscode.window.showQuickPick(
+    tools.tools.map((tool) => ({
+      label: tool.definition.name,
+      detail: tool.definition.description.slice(0, 120),
+      name: tool.definition.name,
+    })),
+    {
+      title: `Workspace tools — search backend: ${backend}`,
+      placeHolder: `${roots.length} folder(s) in scope. Pick a tool to run.`,
+    },
+  )
+  if (!picked) return
+
+  const schema = tools.get(picked.name)?.definition.inputSchema
+  const required = (schema?.required ?? []).join(', ')
+  const rawArguments = await vscode.window.showInputBox({
+    title: `${picked.name} — arguments`,
+    prompt: required ? `JSON arguments (required: ${required})` : 'JSON arguments (none required)',
+    value: '{}',
+    ignoreFocusOut: true,
+  })
+  if (rawArguments === undefined) return
+
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: `Running ${picked.name}…` },
+    () => tools!.execute(picked.name, rawArguments, { workspaceRoots: roots }),
+  )
+
+  // The full result goes to the output channel — it is the model's-eye view and
+  // is frequently longer than a notification can hold.
+  output?.info(
+    `${picked.name}(${rawArguments}) -> ${result.isError ? 'ERROR' : 'ok'}${result.truncated ? ', truncated' : ''}\n${result.content}`,
+  )
+  output?.show(true)
+
+  if (result.isError) vscode.window.showWarningMessage(`${picked.name}: ${result.summary}`)
 }
 
 /** Manual fallback for a Nest discovery can't see (different subnet, VPN). */

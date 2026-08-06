@@ -12,13 +12,13 @@
 
 import * as vscode from 'vscode'
 
+import { ConnectionManager, describeState, type ConnectionState } from './connection.ts'
 import {
-  ConnectionManager,
-  createDiscovery,
-  describeState,
-  type ConnectionState,
-} from './connection.ts'
-import { localAddresses, localSubnets, type DiscoveredNest } from './nest/discovery.ts'
+  discoverNests,
+  localAddresses,
+  localSubnets,
+  type DiscoveredNest,
+} from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
 import type { SessionSnapshot } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl } from './nest/client.ts'
@@ -177,8 +177,8 @@ export function deactivate(): void {
  * the real network off the end of the list.
  */
 function loggedDiscovery(): () => Promise<DiscoveredNest[]> {
-  const scan = createDiscovery(() => config().get<number>('discovery.timeoutMs', 400))
-
+  // `discoverNests` is called directly rather than through `createDiscovery`,
+  // so the per-sweep failure summary can be captured and logged.
   return async () => {
     const timeoutMs = config().get<number>('discovery.timeoutMs', 400)
     const addresses = localAddresses()
@@ -190,12 +190,27 @@ function loggedDiscovery(): () => Promise<DiscoveredNest[]> {
     )
 
     const startedAt = Date.now()
-    const found = await scan()
+    let failures: Record<string, number> = {}
+    const found = await discoverNests({
+      timeoutMs,
+      onFailureSummary: (reasons) => {
+        failures = reasons
+      },
+    })
     const elapsed = Date.now() - startedAt
 
     if (found.length === 0) {
+      // The histogram is the diagnosis. All `timeout` means the probes are
+      // being dropped in flight (firewall, VPN, AP client isolation); all
+      // `ECONNREFUSED` means the hosts were reached and nothing is listening
+      // on the beacon port, which is a different problem entirely.
+      const summary =
+        Object.entries(failures)
+          .sort((a, b) => b[1] - a[1])
+          .map(([reason, count]) => `${reason}×${count}`)
+          .join(', ') || 'no failures recorded'
       output?.warn(
-        `discovery: nothing answered on ${subnets.join(', ')} after ${elapsed}ms. ` +
+        `discovery: nothing answered on ${subnets.join(', ')} after ${elapsed}ms — ${summary}. ` +
           `If the Nest is on one of those subnets and reachable, the probes are being blocked ` +
           `(firewall, VPN, or AP client isolation); set redstartYellowscript.serverUrl instead.`,
       )

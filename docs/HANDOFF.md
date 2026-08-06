@@ -697,6 +697,17 @@ private-use character silently vanished twice through the write path.
 **Always pass `--test-timeout`.** `npm test` sets 10s; a hung test otherwise
 blocks for the full harness timeout.
 
+**Use `fetch` for HTTP, never `node:http`.** VSCode patches Node's `http` and
+`https` modules for proxy support (`http.proxySupport` defaults to `"override"`);
+`fetch` is not patched the same way. Beacon discovery originally used
+`http.get`, and the result was a sweep that found nothing from inside the
+extension host while finding the Nest instantly from plain Node on the same
+machine — with `NestClient`, which has always used `fetch`, reaching that same
+host throughout. The contradiction is what identified it: the same process could
+reach `192.168.0.213:19080` but not `192.168.0.213:8765`, so it was never a
+firewall or the VPN, only the client. Anything new that makes an HTTP request
+goes through `fetch`.
+
 **Don't assume `fetch` aborts an in-flight read.** The streaming loop re-checks
 `signal.aborted` before every `read()`. A stream that simply stops producing
 would otherwise hang a turn forever with no way to cancel.

@@ -17,7 +17,6 @@
 // `node --test` directly.
 // =============================================================================
 
-import * as http from 'node:http'
 import * as os from 'node:os'
 
 /** Fixed by protocol. Not configurable — zero-config discovery is the point. */
@@ -78,45 +77,92 @@ export function parseBeaconPayload(raw: string): { running: boolean; port: numbe
 /**
  * Probe one host. Never rejects — an unreachable IP is the overwhelmingly
  * common case during a sweep, not an error worth propagating.
+ *
+ * USES `fetch`, NOT `node:http`, and that is not a style preference. VSCode
+ * patches Node's http/https modules for proxy support (`http.proxySupport`
+ * defaults to "override"); `fetch` is not patched the same way. With the
+ * node:http implementation this sweep found nothing from inside the extension
+ * host while finding the Nest instantly from plain Node on the same machine —
+ * and `NestClient`, which has always used `fetch`, could reach that same host
+ * throughout. Keeping both HTTP paths on `fetch` removes the discrepancy.
+ *
+ * `onError` receives a coarse reason per failure. Individually they are noise;
+ * aggregated across a sweep they are the difference between "nothing is
+ * listening" and "something is dropping our packets".
  */
-export function probeBeacon(ip: string, timeoutMs: number): Promise<DiscoveredNest | null> {
-  return new Promise((resolve) => {
-    let settled = false
-    const done = (result: DiscoveredNest | null) => {
-      if (settled) return
-      settled = true
-      resolve(result)
+export async function probeBeacon(
+  ip: string,
+  timeoutMs: number,
+  onError?: (reason: string) => void,
+): Promise<DiscoveredNest | null> {
+  try {
+    const response = await fetch(`http://${ip}:${BEACON_PORT}/`, {
+      signal: AbortSignal.timeout(timeoutMs),
+      // A beacon answers directly. A redirect means this is some other service.
+      redirect: 'error',
+    })
+
+    if (!response.ok) {
+      await response.body?.cancel()
+      onError?.(`http-${response.status}`)
+      return null
     }
 
-    const req = http.get({ host: ip, port: BEACON_PORT, path: '/', timeout: timeoutMs }, (res) => {
-      if (res.statusCode !== 200) {
-        res.destroy()
-        done(null)
-        return
-      }
+    const body = await readCapped(response, MAX_BEACON_BODY_BYTES)
+    const parsed = parseBeaconPayload(body)
+    if (!parsed) {
+      onError?.('not-a-beacon')
+      return null
+    }
+    return { ip, port: parsed.port, running: parsed.running, url: `http://${ip}:${parsed.port}` }
+  } catch (err) {
+    onError?.(failureReason(err))
+    return null
+  }
+}
 
-      let body = ''
-      res.setEncoding('utf8')
-      res.on('data', (chunk: string) => {
-        body += chunk
-        if (body.length > MAX_BEACON_BODY_BYTES) {
-          res.destroy()
-          done(null)
-        }
-      })
-      res.on('end', () => {
-        const parsed = parseBeaconPayload(body)
-        done(parsed ? { ip, port: parsed.port, running: parsed.running, url: `http://${ip}:${parsed.port}` } : null)
-      })
-      res.on('error', () => done(null))
-    })
+/**
+ * Read at most `limit` bytes of a response, then stop.
+ *
+ * We are probing arbitrary hosts on an untrusted LAN, so an unbounded read is
+ * an invitation for whatever is listening on 8765 to stream at us forever.
+ */
+async function readCapped(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader()
+  if (!reader) return ''
 
-    req.on('error', () => done(null))
-    req.on('timeout', () => {
-      req.destroy()
-      done(null)
-    })
-  })
+  const decoder = new TextDecoder()
+  let body = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      body += decoder.decode(value, { stream: true })
+      if (body.length > limit) return body.slice(0, limit)
+    }
+  } catch {
+    // Truncated or reset mid-read: whatever arrived still gets parsed, and a
+    // partial body simply fails validation.
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // ignored on purpose
+    }
+  }
+  return body
+}
+
+/** A coarse, aggregatable reason. undici hides the real cause one level down. */
+function failureReason(err: unknown): string {
+  if (err instanceof Error) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') return 'timeout'
+    const cause = (err as { cause?: unknown }).cause
+    const code = (cause as { code?: unknown } | undefined)?.code
+    if (typeof code === 'string') return code
+    return err.name
+  }
+  return 'unknown'
 }
 
 /**
@@ -188,8 +234,16 @@ export interface DiscoverOptions {
   /** This machine's own IPs, used to collapse the loopback/LAN duplicate. */
   selfAddresses?: string[]
   /** Injected for tests. */
-  probe?: (ip: string, timeoutMs: number) => Promise<DiscoveredNest | null>
+  probe?: (
+    ip: string,
+    timeoutMs: number,
+    onError?: (reason: string) => void,
+  ) => Promise<DiscoveredNest | null>
   signal?: AbortSignal
+  /** Called once per sweep with a count of each failure reason seen. A sweep
+   *  that is all `timeout` is being silently dropped; one that is all
+   *  `ECONNREFUSED` reached the hosts and found nothing listening. */
+  onFailureSummary?: (reasons: Record<string, number>) => void
 }
 
 /**
@@ -214,10 +268,17 @@ export async function discoverNests(options: DiscoverOptions = {}): Promise<Disc
     }
   }
 
+  const reasons: Record<string, number> = {}
+  const noteFailure = (reason: string): void => {
+    reasons[reason] = (reasons[reason] ?? 0) + 1
+  }
+
   const found = await mapWithConcurrency(targets, SCAN_CONCURRENCY, async (ip) => {
     if (options.signal?.aborted) return null
-    return probe(ip, timeoutMs)
+    return probe(ip, timeoutMs, noteFailure)
   })
+
+  options.onFailureSummary?.(reasons)
 
   const hits = found.filter((entry): entry is DiscoveredNest => entry !== null)
 

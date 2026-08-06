@@ -22,6 +22,14 @@ import {
   type MeResponse,
   type ModelsResponse,
 } from './types.ts'
+import {
+  DONE_SENTINEL,
+  SseParser,
+  parseStreamChunk,
+  type ParsedChunk,
+  type StreamTimings,
+  type ToolCallDelta,
+} from './streaming.ts'
 
 const DEFAULT_TIMEOUT_MS = 10_000
 
@@ -151,6 +159,172 @@ export class NestClient {
    */
   listMcpServers(signal?: AbortSignal): Promise<McpServersResponse> {
     return this.request<McpServersResponse>('/redstart/mcp-servers', signal ? { signal } : {})
+  }
+
+  // --- Completions ----------------------------------------------------------
+
+  /**
+   * Stream a chat completion, invoking `handlers` as pieces arrive.
+   *
+   * Deliberately NOT routed through `request()`: that helper reads the whole
+   * body as JSON, which is exactly wrong here. The timeout is also different —
+   * a generation legitimately runs for minutes, so only the caller's abort
+   * signal ends it early.
+   *
+   * Two behaviours of the gateway apply and are not worth fighting:
+   *  - it prepends a Redstart system message to whatever we send
+   *  - it strips centrally-banned tool names from `tools` and `tool_choice`
+   */
+  async streamChatCompletion(
+    request: ChatCompletionRequest,
+    handlers: StreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<StreamResult> {
+    const url = `${this.baseUrl}/v1/chat/completions`
+    const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' })
+    if (this.credential) {
+      headers.set('Authorization', `Bearer ${credentialValue(this.credential)}`)
+    }
+
+    let response: Response
+    try {
+      response = await this.doFetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ ...request, stream: true }),
+        ...(signal ? { signal } : {}),
+      })
+    } catch (err) {
+      if (signal?.aborted) throw err
+      const reason = err instanceof Error ? err.message : String(err)
+      throw new NestHttpError(0, `Could not reach the Nest at ${this.baseUrl} (${reason})`, url)
+    }
+
+    if (!response.ok) {
+      throw new NestHttpError(response.status, await describeError(response), url)
+    }
+    if (!response.body) {
+      throw new NestHttpError(0, 'The Nest returned an empty response stream', url)
+    }
+
+    const result: StreamResult = { content: '', reasoning: '', toolCalls: [], aborted: false }
+    const parser = new SseParser()
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    const consume = (payload: string): boolean => {
+      if (payload === DONE_SENTINEL) return true
+      const chunk = parseStreamChunk(payload)
+      if (chunk) apply(chunk, result, handlers)
+      return false
+    }
+
+    try {
+      for (;;) {
+        // Check before every read, not only when the read itself rejects.
+        // `fetch` normally rejects an in-flight read on abort, but that is the
+        // transport's courtesy, not a guarantee we should depend on — a stream
+        // that simply stops producing would otherwise hang the turn forever
+        // with no way for the user to cancel it.
+        if (signal?.aborted) {
+          result.aborted = true
+          break
+        }
+
+        const { done, value } = await reader.read()
+        if (done) break
+
+        let finished = false
+        for (const payload of parser.push(decoder.decode(value, { stream: true }))) {
+          if (consume(payload)) {
+            finished = true
+            break
+          }
+        }
+        if (finished) break
+      }
+      for (const payload of parser.flush()) consume(payload)
+    } catch (err) {
+      // An abort mid-read is a cancellation, not a failure. The partial content
+      // accumulated so far is still real and worth keeping on screen.
+      if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        result.aborted = true
+      } else {
+        throw err
+      }
+    } finally {
+      // Best-effort: releasing a already-errored reader throws, and that must
+      // not mask the real error.
+      try {
+        await reader.cancel()
+      } catch {
+        // ignored on purpose
+      }
+    }
+
+    return result
+  }
+}
+
+/** What we send to /v1/chat/completions. `stream` is set by the client. */
+export interface ChatCompletionRequest {
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool'
+    content: string
+    reasoning_content?: string
+    tool_calls?: unknown[]
+    tool_call_id?: string
+  }>
+  model?: string
+  temperature?: number
+  /** Phase 2. Sending these changes the gateway's injected system context: it
+   *  only claims Nest capabilities when a request actually carries tools. */
+  tools?: unknown[]
+  tool_choice?: unknown
+}
+
+export interface StreamHandlers {
+  onContent?: (text: string) => void
+  onReasoning?: (text: string) => void
+  onModel?: (model: string) => void
+  onTimings?: (timings: StreamTimings) => void
+}
+
+export interface StreamResult {
+  content: string
+  reasoning: string
+  toolCalls: ToolCallDelta[]
+  timings?: StreamTimings
+  model?: string
+  finishReason?: string
+  /** True when the caller cancelled; `content` still holds what arrived. */
+  aborted: boolean
+}
+
+/** Fold one parsed chunk into the accumulating result and notify listeners. */
+function apply(chunk: ParsedChunk, result: StreamResult, handlers: StreamHandlers): void {
+  if (chunk.content) {
+    result.content += chunk.content
+    handlers.onContent?.(chunk.content)
+  }
+  if (chunk.reasoning) {
+    result.reasoning += chunk.reasoning
+    handlers.onReasoning?.(chunk.reasoning)
+  }
+  if (chunk.toolCalls) {
+    result.toolCalls.push(...chunk.toolCalls)
+  }
+  if (chunk.model && !result.model) {
+    result.model = chunk.model
+    handlers.onModel?.(chunk.model)
+  }
+  if (chunk.timings) {
+    // Timings stream repeatedly; the last one is the complete picture.
+    result.timings = chunk.timings
+    handlers.onTimings?.(chunk.timings)
+  }
+  if (chunk.finishReason) {
+    result.finishReason = chunk.finishReason
   }
 }
 

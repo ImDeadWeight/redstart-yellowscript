@@ -62,6 +62,24 @@ export interface ModelsResponse {
 }
 
 /**
+ * A complete, assembled tool call — OpenAI's shape, which is what we send back
+ * in an assistant message's `tool_calls` and what the agent loop executes.
+ *
+ * Distinct from `ToolCallDelta` in streaming.ts: that is a *fragment* arriving
+ * on the wire, indexed and with every field optional, because a call's name and
+ * arguments are streamed across many chunks. This is the finished article, and
+ * it has two possible origins that the loop must treat identically — the
+ * structured `tool_calls` field, and the recovery parser reading a call the
+ * model wrote as plain text. See agent/tool-call-parser.ts for why the second
+ * path is not optional on local models.
+ */
+export interface ToolCall {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+
+/**
  * A credential for the `Authorization: Bearer <value>` header. Nest accepts
  * both kinds on the same header, but they fail differently and so must be
  * told apart:

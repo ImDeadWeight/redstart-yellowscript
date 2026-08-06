@@ -5,12 +5,20 @@
 > (both remain in git history). Keep this file current; don't reintroduce a
 > second planning doc.
 >
-> **Last updated: 2026-08-06.** Phases 0 and 1 complete and demoed live against
-> the Nest. **Phase 2 units 2.5, 2.1 and 2.2 are done**: all six read-only
-> `ws_*` tools exist, are registered, and were verified running in an Extension
-> Development Host. 2.3 (the agent loop) is next and nothing is wired into a
-> turn yet. Typecheck clean on both projects, 357 unit tests passing, both
-> bundles build.
+> **Last updated: 2026-08-06.** Phases 0 and 1 complete and demoed live.
+> **Phase 2 units 2.5, 2.1, 2.2 and 2.3 are done** — six read-only `ws_*` tools,
+> the registry, and the agent loop, wired into `ChatSession` and **verified
+> working against the live Nest**: the model read real files and answered from
+> them at ~46 tok/s. Typecheck clean on both projects, 388 unit tests passing,
+> both bundles build.
+>
+> Remaining in Phase 2: **2.4** (tool cards in the webview — runs currently
+> execute without being individually visible) and **2.6** (system prompt, added
+> after the first live session exposed the model claiming capabilities it does
+> not have — see Phase 2 below; it is a correctness bug, not polish).
+>
+> Beacon discovery was broken from Phase 0 until 2026-08-06 and is now fixed:
+> it used `node:http`, which VSCode patches. See the ground rule in section 9.
 >
 > Wire facts verified against `redstart-nest` @ `52fbf08` on 2026-08-05.
 >
@@ -622,6 +630,64 @@ the host closes itself. `launch.json` therefore opens `sample-workspace/` with
 - **2.4 🟢 Approval-card UI**, reads auto-approved. New message types in
   `protocol.ts` — adding types is the designed extension path; do **not**
   repurpose `turn/delta`.
+
+- **2.6 🟡 System prompt + client identity** — see below. Discovered by running
+  the first live agentic turn, and it is a correctness bug rather than polish.
+
+### 2.6 — the model must not claim capabilities the client does not have
+
+**Observed 2026-08-06, first live agentic session.** Asked what it could do, the
+model answered that it could *"edit files"* and *"create documents — .docx, .pdf
+or .markdown to a local output folder"*. Both are false in Yellowscript: there
+are six read-only tools, no write tool until Phase 3, and no `documents`
+provider until the MCP host lands in 4.2.
+
+The text came from the **gateway's injected system context**. Correction 5 said
+the blurb would appear once a request carries tools; what it did not say is that
+the blurb describes **Nest's** configured capabilities, not the ones the client
+actually forwards. So the model was told it could create documents by a server
+that had no idea the client never offered that tool.
+
+This is the "narrates work it never did" failure arriving from a new direction,
+and the recovery parser cannot catch it: the parser only matches names in the
+tool list, so a `create_document` call is correctly ignored — meaning the model
+says it saved your file and *nothing happens, with no error anywhere*.
+
+**The principle. Whoever knows a capability describes it, and the `tools` array
+already carries the truth.** It is in every request. `buildSystemContext(config,
+hasTools)` takes a boolean; taking the tool *names* instead would let the
+gateway say "you have these tools" rather than "Nest can do these things" — and
+that fixes every client at once, including ones not written yet, with no
+registry to keep in sync.
+
+**Resist the obvious alternative.** Holding a server-side description of what
+Yellowscript is and can do recreates this exact bug one level up: the day Phase
+3 ships write tools, the server's description still says read-only. A static
+capability list maintained away from the thing it describes always drifts.
+
+**Client identity is still worth sending — for environment, not capability.**
+"You are in a VS Code sidebar, the user has an editor and a workspace open, they
+will see a diff before anything is written" changes tone and strategy without
+claiming anything that can go stale. Three constraints:
+
+- **A header** (`X-Redstart-Client: yellowscript/0.0.1`), not text repeated in
+  each message. Per-message identity costs tokens on a 32k budget and puts
+  request metadata in the conversation array, where it is indistinguishable
+  from something the user typed.
+- **A hint, never an authorization.** Any client can claim any name. Fine for
+  shaping a prompt; must never gate a permission or unlock a tool.
+- **Nest ships first** (section 6), and Yellowscript degrades gracefully until
+  it has.
+
+**Interim, no Nest change needed:** Yellowscript sends no system message at all
+today — `buildRequest` emits only user and assistant turns. Adding one that
+states what is actually available corrects the over-claim now, since the gateway
+merges an existing system message rather than adding a second
+(`context + "\n\n" + yours`). Drop it once the gateway derives its blurb from
+the tools array.
+
+This is also where architecture item C.1 begins: the same system message
+eventually carries the workspace tree summary and open-editor context.
 
 ## Phase 3 — write tools, diff review, checkpoints
 

@@ -5,10 +5,21 @@
 > (both remain in git history). Keep this file current; don't reintroduce a
 > second planning doc.
 >
-> **Last updated: 2026-08-06.** Phases 0 and 1 complete. Typecheck clean on both
-> projects, 131 unit tests passing, both bundles build.
+> **Last updated: 2026-08-06.** Phases 0 and 1 complete and demoed live against
+> the Nest. **Phase 2 units 2.5, 2.1 and 2.2 are done**: all six read-only
+> `ws_*` tools exist, are registered, and were verified running in an Extension
+> Development Host. 2.3 (the agent loop) is next and nothing is wired into a
+> turn yet. Typecheck clean on both projects, 357 unit tests passing, both
+> bundles build.
 >
 > Wire facts verified against `redstart-nest` @ `52fbf08` on 2026-08-05.
+>
+> **Correction to section 3: the Nest source IS readable from the laptop.**
+> `c:\github-projects\redstart-project` is checked out here with the Nest inside
+> it at `redstart-project/redstart-nest/`. Treat it as **read-only** — the Nest
+> actually runs on the main PC, so edits to the laptop copy change nothing real.
+> The smoke test is still the only proof of what the live server does, since the
+> checkout can lag it.
 
 ---
 
@@ -491,8 +502,8 @@ settings.json.
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Repo skeleton, connection manager, auth, status bar | **done** `74ba476` |
-| 1 | Sidebar chat with streaming (no tools) | **done** `ee83d7f` |
-| 2 | Read-only `ws_*` tools + agent loop + recovery parser + approval cards | **next** |
+| 1 | Sidebar chat with streaming (no tools) | **done** `ee83d7f`, demoed live |
+| 2 | Read-only `ws_*` tools + agent loop + recovery parser + approval cards | **in progress** — 2.5/2.1/2.2 + registry done; 2.3 next |
 | 3 | Write tools + diff review + checkpoints | |
 | 4 | Terminal tool + Nest-MCP host merge | |
 | 5 | Editor actions, conversation sync, local stdio MCP, modes | |
@@ -521,20 +532,78 @@ recovery parsing the agent silently narrates work it never did, so building the
 loop first means designing it around an assumption that doesn't hold on this
 hardware. Written order:
 
-- **2.5 🟢 Vendor `tool-call-parser.ts` + its unit tests** from
-  `redstart-nest/src/chat-ui/src/lib/utils/` (on the PC — ask for it). The module
-  and tests transplant nearly verbatim; the only edit is the
-  `ApiChatCompletionToolCall` import. Add a provenance header (source repo, path,
-  commit). Wire `parseToolCallsFromTurn(content, reasoningContent, …)` as the
-  fallback path for 2.3.
+- **2.5 ✅ DONE** — `src/agent/tool-call-parser.ts`, vendored from
+  `redstart-project/redstart-nest/src/chat-ui/` @ `a41c9d3` (readable right
+  here — see the correction at the top). `parseToolCallsFromTurn(content,
+  reasoningContent, config)` is what 2.3 must call as its fallback path, and
+  `createApiToolCalls` maps the result onto `ToolCall` in `nest/types.ts`.
+  Behaviour verified identical to the origin over 2496 differential cases.
 
-- **2.1 🟢 `ws_read_file`, `ws_list_directory`, `ws_glob`, `ws_grep`** — one tool
-  per session, each with a containment test transplanted from
-  `test-path-scope.mjs`'s cases. Workspace folders only; reject traversal and
-  symlink escapes.
+  The plan predicted "the only edit is the `ApiChatCompletionToolCall` import".
+  It was not: this repo sets `noUncheckedIndexedAccess`, so every regex capture
+  group needed narrowing, and the vitest assertions were rewritten for
+  `node --test`. **Budget for the same on the vendoring still ahead** (5.4's
+  `mcp-stdio-process.mjs`), and verify non-cosmetic ports differentially rather
+  than trusting the transplanted tests.
 
-- **2.2 🟢 `ws_diagnostics`** (Problems panel → JSON), **`ws_editor_context`**
-  (open files, selection, cursor).
+- **2.1 ✅ DONE** — the containment guard (`src/tools/workspace-path.ts`, 39
+  tests including a 3000-input property fuzz) plus `ws_read_file`,
+  `ws_list_directory`, `ws_glob`, `ws_grep`. Reimplemented rather than vendored:
+  Nest confines to one root, a VSCode workspace can have several, so the
+  invariant is "inside SOME workspace folder".
+
+- **2.2 ✅ DONE** — `ws_diagnostics` and `ws_editor_context`, both taking VSCode
+  state through an injected provider so the logic stays testable with no
+  extension host.
+
+- **Registry + wiring ✅ DONE** — `src/tools/registry.ts` assembles the six,
+  renders the `tools` payload, and executes by name; `src/ui/tool-providers.ts`
+  is the only file translating `vscode` into tool input. Built at activation.
+  **Nothing is sent to the Nest yet** — that is 2.3.
+
+### Facts established while building the tools — do not re-derive these
+
+Each was measured, and each changed the code. They are cheap to break and
+expensive to rediscover.
+
+**Ripgrep is not where the obvious path says.** On VSCode 1.129 it is at
+`<appRoot>/node_modules.asar.unpacked/@vscode/ripgrep-universal/bin/win32-x64/rg.exe`
+— differing from the long-assumed `node_modules/@vscode/ripgrep/bin/rg` in four
+ways at once, with `appRoot` itself commit-hashed. `locateRipgrep` probes every
+known layout; never hardcode it. Confirmed resolving at runtime through
+`vscode.env.appRoot` in a development host.
+
+**`workspace.findFiles` does not respect `.gitignore`.** Its own docs apply
+`files.exclude` "but not `search.exclude`", ignore files unmentioned. That is
+why both search tools go through ripgrep instead — a glob that lists
+`node_modules` and a grep that skips it would be an incoherent pair.
+
+**Ripgrep needs `--no-require-git`.** By default it applies `.gitignore` only
+inside a git repository, so a workspace folder that is not a checkout silently
+returns every ignored file.
+
+**A command-line `--glob` OUTRANKS `.gitignore` in ripgrep's precedence.** An
+inclusive `-g '**/*.ts'` re-admits ignored files — every `.d.ts` under
+`node_modules` — which is exactly the context flood the engine was chosen to
+prevent. `ws_glob` therefore lists files unfiltered and matches client-side;
+`ws_grep` passes its filter as a `--type`, which scopes without touching the
+ignore rules. A regression test pins this, because reverting to `--glob` looks
+like a simplification.
+
+**Ripgrep is a safety choice, not a speed one.** `ws_grep`'s pattern comes from
+the model, which can be influenced by file content it just read. A
+catastrophically-backtracking JS `RegExp` runs synchronously on the extension
+host event loop: no timeout stops it, nothing aborts it, VSCode freezes. Rust's
+regex is linear by construction and runs in a killable child process. This is
+why the no-ripgrep fallback is deliberately **literal-substring only** — a
+JS-regex fallback would reintroduce the hazard.
+
+**F5 opens no folder unless told to, and VSCode will not open one folder in two
+windows.** Both cost real time. With no folder open every `ws_*` tool refuses
+correctly and the extension looks broken; and pointing the development host at
+this repo makes it hand focus to the ordinary window that already has it, so
+the host closes itself. `launch.json` therefore opens `sample-workspace/` with
+`--new-window` — see that folder's README.
 
 - **2.3 🟡 `AgentLoop` core** — stream → detect `tool_calls` → execute → append →
   loop, with turn cap, abort, error surfacing. The architectural spine; design it
@@ -542,6 +611,13 @@ hardware. Written order:
   `streamChatCompletion` call in `ChatSession.send` — the seam was left
   deliberately, so transcript handling, abort, and error reporting all stay as
   they are.
+
+  Everything it needs now exists behind one interface: `createToolRegistry(…)`
+  gives `payload()` for the request and `execute(name, rawArgs, ctx)` for the
+  result, and `parseToolCallsFromTurn` is the fallback for a turn that produced
+  no structured `tool_calls`. Two things to remember when wiring it: sending any
+  tools changes the system context the gateway injects (correction 5), and a
+  tool result must carry the `tool_call_id` it answers.
 
 - **2.4 🟢 Approval-card UI**, reads auto-approved. New message types in
   `protocol.ts` — adding types is the designed extension path; do **not**

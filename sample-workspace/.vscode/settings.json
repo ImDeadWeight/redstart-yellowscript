@@ -1,0 +1,10 @@
+{
+  // Deliberately empty.
+  //
+  // This is the workspace F5 opens, and leaving `redstartYellowscript.serverUrl`
+  // UNSET is what exercises beacon discovery — setting it skips the network scan
+  // entirely, which is exactly the path that needs testing here.
+  //
+  // "Yellowscript: Enter URL…" writes the value into this file, so if discovery
+  // stops being exercised, look here first.
+}

@@ -18,6 +18,7 @@ import {
   describeState,
   type ConnectionState,
 } from './connection.ts'
+import { localAddresses, localSubnets, type DiscoveredNest } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
 import type { SessionSnapshot } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl } from './nest/client.ts'
@@ -52,7 +53,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     credentials: new SecretCredentialStore(context.secrets),
     state: new WorkspaceStateStore(context.workspaceState),
     createClient: (baseUrl) => new NestClient(baseUrl),
-    discover: createDiscovery(() => config().get<number>('discovery.timeoutMs', 400)),
+    discover: loggedDiscovery(),
   })
 
   // The ws_* tools. Built at activation so a missing ripgrep is a known,
@@ -159,6 +160,54 @@ export function deactivate(): void {
   session = undefined
   chatView = undefined
   manager = undefined
+}
+
+/**
+ * The network sweep, with enough logging to diagnose a miss.
+ *
+ * "No Nest found on this network" is the least actionable message the extension
+ * can produce, and the causes are all invisible from the outside: the machine's
+ * own subnets were not what you assumed, a VPN or virtual adapter crowded the
+ * real LAN out of the scan, or the probes went out and nothing answered. The
+ * scan reports which of those happened rather than leaving the user to guess.
+ *
+ * The interface list is logged because it is the fact that actually decides the
+ * outcome — `localSubnets` derives a /24 from each of this machine's addresses
+ * and keeps only the first few, so a laptop with Docker, WSL and a VPN can push
+ * the real network off the end of the list.
+ */
+function loggedDiscovery(): () => Promise<DiscoveredNest[]> {
+  const scan = createDiscovery(() => config().get<number>('discovery.timeoutMs', 400))
+
+  return async () => {
+    const timeoutMs = config().get<number>('discovery.timeoutMs', 400)
+    const addresses = localAddresses()
+    const subnets = localSubnets()
+
+    output?.info(
+      `discovery: own addresses [${addresses.join(', ')}] -> scanning ${subnets.length} subnet(s) ` +
+        `[${subnets.map((s) => `${s}.1-254`).join(', ')}] at ${timeoutMs}ms per host`,
+    )
+
+    const startedAt = Date.now()
+    const found = await scan()
+    const elapsed = Date.now() - startedAt
+
+    if (found.length === 0) {
+      output?.warn(
+        `discovery: nothing answered on ${subnets.join(', ')} after ${elapsed}ms. ` +
+          `If the Nest is on one of those subnets and reachable, the probes are being blocked ` +
+          `(firewall, VPN, or AP client isolation); set redstartYellowscript.serverUrl instead.`,
+      )
+    } else {
+      output?.info(
+        `discovery: found ${found.length} in ${elapsed}ms — ` +
+          found.map((nest) => `${nest.url} (running=${nest.running})`).join(', '),
+      )
+    }
+
+    return found
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +397,10 @@ async function showStatusCommand(): Promise<void> {
   const actions: string[] = []
   if (state.status === 'connected') actions.push('Sign Out', 'Disconnect')
   if (state.status === 'unauthenticated') actions.push('Sign In')
-  if (state.status === 'error' || state.status === 'disconnected') actions.push('Connect', 'Enter URL…')
+  if (state.status === 'error' || state.status === 'disconnected') actions.push('Connect')
+  // Always offered: it is the only route to changing or clearing a saved URL,
+  // and needing it while connected is the common case.
+  actions.push('Enter URL…')
 
   const choice = await vscode.window.showInformationMessage(message, ...actions)
   switch (choice) {
@@ -430,11 +482,14 @@ async function inspectToolsCommand(): Promise<void> {
 async function promptForServerUrl(): Promise<void> {
   const entered = await vscode.window.showInputBox({
     title: 'Redstart Nest URL',
-    prompt: 'Gateway address, e.g. 192.168.1.20:19080',
+    prompt: 'Gateway address, e.g. 192.168.1.20:19080. Clear the box to go back to automatic discovery.',
     value: config().get<string>('serverUrl', ''),
     ignoreFocusOut: true,
     validateInput: (value) => {
-      if (!value.trim()) return 'Enter a host and port.'
+      // An empty box is a real choice, not a mistake: it is the only way back
+      // to discovery once a URL has been saved. Rejecting it left users editing
+      // .vscode/settings.json by hand to undo a decision they made in a dialog.
+      if (!value.trim()) return null
       try {
         new URL(normalizeBaseUrl(value))
         return null
@@ -443,7 +498,17 @@ async function promptForServerUrl(): Promise<void> {
       }
     },
   })
-  if (!entered) return
+  // Dismissed, as opposed to deliberately emptied.
+  if (entered === undefined) return
+
+  if (entered.trim() === '') {
+    // `undefined` removes the key rather than storing "", which would still
+    // count as an explicit override and keep discovery switched off.
+    await config().update('serverUrl', undefined, vscode.ConfigurationTarget.Workspace)
+    vscode.window.setStatusBarMessage('$(search) Yellowscript will discover the Nest automatically', 4000)
+    await manager?.connect({})
+    return
+  }
 
   const url = normalizeBaseUrl(entered)
   await config().update('serverUrl', url, vscode.ConfigurationTarget.Workspace)

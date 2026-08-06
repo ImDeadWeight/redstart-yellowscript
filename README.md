@@ -6,8 +6,8 @@ login, and (from Phase 2) workspace-aware tools the model can drive.
 
 > **Status: Phase 1.** Connect to a Nest, sign in, and hold a streaming
 > conversation in the sidebar. No tools or agent loop yet — that is Phase 2.
-> See [docs/PLAN.md](docs/PLAN.md) for the roadmap and
-> [docs/STATE.md](docs/STATE.md) for where work stands.
+> **[docs/HANDOFF.md](docs/HANDOFF.md) is the single planning document** — state,
+> roadmap, ground rules, and the Nest wire reference. Read it before starting.
 
 ## Why not just point Kilo Code at the Nest?
 

@@ -66,7 +66,12 @@ export class ChatSession {
   reset(): void {
     this.abort()
     this.messages = []
-    this.deps.emit({ type: 'conversation', messages: this.messages })
+    this.deps.emit({ type: 'conversation', messages: [] })
+  }
+
+  /** A snapshot of the transcript, safe to hand across the webview boundary. */
+  snapshot(): ChatMessageView[] {
+    return this.messages.map((message) => ({ ...message }))
   }
 
   /** Stop the running turn. Whatever streamed so far stays on screen — the user
@@ -104,11 +109,16 @@ export class ChatSession {
 
     const userMessage: ChatMessageView = { id: this.nextId(), role: 'user', content: prompt }
     this.messages.push(userMessage)
-    this.deps.emit({ type: 'message', message: userMessage })
+    this.deps.emit({ type: 'message', message: { ...userMessage } })
 
     const turn: ChatMessageView = { id: this.nextId(), role: 'assistant', content: '', streaming: true }
     this.messages.push(turn)
-    this.deps.emit({ type: 'message', message: turn })
+    // Emit a copy. `turn` keeps mutating as the stream arrives, and a protocol
+    // message is meant to be a snapshot of one moment — handing out the live
+    // object makes "what did we send?" unanswerable for any in-process consumer
+    // (tests, logging, a future transcript recorder). postMessage would clone it
+    // anyway; this makes the guarantee true on both sides of the boundary.
+    this.deps.emit({ type: 'message', message: { ...turn } })
 
     const controller = new AbortController()
     this.controller = controller
@@ -134,6 +144,16 @@ export class ChatSession {
 
       turn.streaming = false
       turn.aborted = result.aborted
+
+      // Take the final text from the RESULT, not from what the delta handlers
+      // happened to accumulate. The client already assembled the authoritative
+      // string, and re-deriving it here duplicates that job for no gain — the
+      // deltas exist to paint the screen as text arrives, not to be the record.
+      // This also matters from Phase 2 on, where recovering a malformed tool
+      // call operates on the complete text rather than on any single chunk.
+      turn.content = result.content
+      if (result.reasoning) turn.reasoning = result.reasoning
+
       const stats = buildStats(result.timings, result.finishReason)
       if (stats) turn.stats = stats
 

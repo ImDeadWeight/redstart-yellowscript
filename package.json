@@ -21,7 +21,40 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "redstartYellowscript",
+          "title": "Yellowscript",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "redstartYellowscript": [
+        {
+          "type": "webview",
+          "id": "redstartYellowscript.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "redstartYellowscript.newChat",
+          "when": "view == redstartYellowscript.chat",
+          "group": "navigation"
+        }
+      ]
+    },
     "commands": [
+      {
+        "command": "redstartYellowscript.newChat",
+        "title": "New Chat",
+        "category": "Yellowscript",
+        "icon": "$(add)"
+      },
       {
         "command": "redstartYellowscript.connect",
         "title": "Connect to Nest",
@@ -79,7 +112,7 @@
   "scripts": {
     "build": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
     "test": "node --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke.mjs",
     "check": "npm run typecheck && npm run test",

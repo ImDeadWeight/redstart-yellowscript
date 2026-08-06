@@ -1,0 +1,21 @@
+{
+  // The webview is a browser context and is typechecked as one.
+  //
+  // It gets its own project rather than adding "DOM" to the root config,
+  // because the root config covers the extension host — where `document` and
+  // `window` do not exist at runtime. Widening the root lib would let a typo
+  // reach for a browser global in host code and typecheck cleanly, failing only
+  // once a user hit that path. Two projects means each side can only use what it
+  // actually has.
+  //
+  // `types: []` for the same reason in reverse: no Node globals here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  // `exclude` is inherited from the base config (which excludes this very file),
+  // so it has to be cleared here.
+  "include": ["src/webview/main.ts"],
+  "exclude": []
+}

@@ -1,12 +1,12 @@
 // =============================================================================
 // Redstart Yellowscript — extension entry point.
 // =============================================================================
-// Phase 0: find a Nest, prove who we are, show it in the status bar. No chat,
-// no tools yet — those are Phases 1 and 2.
+// Phase 1: find a Nest, prove who we are, and hold a streaming conversation with
+// it in the sidebar. No tools yet — that is Phase 2.
 //
-// This file is the only place that knows about both `vscode` and the connection
-// machinery. Everything below it (connection, discovery, client) is plain Node
-// and unit-tested without an extension host, which is what keeps `npm test`
+// This file is the only place that knows about both `vscode` and the domain
+// machinery. Everything below it (connection, discovery, client, chat) is plain
+// Node and unit-tested without an extension host, which is what keeps `npm test`
 // dependency-free and fast.
 // =============================================================================
 
@@ -18,15 +18,20 @@ import {
   describeState,
   type ConnectionState,
 } from './connection.ts'
+import { ChatSession } from './chat/session.ts'
+import type { SessionSnapshot } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
+import { ChatViewProvider } from './ui/chat-view.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
 let manager: ConnectionManager | undefined
 let statusBar: StatusBar | undefined
 let output: vscode.LogOutputChannel | undefined
+let session: ChatSession | undefined
+let chatView: ChatViewProvider | undefined
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
@@ -39,15 +44,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     discover: createDiscovery(() => config().get<number>('discovery.timeoutMs', 400)),
   })
 
+  session = new ChatSession({
+    getClient: () => manager?.activeClient ?? null,
+    onUnauthorized: () => manager?.handleUnauthorized(),
+    emit: (message) => {
+      chatView?.post(message)
+      // The status bar shows the generation rate of the most recent turn — the
+      // number that tells you at a glance whether the Nest is healthy.
+      if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
+        statusBar?.setModel(session?.currentModel ?? null, message.stats.tokensPerSecond)
+      }
+    },
+  })
+
+  chatView = new ChatViewProvider(context.extensionUri, {
+    onSend: (text) => {
+      const finished = session?.send(text)
+      // `send` marks itself busy synchronously before its first await, so this
+      // observes busy=true and the webview can swap Send for Stop immediately
+      // rather than after the whole turn.
+      pushSession()
+      void finished?.then(pushSession)
+    },
+    onAbort: () => {
+      session?.abort()
+      pushSession()
+    },
+    onNewConversation: () => {
+      session?.reset()
+      pushSession()
+    },
+    onRunCommand: (command) => {
+      void vscode.commands.executeCommand(`redstartYellowscript.${command}`)
+    },
+    // Fires on first open AND every time VSCode rebuilds a view it destroyed
+    // while hidden — so this must be a complete handoff, not a delta.
+    onReady: () => {
+      chatView?.sendInit(snapshot(), session?.snapshot() ?? [])
+    },
+  })
+
   context.subscriptions.push(
     output,
     statusBar,
     manager.onDidChangeState(onStateChanged),
+    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatView, {
+      // Keep the transcript alive when the panel is hidden. Without this the
+      // webview is torn down and the user loses their place in the conversation
+      // every time they switch to the file explorer.
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.commands.registerCommand('redstartYellowscript.connect', connectCommand),
     vscode.commands.registerCommand('redstartYellowscript.disconnect', disconnectCommand),
     vscode.commands.registerCommand('redstartYellowscript.signIn', signInCommand),
     vscode.commands.registerCommand('redstartYellowscript.signOut', signOutCommand),
     vscode.commands.registerCommand('redstartYellowscript.showStatus', showStatusCommand),
+    vscode.commands.registerCommand('redstartYellowscript.newChat', newChatCommand),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
@@ -62,7 +114,70 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 export function deactivate(): void {
   statusBar?.dispose()
   statusBar = undefined
+  session?.abort()
+  session = undefined
+  chatView = undefined
   manager = undefined
+}
+
+// ---------------------------------------------------------------------------
+// Session snapshot — the projection the webview renders around the transcript
+// ---------------------------------------------------------------------------
+
+function snapshot(): SessionSnapshot {
+  const state = manager?.state ?? { status: 'disconnected' as const }
+  const busy = session?.busy === true
+  const connected = state.status === 'connected'
+
+  const base: SessionSnapshot = {
+    connection: state.status,
+    detail: describeState(state),
+    // Sending needs a connection AND no turn already running.
+    canSend: connected && !busy,
+    busy,
+  }
+  if ('url' in state && state.url) base.serverUrl = state.url
+  const model = session?.currentModel
+  if (model) base.model = model
+  return base
+}
+
+function pushSession(): void {
+  chatView?.post({ type: 'session', session: snapshot() })
+}
+
+// ---------------------------------------------------------------------------
+// Model discovery — fills the status bar with what is actually loaded
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask the Nest what model is loaded.
+ *
+ * A 502 here is not an error worth shouting about: it means the gateway is up
+ * but no model is running, which the status bar already conveys. Anything else
+ * goes to the log and nowhere else — the user asked to connect, not to hear
+ * about /v1/models.
+ */
+async function refreshModel(): Promise<void> {
+  const client = manager?.activeClient
+  if (!client) return
+
+  try {
+    const models = await client.listModels()
+    const id = models.data[0]?.id
+    if (id) {
+      statusBar?.setModel(id)
+      pushSession()
+    }
+  } catch (err) {
+    output?.debug(`Could not list models: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+async function newChatCommand(): Promise<void> {
+  session?.reset()
+  pushSession()
+  await chatView?.reveal()
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +364,13 @@ function explicitUrl(): { url?: string } {
 
 function onStateChanged(state: ConnectionState): void {
   statusBar?.update(state)
+  pushSession()
+
   // The credential never reaches the log — only the state name and the server.
   const target = 'url' in state && state.url ? ` (${state.url})` : ''
   output?.info(`connection: ${state.status}${target}`)
+
+  // Re-ask on every (re)connect rather than caching: the Nest operator can swap
+  // the loaded model without the connection ever dropping.
+  if (state.status === 'connected') void refreshModel()
 }

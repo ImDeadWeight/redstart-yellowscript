@@ -4,9 +4,10 @@ A VSCode coding agent that talks to a **local Redstart Nest** — the private,
 on-premises AI server — instead of a cloud. Zero-config discovery, Redstart
 login, and (from Phase 2) workspace-aware tools the model can drive.
 
-> **Status: Phase 0.** Connection, authentication, and the status bar work
-> end to end. There is no chat UI or agent loop yet — those are Phases 1 and 2.
-> See [docs/PLAN.md](docs/PLAN.md) for the full roadmap.
+> **Status: Phase 1.** Connect to a Nest, sign in, and hold a streaming
+> conversation in the sidebar. No tools or agent loop yet — that is Phase 2.
+> See [docs/PLAN.md](docs/PLAN.md) for the roadmap and
+> [docs/STATE.md](docs/STATE.md) for where work stands.
 
 ## Why not just point Kilo Code at the Nest?
 
@@ -42,6 +43,7 @@ Nest running on your network, that is all the configuration there is.
 
 | Command | What it does |
 |---|---|
+| `Yellowscript: New Chat` | Clear the transcript and focus the panel |
 | `Yellowscript: Connect to Nest` | Discover (or use the configured URL) and connect |
 | `Yellowscript: Sign In to Nest` | Username/password, or paste an `rst_` API key |
 | `Yellowscript: Sign Out` | Forget the stored credential, keep the server |
@@ -69,14 +71,24 @@ npm run package    # check + build + vsce package
 ```
 
 Tests run through Node's **native TypeScript stripping**, which is why the core
-modules (`connection.ts`, `nest/*`) import no `vscode` API — they are plain Node
-and testable without an extension host. Keep that boundary: `vscode` imports
-belong in `extension.ts`, `storage.ts`, and `ui/`.
+modules (`connection.ts`, `nest/*`, `chat/*`) import no `vscode` API — they are
+plain Node and testable without an extension host. Keep that boundary: `vscode`
+imports belong in `extension.ts`, `storage.ts`, and `ui/`.
 
-One consequence worth knowing: type stripping erases types but does not
-*transform* code, so **TypeScript parameter properties
-(`constructor(private readonly x: T)`) are not usable** anywhere under `src/`.
-Declare the field and assign it.
+Two consequences worth knowing:
+
+- Type stripping erases types but does not *transform* code, so **TypeScript
+  parameter properties (`constructor(private readonly x: T)`) are not usable**
+  anywhere under `src/`. Declare the field and assign it.
+- There are **two TypeScript projects**. `tsconfig.json` covers the extension
+  host (Node types, no DOM); `tsconfig.webview.json` covers the webview entry
+  (DOM, no Node types). Widening one lib to cover both would let host code reach
+  for `document` and still typecheck. `npm run typecheck` runs both.
+
+The webview is treated as a hostile document, because it renders model output:
+strict nonce-based CSP, no external origins, `localResourceRoots` limited to our
+own folders, and a markdown renderer that escapes its input before applying any
+rule. If you add a rendering rule, add it **after** the escape.
 
 ### Verifying against a live Nest
 

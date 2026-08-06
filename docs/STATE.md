@@ -1,67 +1,57 @@
 # Where we left off
 
-**Last updated: 2026-08-05, end of session.**
-Repo state: typecheck clean, 71 unit tests passing, Phase 1 work **uncommitted**
-on `main` (Phase 0 is committed as `74ba476`).
+**Last updated: 2026-08-06.**
+Repo state: typecheck clean (both projects), **131 unit tests passing**, both
+bundles build. Phase 1 complete and committed.
 
 ---
 
 ## Done
 
-### Phase 0 — committed (`74ba476`)
-Connection, authentication, status bar. Working end to end.
+### Phase 0 — `74ba476`
+Connection, authentication, status bar.
 
-### Phase 1 — in progress, uncommitted
+### Phase 1 — complete
+Streaming chat in the sidebar, end to end.
 
-| Unit | Status | Files |
-|---|---|---|
-| 1.1 message contract | **done** | `src/chat/protocol.ts` |
-| 1.2 SSE streaming | **done** | `src/nest/streaming.ts`, `streamChatCompletion` in `src/nest/client.ts`, `src/nest/streaming.test.ts` (28 tests) |
-| ChatSession | **done, untested** | `src/chat/session.ts` |
-| 1.3 webview UI | **not started** | — |
-| 1.4 models + timings → status bar | **partial** | `StatusBar.setModel()` exists from Phase 0 but nothing calls it |
-
-Uncommitted files: `src/chat/` (new), `src/nest/streaming.ts`, `src/nest/streaming.test.ts`,
-modified `src/nest/client.ts` and `package.json`.
+| Unit | Files |
+|---|---|
+| 1.1 message contract | `src/chat/protocol.ts` |
+| 1.2 SSE streaming + abort + reasoning channel | `src/nest/streaming.ts`, `streamChatCompletion` in `src/nest/client.ts` |
+| 1.3 webview chat UI | `src/webview/main.ts`, `src/webview/markdown.ts`, `src/ui/chat-view.ts`, `media/chat.css` |
+| 1.4 models + timings → status bar | `refreshModel()` and the emit hook in `src/extension.ts` |
+| session/transcript | `src/chat/session.ts` |
 
 ---
 
-## Pick up here
+## Next: Phase 2 — read-only tools and the agent loop
 
-**1. Write `src/chat/session.test.ts`.** `ChatSession` is the only module with no
-tests, and it was written to be testable — inject a fake `getClient` returning a
-stub `streamChatCompletion`, capture `emit` calls, assert the message sequence.
-Cases worth pinning, all of which are deliberate behaviour in the code:
+Per `docs/PLAN.md`. Suggested order:
 
-- an aborted turn keeps its partial content and is still sent as context next turn
-- a **failed** turn is excluded from the next request (replaying an error back to
-  the model as its own words teaches it to imitate the failure)
-- an empty response is reported as an error, not as a successful blank turn
-- a 401 mid-turn calls `onUnauthorized` exactly once
-- `send()` while busy emits a notice rather than starting a second turn
-- `send()` never rejects, whatever the client throws
+1. **2.5 first, not last.** Vendor `tool-call-parser.ts` and its tests from
+   `redstart-project/redstart-nest/src/chat-ui/src/lib/utils/`. It is the thing
+   that makes the agent loop survive a local model, and having it in place before
+   the loop exists means the loop can be written against it rather than retrofitted.
+   Add a provenance header (source repo, path, commit).
+2. **2.1 / 2.2 the `ws_*` tools** — `ws_read_file`, `ws_list_directory`,
+   `ws_glob`, `ws_grep`, `ws_diagnostics`, `ws_editor_context`. One per session,
+   each with a containment test. **The `ws_` prefix is mandatory** — see the
+   collision note below.
+3. **2.3 the agent loop.** Replace the single `streamChatCompletion` call in
+   `ChatSession.send`. The seam was left deliberately: transcript handling,
+   abort, and error reporting all stay as they are.
+4. **2.4 approval cards** — new message types in `protocol.ts`. Adding types is
+   the designed extension path; do not repurpose `turn/delta`.
 
-**2. Build the webview (1.3).** Nothing exists yet. Needs:
+### The tool-name collision (read before naming anything)
 
-- `src/webview/main.ts` — the renderer. Consumes `HostMessage`, posts
-  `WebviewMessage`. Both types are already defined and shared.
-- `src/webview/markdown.ts` + tests — a small, deliberately limited renderer:
-  escape HTML **first**, then apply transforms to the escaped text, so it is
-  XSS-safe by construction. Allow `http`/`https` links only (never `javascript:`).
-  Fenced code blocks, inline code, bold/italic, headings, lists, links,
-  paragraphs is enough for Phase 1.
-- `media/chat.css` — use VSCode theme variables (`--vscode-*`) so it matches the
-  user's theme for free.
-- `src/ui/chat-view.ts` — a `WebviewViewProvider` that owns the HTML shell with a
-  strict nonce-based CSP (no external resources of any kind).
-- `package.json` — add `contributes.viewsContainers.activitybar` + `views`.
-- `esbuild.mjs` — add a second entry point for the webview bundle. Note it must
-  be **iife/browser**, not the cjs/node config the extension entry uses.
-
-**3. Wire it up (1.4).** In `extension.ts`: construct `ChatSession`, connect it to
-the `ConnectionManager`, forward `session`/`conversation` snapshots to the view,
-call `client.listModels()` on connect and push the name into
-`StatusBar.setModel()`, and feed `tokensPerSecond` from each turn's timings.
+Nest's File System capability is the official
+`@modelcontextprotocol/server-filesystem`, which advertises `read_file`,
+`write_file`, `edit_file`, `list_directory`, `search_files`, `directory_tree`
+and more. Six of those clash with the obvious names for IDE-local tools, and a
+clash is silent and dangerous: the model asks for `write_file` meaning the
+workspace and gets the Nest's configured root instead. Hence `ws_*` on every
+local tool, plus a disjointness assertion when the two sets merge in Phase 4.
 
 ---
 
@@ -69,29 +59,46 @@ call `client.listModels()` on connect and push the name into
 
 **TypeScript parameter properties are unusable under `src/`.** Tests run through
 Node's native type stripping, which erases types but does not transform code —
-`constructor(private readonly x: T)` is a syntax error at runtime, though `tsc`
-accepts it happily. Declare the field, assign it in the body. This has already
-bitten three constructors.
+`constructor(private readonly x: T)` is a runtime syntax error though `tsc`
+accepts it. Declare the field, assign it in the body.
 
 **`exactOptionalPropertyTypes` is on.** `obj.optional = maybeUndefined` does not
 compile. Assign conditionally, or spread: `...(x ? { x } : {})`.
 
-**Always pass `--test-timeout`.** A test that hangs will otherwise block for the
-full harness timeout. `npm test` sets 10s.
+**There are two TypeScript projects.** `tsconfig.json` covers the extension host
+(Node types, no DOM); `tsconfig.webview.json` covers `src/webview/main.ts`
+(DOM, no Node types). This is deliberate — a single widened lib would let host
+code reach for `document` and still typecheck. `npm run typecheck` runs both.
+If you add a webview-only file, add it to the webview project's `include`.
+
+**Don't write invisible characters into source.** The markdown renderer's
+placeholder sentinel is built with `String.fromCharCode(0xe000)` because a
+literal private-use character silently vanished twice through the editor/write
+path.
+
+**Always pass `--test-timeout`.** `npm test` sets 10s. A hung test otherwise
+blocks for the full harness timeout.
 
 **Don't assume `fetch` aborts an in-flight read.** The streaming loop re-checks
 `signal.aborted` before every `read()`. A stream that simply stops producing
-would otherwise hang a turn forever with no way to cancel — and that is exactly
-what surfaced when the fake stream in the tests didn't honour the signal.
+would otherwise hang a turn forever with no way to cancel.
+
+**Emit copies, not live objects.** `ChatSession` mutates a turn as it streams;
+protocol messages are snapshots. Emitting the live object made "what did we
+send?" unanswerable and broke a test in a genuinely confusing way.
+
+**Block-level markdown rules run on ESCAPED text.** `>` has already become
+`&gt;` by the time `renderBlocks` sees it. Any new block rule matching a special
+character needs the entity, not the raw character.
 
 ---
 
-## Verified Nest wire facts used by this code
+## Verified Nest wire facts this code depends on
 
 Confirmed by reading `redstart-nest` @ `52fbf08`, not assumed:
 
 - Timings arrive at the **chunk top level** (`chunk.timings`), not inside
-  `choices`. They stream repeatedly; the last one wins.
+  `choices`. They stream repeatedly; the last wins.
 - Fields are `predicted_n` / `predicted_ms` / `prompt_n` / `prompt_ms` /
   `cache_n`. `predicted_per_second` may also be present — prefer it, fall back to
   computing, and return null rather than Infinity when `predicted_ms` is 0.
@@ -100,11 +107,12 @@ Confirmed by reading `redstart-nest` @ `52fbf08`, not assumed:
 - `data: [DONE]` terminates the stream.
 - A request carrying **no** `tools` makes the gateway omit its capability claims
   from the injected system prompt. Phase 1 sends no tools, so this is correct —
-  do not "fix" it before Phase 2.
+  it stops being correct the moment Phase 2 adds them, which is the point.
+- The gateway prepends its own system message to whatever we send. Budget for it.
 
 ---
 
-## Still outstanding from Phase 0
+## Still outstanding
 
 **0.5 — the manual smoke test has never been run.** It needs a real Nest:
 
@@ -113,5 +121,6 @@ YELLOWSCRIPT_TEST_LIVE_NEST=http://<ip>:19080 YELLOWSCRIPT_TEST_TOKEN=rst_... np
 ```
 
 This is the only thing in this repo that will notice if the Nest's wire format
-drifts — we do not run `redstart-project`'s boundary suite. Worth doing before
-building more on top of assumptions.
+drifts — we do not run `redstart-project`'s boundary suite. **Phase 1 has also
+never been run against a live Nest**, only against scripted streams in tests.
+Worth doing both before building Phase 2 on top.

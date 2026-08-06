@@ -22,5 +22,10 @@
     "skipLibCheck": true,
     "types": ["node", "vscode"]
   },
-  "include": ["src/**/*.ts", "esbuild.mjs"]
+  // The webview entry is excluded and typechecked by tsconfig.webview.json
+  // instead — it is a browser context and needs a different lib/types set.
+  // Everything else it imports (markdown.ts, chat/protocol.ts) is
+  // environment-agnostic and is checked by both projects.
+  "include": ["src/**/*.ts", "esbuild.mjs"],
+  "exclude": ["src/webview/main.ts"]
 }

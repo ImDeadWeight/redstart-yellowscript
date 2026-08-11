@@ -250,20 +250,12 @@ function renderConversationList(list: ConversationView[], activeId: string | nul
     tabStrip.appendChild(tab)
   }
 
-  const historyButton = document.createElement('button')
-  historyButton.className = 'tab tab-history'
-  historyButton.textContent = '🕒'
-  historyButton.title = 'Conversation history'
-  historyButton.addEventListener('click', () => {
-    historyOpen = !historyOpen
-    historyButton.classList.toggle('active', historyOpen)
-    if (historyOpen) {
-      post({ type: 'openHistory' })
-    } else {
-      historyPanel.hidden = true
-    }
-  })
-  tabStrip.appendChild(historyButton)
+  const addButton = document.createElement('button')
+  addButton.className = 'tab tab-add'
+  addButton.textContent = '+'
+  addButton.title = 'New conversation'
+  addButton.addEventListener('click', () => post({ type: 'createConversation' }))
+  tabStrip.appendChild(addButton)
 }
 
 function showNotice(level: 'info' | 'warning' | 'error', text: string): void {
@@ -360,9 +352,8 @@ function renderHistoryList(items: readonly { id: string; title: string; lastAcce
 document.addEventListener('click', (event) => {
   if (!historyOpen) return
   const target = event.target as HTMLElement
-  if (historyPanel.contains(target) || target.closest('.tab-history')) return
+  if (historyPanel.contains(target)) return
   historyOpen = false
-  document.querySelector('.tab-history')?.classList.remove('active')
   historyPanel.hidden = true
 })
 
@@ -466,6 +457,11 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
     case 'historyList':
       renderHistoryList(message.conversations)
       historyPanel.hidden = !historyOpen
+      break
+    case 'showHistoryPanel':
+      renderHistoryList(message.conversations)
+      historyOpen = true
+      historyPanel.hidden = false
       break
   }
 })

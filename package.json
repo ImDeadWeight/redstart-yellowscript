@@ -42,7 +42,7 @@
     "menus": {
       "view/title": [
         {
-          "command": "redstartYellowscript.newChat",
+          "command": "redstartYellowscript.openHistory",
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
         },
@@ -65,6 +65,12 @@
         "title": "Open Settings",
         "category": "Yellowscript",
         "icon": "$(settings)"
+      },
+      {
+        "command": "redstartYellowscript.openHistory",
+        "title": "Open History",
+        "category": "Yellowscript",
+        "icon": "$(history)"
       },
       {
         "command": "redstartYellowscript.connect",

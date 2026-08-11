@@ -198,6 +198,17 @@ export type HostMessage =
           messageCount: number
         }[]
       }
+    /** Tells the webview to open (and populate) the history panel. Sent by the
+     *  extension when the user clicks the view-title history button. */
+    | {
+        type: 'showHistoryPanel'
+        conversations: readonly {
+          id: string
+          title: string
+          lastAccessedAt: number
+          messageCount: number
+        }[]
+      }
 
 // ---------------------------------------------------------------------------
 // Guards

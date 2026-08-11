@@ -253,7 +253,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     },
     onOpenHistory: () => {
-      pushHistory()
+      pushHistoryPanel()
     },
     onSearchHistory: (query) => {
       const results = currentAccountId
@@ -317,6 +317,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.showStatus', showStatusCommand),
     vscode.commands.registerCommand('redstartYellowscript.newChat', newChatCommand),
     vscode.commands.registerCommand('redstartYellowscript.openSettings', openSettingsCommand),
+    vscode.commands.registerCommand('redstartYellowscript.openHistory', openHistoryCommand),
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
   )
@@ -623,6 +624,22 @@ async function newChatCommand(): Promise<void> {
 
 async function openSettingsCommand(): Promise<void> {
   await vscode.commands.executeCommand('workbench.action.openSettings', 'redstartYellowscript')
+}
+
+function openHistoryCommand(): void {
+  pushHistoryPanel()
+}
+
+function pushHistoryPanel(): void {
+  const items = currentAccountId
+    ? conversations.list(currentAccountId).map((c) => ({
+        id: c.id,
+        title: c.title,
+        lastAccessedAt: c.lastAccessedAt,
+        messageCount: c.messages.length,
+      }))
+    : []
+  chatView?.post({ type: 'showHistoryPanel', conversations: items })
 }
 
 // ---------------------------------------------------------------------------

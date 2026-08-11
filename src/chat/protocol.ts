@@ -133,6 +133,11 @@ export type WebviewMessage =
   | { type: 'signIn'; method: 'password'; username: string; password: string }
   | { type: 'signIn'; method: 'apiKey'; key: string }
   | { type: 'signIn'; method: 'clientKey' }
+  /** History panel actions. */
+  | { type: 'openHistory' }
+  | { type: 'searchHistory'; query: string }
+  | { type: 'deleteHistory'; id: string }
+  | { type: 'restoreHistory'; id: string }
 
 // ---------------------------------------------------------------------------
 // host → webview
@@ -174,14 +179,25 @@ export type HostMessage =
       truncated: boolean
     }
    /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
-   | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
-   /** Phase 4: the current tool-set inventory (local ws_* + live Nest tools), sent
-    *  so the webview can render the tool picker and grey out server-banned names.
-    *  Each entry carries its origin so the card can show "runs on Nest" vs local. */
-   | {
-       type: 'tools'
-       names: readonly string[]
-     }
+    | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
+    /** Phase 4: the current tool-set inventory (local ws_* + live Nest tools), sent
+     *  so the webview can render the tool picker and grey out server-banned names.
+     *  Each entry carries its origin so the card can show "runs on Nest" vs local. */
+    | {
+        type: 'tools'
+        names: readonly string[]
+      }
+    /** History entries for the current account. Sent in response to `openHistory`
+     *  and `searchHistory`. */
+    | {
+        type: 'historyList'
+        conversations: readonly {
+          id: string
+          title: string
+          lastAccessedAt: number
+          messageCount: number
+        }[]
+      }
 
 // ---------------------------------------------------------------------------
 // Guards
@@ -237,6 +253,14 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
         return { type: 'signIn', method: 'clientKey' }
       }
       return null
+    case 'openHistory':
+      return { type: 'openHistory' }
+    case 'searchHistory':
+      return typeof msg.query === 'string' ? { type: 'searchHistory', query: msg.query } : null
+    case 'deleteHistory':
+      return typeof msg.id === 'string' ? { type: 'deleteHistory', id: msg.id } : null
+    case 'restoreHistory':
+      return typeof msg.id === 'string' ? { type: 'restoreHistory', id: msg.id } : null
     default:
       return null
   }

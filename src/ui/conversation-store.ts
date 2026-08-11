@@ -32,21 +32,35 @@ export interface Conversation {
   /** Tab position. Stable across switches so tabs don't reorder on activation;
    *  drag-and-drop will mutate this later. */
   order: number
+  /** Account this conversation belongs to. Empty string for conversations
+   *  created before account tracking existed (migrated on first read). */
+  accountId: string
+  /** Last time the conversation was active (read or written). Used for
+   *  history ordering and the 14-day prune. */
+  lastAccessedAt: number
 }
 
 export interface ConversationStore {
-  list(): Conversation[]
+  list(accountId?: string): Conversation[]
   get(id: string): Conversation | undefined
   save(conversation: Conversation): void
-  create(title: string, messages?: ChatMessageView[]): Conversation
+  create(title: string, messages?: ChatMessageView[], accountId?: string): Conversation
   delete(id: string): void
   clear(): void
+  prune(olderThanDays: number): number
+  search(accountId: string, query: string): Conversation[]
 }
 
 export function conversationStore(memento: vscode.Memento): ConversationStore {
   const readAll = (): Conversation[] => {
     const raw = memento.get<Conversation[]>(STORE_KEY)
-    return Array.isArray(raw) ? raw : []
+    if (!Array.isArray(raw)) return []
+    return raw.map((c) => ({
+      ...c,
+      accountId: c.accountId ?? '',
+      lastAccessedAt: c.lastAccessedAt ?? c.createdAt ?? Date.now(),
+      order: typeof c.order === 'number' ? c.order : orderOf(c),
+    }))
   }
 
   const writeAll = (conversations: Conversation[]): void => {
@@ -54,10 +68,12 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
   }
 
   return {
-    list() {
-      return readAll()
+    list(accountId?: string) {
+      const all = readAll()
         .map((c) => (typeof c.order === 'number' ? c : { ...c, order: orderOf(c) }))
         .sort((a, b) => a.order - b.order)
+      if (!accountId) return all
+      return all.filter((c) => c.accountId === accountId)
     },
 
     get(id: string) {
@@ -67,22 +83,26 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
     save(conversation) {
       const all = readAll()
       const idx = all.findIndex((c) => c.id === conversation.id)
+      const entry = { ...conversation, lastAccessedAt: Date.now() }
       if (idx >= 0) {
-        all[idx] = { ...conversation }
+        all[idx] = entry
       } else {
-        all.push({ ...conversation })
+        all.push(entry)
       }
       writeAll(all)
     },
 
-    create(title: string, messages: ChatMessageView[] = []) {
+    create(title: string, messages: ChatMessageView[] = [], accountId = '') {
       const nextOrder = readAll().reduce((max, c) => Math.max(max, orderOf(c)), -1) + 1
+      const now = Date.now()
       const conversation: Conversation = {
-        id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        id: `conv_${now}_${Math.random().toString(36).slice(2, 8)}`,
         title,
         messages,
-        createdAt: Date.now(),
+        createdAt: now,
         order: nextOrder,
+        accountId,
+        lastAccessedAt: now,
       }
       writeAll([...readAll(), conversation])
       return conversation
@@ -94,6 +114,20 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
 
     clear() {
       writeAll([])
+    },
+
+    prune(olderThanDays: number) {
+      const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000
+      const before = readAll()
+      const after = before.filter((c) => c.lastAccessedAt >= cutoff)
+      writeAll(after)
+      return before.length - after.length
+    },
+
+    search(accountId: string, query: string) {
+      const q = query.trim().toLowerCase()
+      if (!q) return this.list(accountId)
+      return this.list(accountId).filter((c) => c.title.toLowerCase().includes(q))
     },
   }
 }

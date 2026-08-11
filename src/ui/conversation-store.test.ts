@@ -36,7 +36,7 @@ function fakeMemento(): FakeMemento {
 const makeStore = () => conversationStore(fakeMemento() as never)
 
 function conv(id: string, title: string, order: number, createdAt: number): Conversation {
-  return { id, title, messages: [], createdAt, order }
+  return { id, title, messages: [], createdAt, order, accountId: '', lastAccessedAt: createdAt }
 }
 
 describe('conversation-store ordering', () => {
@@ -89,8 +89,8 @@ describe('conversation-store migration', () => {
     const memento = fakeMemento()
     // Seed the memento directly with records that predate the `order` field.
     const seeded: Omit<Conversation, 'order'>[] = [
-      { id: 'late', title: 'Late', messages: [], createdAt: 2000 },
-      { id: 'early', title: 'Early', messages: [], createdAt: 1000 },
+      { id: 'late', title: 'Late', messages: [], createdAt: 2000, accountId: '', lastAccessedAt: 2000 },
+      { id: 'early', title: 'Early', messages: [], createdAt: 1000, accountId: '', lastAccessedAt: 1000 },
     ]
     void memento.update('redstartYellowscript.conversations', seeded)
 
@@ -107,7 +107,7 @@ describe('conversation-store migration', () => {
   it('treats a missing order field on a single record as the lowest', () => {
     const memento = fakeMemento()
     void memento.update('redstartYellowscript.conversations', [
-      { id: 'x', title: 'X', messages: [], createdAt: 5000 },
+      { id: 'x', title: 'X', messages: [], createdAt: 5000, accountId: '', lastAccessedAt: 5000 },
     ])
     const store = conversationStore(memento as never)
     // with createdAt 5000 it is the "newest"; if it had no order it sorts last

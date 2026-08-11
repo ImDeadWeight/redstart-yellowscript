@@ -51,6 +51,9 @@ let tools: ToolRegistry | undefined
 let mcpHost: McpHost | null = null
 let conversations: ReturnType<typeof conversationStore>
 let activeConversationId: string | null = null
+/** The currently signed-in account username, used to scope conversation history.
+ *  Set from `/auth/me` on connect/sign-in; cleared on sign-out/disconnect. */
+let currentAccountId: string | null = null
 /** One ChatSession per conversation, keyed by conversation id. Tabs own their
  *  own transcript and request lifecycle, so switching tabs is a pure view
  *  change and a running turn keeps streaming in its own tab. */
@@ -71,12 +74,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
 
+  const pruned = conversations.prune(14)
+  if (pruned > 0) {
+    output.info(`history: pruned ${pruned} conversation(s) older than 14 days`)
+  }
+
   // The panel always has a conversation open, so the first chat is a real tab
   // from the start — not an untracked transcript that vanishes on the first
   // switch. Reuse the oldest existing conversation in a restored workspace;
   // otherwise open a fresh "New chat" that participates in the tab strip.
-  const existing = conversations.list()[0]
-  activeConversationId = existing?.id ?? conversations.create('New chat').id
+  const existing = conversations.list(currentAccountId ?? undefined)[0]
+  activeConversationId = existing?.id ?? conversations.create('New chat', [], currentAccountId ?? undefined).id
 
   manager = new ConnectionManager({
     credentials: new SecretCredentialStore(context.secrets),
@@ -122,7 +130,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       let id = activeConversationId
       // If there is no open tab, create one so the prompt has somewhere to go.
       if (!id) {
-        const conv = conversations.create('New chat')
+        const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
         id = conv.id
         activeConversationId = id
         pushConversations()
@@ -151,7 +159,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       pushSession()
     },
     onNewConversation: () => {
-      const conv = conversations.create('New chat')
+      const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
       activeConversationId = conv.id
       // Tell the webview which tab is active BEFORE reset emits the empty
       // transcript, otherwise the conversation message is dropped because the
@@ -164,7 +172,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onListConversations: () => {
       chatView?.post({
         type: 'conversationList',
-        conversations: toViews(conversations.list()),
+        conversations: toViews(conversations.list(currentAccountId ?? undefined)),
         activeId: activeConversationId,
       })
     },
@@ -172,7 +180,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       switchConversation(id)
     },
     onCreateConversation: () => {
-      const conv = conversations.create('New chat')
+      const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
       activeConversationId = conv.id
       // A fresh session — no transcript to load, so nothing aborts.
       pushConversations()
@@ -188,7 +196,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       sessions.delete(id)
       conversations.delete(id)
       if (activeConversationId === id) {
-        const remaining = conversations.list()
+        const remaining = conversations.list(currentAccountId ?? undefined)
         activeConversationId = remaining[0]?.id ?? null
         // Paint the new active conversation's transcript so the webview does
         // not keep showing the conversation that was just closed.
@@ -243,6 +251,52 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } else {
         chatView?.sendInit(snapshot(null), [], null)
       }
+    },
+    onOpenHistory: () => {
+      pushHistory()
+    },
+    onSearchHistory: (query) => {
+      const results = currentAccountId
+        ? conversations.search(currentAccountId, query)
+        : []
+      chatView?.post({
+        type: 'historyList',
+        conversations: results.map((c) => ({
+          id: c.id,
+          title: c.title,
+          lastAccessedAt: c.lastAccessedAt,
+          messageCount: c.messages.length,
+        })),
+      })
+    },
+    onDeleteHistory: (id) => {
+      conversations.delete(id)
+      sessions.get(id)?.abort()
+      sessions.delete(id)
+      if (activeConversationId === id) {
+        const remaining = conversations.list(currentAccountId ?? undefined)
+        activeConversationId = remaining[0]?.id ?? null
+        if (activeConversationId) {
+          const session = getSession(activeConversationId)
+          chatView?.post({ type: 'conversation', conversationId: activeConversationId, messages: session.snapshot() })
+        }
+        pushActiveConversation()
+        pushSession()
+      }
+      pushConversations()
+      pushHistory()
+    },
+    onRestoreHistory: (id) => {
+      const conv = conversations.get(id)
+      if (!conv) return
+      activeConversationId = id
+      const session = getSession(id)
+      session.load(conv.messages)
+      pushConversations()
+      pushActiveConversation()
+      chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
+      pushSession()
+      chatView?.reveal()
     },
   })
 
@@ -393,11 +447,6 @@ function getSession(id: string): ChatSession {
     session = new ChatSession({
       getClient: () => manager?.activeClient ?? null,
       onUnauthorized: () => manager?.handleUnauthorized(),
-      // Resolved per turn, not captured once: a user can add or remove a folder
-      // mid-conversation, and with no folder open the tools are withheld
-      // entirely rather than offered in a state where they can only refuse.
-      // The merged registry (local ws_* + live Nest tools) is rebuilt whenever
-      // the Nest re-lists, which happens on every (re)connect (Phase 4.2/4.3).
       tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
       toolContext: () => ({ workspaceRoots: workspaceRoots() }),
       approveChange: (pending) => {
@@ -427,6 +476,14 @@ function getSession(id: string): ChatSession {
       },
     })
     sessions.set(id, session)
+
+    // Lazy-load the transcript from the store so background tabs fully restore
+    // when clicked. The host already seeded the active tab on init; this covers
+    // every other tab the user opens later.
+    const conv = conversations.get(id)
+    if (conv && conv.messages.length > 0) {
+      session.load(conv.messages)
+    }
   }
   return session
 }
@@ -472,11 +529,23 @@ function pushSession(): void {
 }
 
 function pushConversations(): void {
-  chatView?.post({ type: 'conversationList', conversations: toViews(conversations.list()), activeId: activeConversationId })
+  chatView?.post({ type: 'conversationList', conversations: toViews(conversations.list(currentAccountId ?? undefined)), activeId: activeConversationId })
 }
 
 function pushActiveConversation(): void {
   chatView?.post({ type: 'activeConversationChanged', id: activeConversationId })
+}
+
+function pushHistory(): void {
+  const items = currentAccountId
+    ? conversations.list(currentAccountId).map((c) => ({
+        id: c.id,
+        title: c.title,
+        lastAccessedAt: c.lastAccessedAt,
+        messageCount: c.messages.length,
+      }))
+    : []
+  chatView?.post({ type: 'historyList', conversations: items })
 }
 
 /** Save the active conversation's transcript to the store. Pure bookkeeping
@@ -543,7 +612,7 @@ async function refreshModel(): Promise<void> {
 }
 
 async function newChatCommand(): Promise<void> {
-  const conv = conversations.create('New chat')
+  const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
   activeConversationId = conv.id
   getSession(conv.id).reset()
   pushConversations()
@@ -727,6 +796,7 @@ async function clientKeyFlow(): Promise<ConnectionState | undefined> {
 
 async function signOutCommand(): Promise<void> {
   const state = await manager?.signOut()
+  currentAccountId = null
   if (state) vscode.window.showInformationMessage('Signed out of the Redstart Nest.')
 }
 
@@ -922,12 +992,16 @@ function onStateChanged(state: ConnectionState): void {
   const target = 'url' in state && state.url ? ` (${state.url})` : ''
   output?.info(`connection: ${state.status}${target}`)
 
-  // Re-ask on every (re)connect rather than caching: the Nest operator can swap
-  // the loaded model without the connection ever dropping, and the MCP tool set
-  // follows the active profile — so both get re-fetched on every (re)connect.
   if (state.status === 'connected') {
+    // Track the signed-in account so conversation history can be scoped to it.
+    const user = 'user' in state ? state.user : undefined
+    currentAccountId = user?.username ?? null
+    output?.info(`account: ${currentAccountId ?? 'unknown'}`)
+
     void refreshModel()
     void connectMcpHost()
+  } else if (state.status === 'disconnected' || state.status === 'unauthenticated') {
+    currentAccountId = null
   }
 }
 

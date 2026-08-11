@@ -53,6 +53,12 @@ let session: SessionSnapshot = { connection: 'disconnected', detail: 'Starting�
 let conversations: ConversationView[] = []
 let activeConversationId: string | null = null
 
+// History panel state
+let historyOpen = false
+let historyQuery = ''
+let historyItems: readonly { id: string; title: string; lastAccessedAt: number; messageCount: number }[] = []
+let historySearchDebounce: ReturnType<typeof setTimeout> | undefined
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -250,6 +256,21 @@ function renderConversationList(list: ConversationView[], activeId: string | nul
   addButton.title = 'New conversation'
   addButton.addEventListener('click', () => post({ type: 'createConversation' }))
   tabStrip.appendChild(addButton)
+
+  const historyButton = document.createElement('button')
+  historyButton.className = 'tab tab-history'
+  historyButton.textContent = '🕒'
+  historyButton.title = 'Conversation history'
+  historyButton.addEventListener('click', () => {
+    historyOpen = !historyOpen
+    historyButton.classList.toggle('active', historyOpen)
+    if (historyOpen) {
+      post({ type: 'openHistory' })
+    } else {
+      historyPanel.hidden = true
+    }
+  })
+  tabStrip.appendChild(historyButton)
 }
 
 function showNotice(level: 'info' | 'warning' | 'error', text: string): void {
@@ -259,6 +280,98 @@ function showNotice(level: 'info' | 'warning' | 'error', text: string): void {
   transcript.append(notice)
   scrollToEnd()
 }
+
+// ---------------------------------------------------------------------------
+// History panel (combobox dropdown)
+// ---------------------------------------------------------------------------
+
+const historyPanel = document.createElement('div')
+historyPanel.className = 'history-panel'
+historyPanel.hidden = true
+tabStrip.after(historyPanel)
+
+const historySearch = document.createElement('input')
+historySearch.className = 'history-search'
+historySearch.type = 'text'
+historySearch.placeholder = 'Search history…'
+historySearch.addEventListener('input', () => {
+  historyQuery = historySearch.value
+  clearTimeout(historySearchDebounce)
+  historySearchDebounce = setTimeout(() => {
+    post({ type: 'searchHistory', query: historyQuery })
+  }, 150)
+})
+historyPanel.appendChild(historySearch)
+
+const historyList = document.createElement('div')
+historyList.className = 'history-list'
+historyPanel.appendChild(historyList)
+
+function renderHistoryList(items: readonly { id: string; title: string; lastAccessedAt: number; messageCount: number }[]): void {
+  historyItems = items
+  historyList.replaceChildren()
+  if (items.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'history-empty'
+    empty.textContent = historyQuery ? 'No matches' : 'No history yet'
+    historyList.appendChild(empty)
+    return
+  }
+  for (const item of items) {
+    const row = document.createElement('div')
+    row.className = 'history-item'
+
+    const info = document.createElement('div')
+    info.className = 'history-item-info'
+    const title = document.createElement('span')
+    title.className = 'history-item-title'
+    title.textContent = item.title || 'Untitled'
+    const meta = document.createElement('span')
+    meta.className = 'history-item-meta'
+    const date = new Date(item.lastAccessedAt)
+    meta.textContent = `${date.toLocaleDateString()} · ${item.messageCount} messages`
+    info.append(title, meta)
+    row.appendChild(info)
+
+    const actions = document.createElement('div')
+    actions.className = 'history-item-actions'
+
+    const restoreBtn = document.createElement('button')
+    restoreBtn.className = 'history-restore'
+    restoreBtn.textContent = 'Open'
+    restoreBtn.title = 'Open in a new tab'
+    restoreBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      post({ type: 'restoreHistory', id: item.id })
+    })
+    actions.appendChild(restoreBtn)
+
+    const deleteBtn = document.createElement('button')
+    deleteBtn.className = 'history-delete'
+    deleteBtn.textContent = '×'
+    deleteBtn.title = 'Delete from history'
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      post({ type: 'deleteHistory', id: item.id })
+    })
+    actions.appendChild(deleteBtn)
+
+    row.appendChild(actions)
+    row.addEventListener('click', () => {
+      post({ type: 'restoreHistory', id: item.id })
+    })
+    historyList.appendChild(row)
+  }
+}
+
+document.addEventListener('click', (event) => {
+  if (!historyOpen) return
+  const target = event.target as HTMLElement
+  if (historyPanel.contains(target) || target.closest('.tab-history')) return
+  historyOpen = false
+  document.querySelector('.tab-history')?.classList.remove('active')
+  historyPanel.hidden = true
+})
 
 // ---------------------------------------------------------------------------
 // Host messages
@@ -356,6 +469,10 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
 
     case 'notice':
       showNotice(message.level, message.message)
+      break
+    case 'historyList':
+      renderHistoryList(message.conversations)
+      historyPanel.hidden = !historyOpen
       break
   }
 })

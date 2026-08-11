@@ -36,6 +36,10 @@ export interface ChatViewHandlers {
    *  full snapshot. Fires again every time VSCode rebuilds a view it destroyed
    *  while hidden. */
   onReady: () => void
+  onOpenHistory: () => void
+  onSearchHistory: (query: string) => void
+  onDeleteHistory: (id: string) => void
+  onRestoreHistory: (id: string) => void
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -102,6 +106,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break
       case 'signIn':
         this.handlers.onSignIn(message)
+        break
+      case 'openHistory':
+        this.handlers.onOpenHistory()
+        break
+      case 'searchHistory':
+        this.handlers.onSearchHistory(message.query)
+        break
+      case 'deleteHistory':
+        this.handlers.onDeleteHistory(message.id)
+        break
+      case 'restoreHistory':
+        this.handlers.onRestoreHistory(message.id)
         break
     }
   }

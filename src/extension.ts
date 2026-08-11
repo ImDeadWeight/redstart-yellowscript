@@ -194,7 +194,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onDeleteConversation: (id) => {
       sessions.get(id)?.abort()
       sessions.delete(id)
-      conversations.delete(id)
+      conversations.archive(id)
       if (activeConversationId === id) {
         const remaining = conversations.list(currentAccountId ?? undefined)
         activeConversationId = remaining[0]?.id ?? null
@@ -208,6 +208,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         pushSession()
       }
       pushConversations()
+      pushHistoryPanel()
     },
     onRunCommand: (command) => {
       void vscode.commands.executeCommand(`redstartYellowscript.${command}`)
@@ -256,23 +257,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       pushHistoryPanel()
     },
     onSearchHistory: (query) => {
-      const results = currentAccountId
-        ? conversations.search(currentAccountId, query)
-        : []
-      chatView?.post({
-        type: 'historyList',
-        conversations: results.map((c) => ({
-          id: c.id,
-          title: c.title,
-          lastAccessedAt: c.lastAccessedAt,
-          messageCount: c.messages.length,
-        })),
-      })
+      if (!currentAccountId) {
+        chatView?.post({ type: 'historyList', conversations: [] })
+        return
+      }
+      const all = conversations.history(currentAccountId)
+      const q = query.trim().toLowerCase()
+      const filtered = q ? all.filter((c) => c.title.toLowerCase().includes(q)) : all
+      chatView?.post({ type: 'historyList', conversations: filtered })
     },
     onDeleteHistory: (id) => {
-      conversations.delete(id)
       sessions.get(id)?.abort()
       sessions.delete(id)
+      conversations.delete(id)
       if (activeConversationId === id) {
         const remaining = conversations.list(currentAccountId ?? undefined)
         activeConversationId = remaining[0]?.id ?? null
@@ -284,11 +281,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         pushSession()
       }
       pushConversations()
-      pushHistory()
+      pushHistoryPanel()
     },
     onRestoreHistory: (id) => {
       const conv = conversations.get(id)
       if (!conv) return
+      conversations.unarchive(id)
       activeConversationId = id
       const session = getSession(id)
       session.load(conv.messages)
@@ -296,6 +294,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       pushActiveConversation()
       chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
       pushSession()
+      pushHistoryPanel()
       chatView?.reveal()
     },
   })
@@ -537,20 +536,8 @@ function pushActiveConversation(): void {
   chatView?.post({ type: 'activeConversationChanged', id: activeConversationId })
 }
 
-function pushHistory(): void {
-  const items = currentAccountId
-    ? conversations.list(currentAccountId).map((c) => ({
-        id: c.id,
-        title: c.title,
-        lastAccessedAt: c.lastAccessedAt,
-        messageCount: c.messages.length,
-      }))
-    : []
-  chatView?.post({ type: 'historyList', conversations: items })
-}
-
-/** Save the active conversation's transcript to the store. Pure bookkeeping
- *  now — it never aborts a turn, because switching tabs doesn't. */
+  /** Save the active conversation's transcript to the store. Pure bookkeeping
+   *  now — it never aborts a turn, because switching tabs doesn't. */
 function saveCurrentConversation(): void {
   if (!activeConversationId) return
   persistConversation(activeConversationId)
@@ -631,14 +618,7 @@ function openHistoryCommand(): void {
 }
 
 function pushHistoryPanel(): void {
-  const items = currentAccountId
-    ? conversations.list(currentAccountId).map((c) => ({
-        id: c.id,
-        title: c.title,
-        lastAccessedAt: c.lastAccessedAt,
-        messageCount: c.messages.length,
-      }))
-    : []
+  const items = currentAccountId ? conversations.history(currentAccountId) : []
   chatView?.post({ type: 'showHistoryPanel', conversations: items })
 }
 
@@ -1013,6 +993,12 @@ function onStateChanged(state: ConnectionState): void {
     // Track the signed-in account so conversation history can be scoped to it.
     const user = 'user' in state ? state.user : undefined
     currentAccountId = user?.username ?? null
+    if (currentAccountId) {
+      const migrated = conversations.migrateAccountId(currentAccountId)
+      if (migrated > 0) {
+        output?.info(`history: migrated ${migrated} conversation(s) to account "${currentAccountId}"`)
+      }
+    }
     output?.info(`account: ${currentAccountId ?? 'unknown'}`)
 
     void refreshModel()

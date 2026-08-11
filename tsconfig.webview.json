@@ -16,6 +16,6 @@
   },
   // `exclude` is inherited from the base config (which excludes this very file),
   // so it has to be cleared here.
-  "include": ["src/webview/main.ts"],
-  "exclude": []
+  "include": ["src/webview/**/*.ts"],
+  "exclude": ["src/webview/**/*.test.ts"]
 }

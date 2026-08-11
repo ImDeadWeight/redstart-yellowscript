@@ -11,7 +11,7 @@ import {
   type CompletionStreamer,
 } from './loop.ts'
 import { createToolRegistry } from '../tools/registry.ts'
-import type { ToolContext } from '../tools/types.ts'
+import type { PendingWrite, Tool, ToolContext } from '../tools/types.ts'
 import type { EditorState } from '../tools/editor-context.ts'
 import type { ChatCompletionRequest, StreamResult } from '../nest/client.ts'
 import type { ToolCallDelta } from '../nest/streaming.ts'
@@ -409,5 +409,62 @@ describe('runAgentLoop — reporting', () => {
     ])
     await runAgentLoop({ client, request, tools: registry(), toolContext })
     assert.equal(request.messages.length, 1)
+  })
+
+  test('routes a planned write through the approval gate and reports the outcome', async () => {
+    // A tool that returns a PendingWrite but no bytes. The loop must call the
+    // gate (and NOT persist anything itself) and tell the model the result.
+    const planned: PendingWrite = {
+      label: 'edit (1 file)',
+      changes: [
+        {
+          path: 'a.txt',
+          absolutePath: path.join(base, 'a.txt'),
+          isNew: false,
+          isDeleted: false,
+          before: 'file contents here\n',
+          after: 'file contents here (edited)\n',
+          diff: '--- a.txt\n+++ a.txt\n-foo\n+bar',
+        },
+      ],
+    }
+    const writeTool: Tool = {
+      definition: { name: 'ws_edit_file', description: 'plan a write', inputSchema: { type: 'object', properties: {} } },
+      async execute() {
+        return { content: 'planned', isError: false, summary: 'planned', truncated: false, pendingWrite: planned }
+      },
+    }
+    const customRegistry = {
+      tools: [writeTool],
+      names: ['ws_edit_file'],
+      payload: () => [{ type: 'function', function: { name: 'ws_edit_file', description: '', parameters: {} } }],
+      get: () => writeTool,
+      execute: (name: string, args: string, ctx: ToolContext) => writeTool.execute(args, ctx),
+    } as unknown as ReturnType<typeof registry>
+
+    const gateCalls: PendingWrite[] = []
+    let diskWritten = ''
+    const client = scriptedStreamer([
+      streamResult({ toolCalls: [callDelta('ws_edit_file', '{}')] }),
+      streamResult({ content: 'Applied per your approval.' }),
+    ])
+
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools: customRegistry,
+      toolContext,
+      approveChange: async (pending) => {
+        gateCalls.push(pending)
+        diskWritten = pending.changes[0]!.after
+        return true
+      },
+    })
+
+    assert.equal(gateCalls.length, 1)
+    assert.equal(diskWritten, 'file contents here (edited)\n')
+    // The model is told the write happened, and the plan flag is cleared.
+    assert.match(result.toolRuns[0]?.result.content ?? '', /Applied/)
+    assert.equal(result.toolRuns[0]?.result.pendingWrite, undefined)
   })
 })

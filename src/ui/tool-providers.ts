@@ -13,8 +13,11 @@
 import * as vscode from 'vscode'
 
 import { locateRipgrep } from '../tools/ripgrep.ts'
+import type { ApprovalStore } from '../tools/approval.ts'
 import type { DiagnosticRecord, DiagnosticSeverity } from '../tools/diagnostics.ts'
 import type { EditorState, EditorPosition } from '../tools/editor-context.ts'
+
+const CONFIG_SECTION = 'redstartYellowscript'
 
 /** Absolute paths of the open workspace folders — the roots every ws_* path is
  *  contained within. Empty when no folder is open, which the tools report as a
@@ -155,4 +158,32 @@ function openFiles(): string[] {
   }
 
   return files
+}
+
+// ---------------------------------------------------------------------------
+// Per-workspace approval memory (3.4).
+// ---------------------------------------------------------------------------
+
+const APPROVED_TOOLS_KEY = 'approvedWriteTools'
+
+/**
+ * The set of write tools the user has chosen to "always allow" in THIS
+ * workspace. Backed by a workspace setting so it does not leak across folders
+ * (an untrusted scratch folder should not inherit a trusted repo's approvals).
+ */
+export function approvalStore(): ApprovalStore {
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+  return {
+    getAllowedTools() {
+      const value = config.get<string[]>(APPROVED_TOOLS_KEY)
+      return Array.isArray(value) ? value : []
+    },
+    setAllowedTools(tools: readonly string[]) {
+      void config.update(
+        APPROVED_TOOLS_KEY,
+        [...new Set(tools)],
+        vscode.ConfigurationTarget.Workspace,
+      )
+    },
+  }
 }

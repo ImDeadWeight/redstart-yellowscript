@@ -10,8 +10,9 @@
 // extension entry (see esbuild.mjs).
 // =============================================================================
 
-import { PROTOCOL_VERSION, type ChatMessageView, type HostMessage, type SessionSnapshot, type WebviewMessage } from '../chat/protocol.ts'
+import { PROTOCOL_VERSION, type ChatMessageView, type ConversationView, type HostMessage, type SessionSnapshot, type WebviewMessage } from '../chat/protocol.ts'
 import { renderMarkdown } from './markdown.ts'
+import { renderLoginScreen } from './login-screen.ts'
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void }
 
@@ -27,10 +28,13 @@ function post(message: WebviewMessage): void {
 
 const transcript = required<HTMLDivElement>('transcript')
 const banner = required<HTMLDivElement>('banner')
+const loginScreen = required<HTMLDivElement>('login-screen')
 const input = required<HTMLTextAreaElement>('prompt')
 const sendButton = required<HTMLButtonElement>('send')
 const stopButton = required<HTMLButtonElement>('stop')
 const newButton = required<HTMLButtonElement>('new')
+const composer = required<HTMLDivElement>('composer')
+const tabStrip = required<HTMLDivElement>('tab-strip')
 
 function required<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id)
@@ -45,7 +49,9 @@ function required<T extends HTMLElement>(id: string): T {
 /** Live text per streaming turn, so a delta is an append rather than a redraw
  *  of the whole transcript. */
 const streams = new Map<string, { content: string; reasoning: string }>()
-let session: SessionSnapshot = { connection: 'disconnected', detail: 'Starting…', canSend: false, busy: false }
+let session: SessionSnapshot = { connection: 'disconnected', detail: 'Starting…', canSend: false, busy: false, queued: 0 }
+let conversations: ConversationView[] = []
+let activeConversationId: string | null = null
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -58,9 +64,20 @@ function renderTranscript(messages: ChatMessageView[]): void {
   scrollToEnd()
 }
 
+/** Add a message, or replace an existing one with the same id. Used when a
+ *  queued prompt flips from `pending` to active — the id is stable so the
+ *  greyed bubble becomes a real one without duplicating. */
+function upsertMessage(message: ChatMessageView): void {
+  const existing = findArticle(message.id)
+  const node = buildMessage(message)
+  if (existing) existing.replaceWith(node)
+  else transcript.append(node)
+  scrollToEnd(message.role === 'user')
+}
+
 function buildMessage(message: ChatMessageView): HTMLElement {
   const article = document.createElement('article')
-  article.className = `message ${message.role}`
+  article.className = `message ${message.role}` + (message.pending ? ' pending' : '')
   article.dataset.id = message.id
 
   const header = document.createElement('header')
@@ -159,46 +176,80 @@ function renderSession(next: SessionSnapshot): void {
   session = next
 
   const needsAction = next.connection !== 'connected'
-  banner.hidden = !needsAction
+  banner.hidden = true
   if (needsAction) {
-    banner.replaceChildren()
-    const text = document.createElement('span')
-    text.textContent = next.detail
-    banner.append(text)
-
-    const action = actionFor(next.connection)
-    if (action) {
-      const button = document.createElement('button')
-      button.className = 'link'
-      button.textContent = action.label
-      button.addEventListener('click', () => post({ type: 'runCommand', command: action.command }))
-      banner.append(button)
-    }
+    loginScreen.hidden = false
+    loginScreen.replaceChildren(renderLoginScreen(post, next))
+  } else {
+    loginScreen.hidden = true
   }
 
+  transcript.hidden = needsAction
+  input.hidden = needsAction
+  // Sending is allowed while a turn runs — the prompt just queues behind it.
   input.disabled = !next.canSend
-  sendButton.hidden = next.busy
+  sendButton.hidden = needsAction
   stopButton.hidden = !next.busy
   sendButton.disabled = !next.canSend
-  input.placeholder = next.canSend
-    ? 'Ask Yellowscript…'
-    : next.busy
-      ? 'Waiting for the model…'
-      : 'Connect to a Redstart Nest to start.'
+  composer.hidden = needsAction
+  input.placeholder = !next.canSend
+    ? 'Connect to a Redstart Nest to start.'
+    : next.queued > 0
+      ? `Queued — ${next.queued} prompt${next.queued === 1 ? '' : 's'} waiting…`
+      : next.busy
+        ? 'Generating — type to queue another prompt…'
+        : 'Ask Yellowscript…'
 }
 
-function actionFor(
-  connection: SessionSnapshot['connection'],
-): { label: string; command: 'connect' | 'signIn' | 'showStatus' } | null {
-  switch (connection) {
-    case 'disconnected':
-    case 'error':
-      return { label: 'Connect', command: 'connect' }
-    case 'unauthenticated':
-      return { label: 'Sign in', command: 'signIn' }
-    default:
-      return null
+function renderConversationList(list: ConversationView[], activeId: string | null): void {
+  conversations = list
+  activeConversationId = activeId
+  tabStrip.replaceChildren()
+  for (const conv of list) {
+    const tab = document.createElement('button')
+    tab.className =
+      'tab' + (conv.id === activeId ? ' active' : '') + (conv.busy ? ' busy' : '')
+    tab.dataset.id = conv.id
+
+    const label = document.createElement('span')
+    label.className = 'tab-label'
+    label.textContent = conv.title
+    tab.appendChild(label)
+
+    // A small badge shows the conversation is generating and, if anything is
+    // queued behind it, how many prompts are waiting.
+    if (conv.busy || conv.queued > 0) {
+      const badge = document.createElement('span')
+      badge.className = 'tab-badge'
+      badge.textContent = conv.queued > 0 ? `●${conv.queued}` : '●'
+      tab.appendChild(badge)
+    }
+
+    const close = document.createElement('button')
+    close.className = 'tab-close'
+    close.textContent = '×'
+    close.title = 'Close conversation'
+    close.addEventListener('click', (event) => {
+      event.stopPropagation()
+      post({ type: 'deleteConversation', id: conv.id })
+    })
+    tab.appendChild(close)
+
+    tab.addEventListener('click', () => {
+      if (conv.id !== activeConversationId) {
+        post({ type: 'switchConversation', id: conv.id })
+      }
+    })
+
+    tabStrip.appendChild(tab)
   }
+
+  const addButton = document.createElement('button')
+  addButton.className = 'tab tab-add'
+  addButton.textContent = '+'
+  addButton.title = 'New conversation'
+  addButton.addEventListener('click', () => post({ type: 'createConversation' }))
+  tabStrip.appendChild(addButton)
 }
 
 function showNotice(level: 'info' | 'warning' | 'error', text: string): void {
@@ -224,6 +275,9 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
         )
         return
       }
+      // The init handoff names which conversation it is rendering, so a reload
+      // that reopened on a different tab still lines up.
+      if (message.conversationId !== null) activeConversationId = message.conversationId
       renderSession(message.session)
       renderTranscript(message.messages)
       break
@@ -233,15 +287,32 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
       break
 
     case 'conversation':
+      // Only redraw when the host swapped in the conversation we're viewing. A
+      // switch is a pure view change; deltas for other tabs are dropped.
+      if (message.conversationId !== activeConversationId) break
       renderTranscript(message.messages)
       break
 
+    case 'conversationList':
+      renderConversationList(message.conversations, message.activeId)
+      break
+
+    case 'activeConversationChanged':
+      activeConversationId = message.id
+      tabStrip.querySelectorAll('.tab').forEach((tab) => {
+        tab.classList.toggle('active', (tab as HTMLElement).dataset.id === message.id)
+      })
+      break
+
     case 'message':
-      transcript.append(buildMessage(message.message))
-      scrollToEnd(message.message.role === 'user')
+      // Transcript messages for a background tab are ignored here; that tab's
+      // transcript is persisted by the host and repainted on switch.
+      if (message.conversationId !== activeConversationId) break
+      upsertMessage(message.message)
       break
 
     case 'turn/delta': {
+      if (message.conversationId !== activeConversationId) break
       const stream = streams.get(message.id)
       const article = findArticle(message.id)
       if (!stream || !article) return
@@ -253,6 +324,7 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
     }
 
     case 'turn/completed': {
+      if (message.conversationId !== activeConversationId) break
       const article = findArticle(message.id)
       const stream = streams.get(message.id)
       if (!article) return
@@ -268,6 +340,7 @@ window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
     }
 
     case 'turn/failed': {
+      if (message.conversationId !== activeConversationId) break
       const article = findArticle(message.id)
       const stream = streams.get(message.id)
       if (!article) return

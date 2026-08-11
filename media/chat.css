@@ -1,6 +1,15 @@
 /* Styled entirely with VSCode theme variables, so the panel matches whatever
    theme the user has — including ones that do not exist yet. Never hardcode a
-   colour here. */
+   colour here. Redstart palette variables are added for the login screen and
+   banner action links only; the chat transcript stays on VSCode tokens. */
+
+:root {
+  --redstart-orange: oklch(0.705 0.191 44.5);
+  --redstart-orange-hover: oklch(0.72 0.2 44.5);
+  --redstart-orange-faint: oklch(0.705 0.191 44.5 / 0.15);
+  --redstart-black: oklch(0.12 0 0);
+  --redstart-card: oklch(0.18 0 0);
+}
 
 * {
   box-sizing: border-box;
@@ -16,6 +25,112 @@ body {
   font-size: var(--vscode-font-size);
   color: var(--vscode-foreground);
   background: var(--vscode-sideBar-background);
+}
+
+/* --- tab strip ----------------------------------------------------------- */
+
+.tab-strip {
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  padding: 4px 4px 0;
+  background: var(--vscode-sideBar-background);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  overflow-x: auto;
+  min-height: 36px;
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--vscode-sideBarForeground);
+  background: transparent;
+  border: none;
+  border-radius: 3px 3px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.tab:hover {
+  background: var(--vscode-sideBarSectionHeaderBackground);
+}
+
+.tab.active {
+  background: var(--vscode-sideBarSectionHeaderBackground);
+  color: var(--vscode-foreground);
+}
+
+.tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--redstart-orange);
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--vscode-sideBarForeground);
+  background: transparent;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.tab:hover .tab-close {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.tab-add {
+  width: 24px;
+  min-width: 24px;
+  padding: 4px;
+  font-size: 1rem;
+  color: var(--vscode-sideBarForeground);
+}
+
+.tab-add:hover {
+  color: var(--redstart-orange);
+}
+
+.tab.busy {
+  font-style: italic;
+}
+
+.tab-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--redstart-orange);
 }
 
 /* --- connection banner --------------------------------------------------- */
@@ -38,11 +153,15 @@ button.link {
   background: none;
   border: none;
   padding: 0;
-  color: var(--vscode-textLink-foreground);
+  color: var(--redstart-orange);
   cursor: pointer;
   text-decoration: underline;
   font: inherit;
   white-space: nowrap;
+}
+
+button.link:hover {
+  color: var(--redstart-orange-hover);
 }
 
 /* --- transcript ---------------------------------------------------------- */
@@ -64,6 +183,16 @@ button.link {
   /* Long identifiers and URLs must never widen the panel. */
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.message.pending .body {
+  opacity: 0.55;
+  font-style: italic;
+}
+
+.message.pending > header::after {
+  content: ' · queued';
+  opacity: 0.7;
 }
 
 .message > header {
@@ -306,4 +435,156 @@ button.link {
 #new:hover:not(:disabled),
 #stop:hover:not(:disabled) {
   background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* --- login screen --------------------------------------------------------- */
+
+#login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  background: var(--vscode-sideBar-background);
+}
+
+#login-screen[hidden] {
+  display: none;
+}
+
+.login-crest {
+  width: 64px;
+  height: 64px;
+}
+
+.login-crest svg {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.login-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.login-detail {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--vscode-descriptionForeground);
+  text-align: center;
+  max-width: 280px;
+}
+
+.login-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--vscode-panel-border);
+  border-top-color: var(--redstart-orange);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.login-retry-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--vscode-descriptionForeground);
+  text-align: center;
+  max-width: 280px;
+  opacity: 0.8;
+}
+
+.login-button {
+  padding: 8px 20px;
+  font: inherit;
+  font-size: 0.95rem;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--redstart-black);
+  background: var(--redstart-orange);
+}
+
+.login-button:hover:not(:disabled) {
+  background: var(--redstart-orange-hover);
+}
+
+.login-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 260px;
+}
+
+.login-tabs {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.login-tab {
+  flex: 1;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 0.85rem;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 3px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--vscode-foreground);
+}
+
+.login-tab.active {
+  background: var(--redstart-orange-faint);
+  border-color: var(--redstart-orange);
+  color: var(--redstart-orange);
+}
+
+.login-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.login-field-group {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.login-field-group.active {
+  display: flex;
+}
+
+.login-input {
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  outline: none;
+}
+
+.login-input:focus {
+  border-color: var(--redstart-orange);
 }

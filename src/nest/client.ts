@@ -16,7 +16,9 @@ import {
   NestHttpError,
   credentialValue,
   type AuthConfig,
+  type ClientKeysResponse,
   type Credential,
+  type IssueClientKeyResponse,
   type LoginResponse,
   type McpServersResponse,
   type MeResponse,
@@ -139,6 +141,27 @@ export class NestClient {
 
   logout(signal?: AbortSignal): Promise<void> {
     return this.request<void>('/auth/logout', { method: 'POST', ...(signal ? { signal } : {}) })
+  }
+
+  /**
+   * List this account's per-connector keys and the surfaces the deployment
+   * knows. Used to surface "issue a Yellowscript key" in the sign-in flow.
+   */
+  listClientKeys(signal?: AbortSignal): Promise<ClientKeysResponse> {
+    return this.request<ClientKeysResponse>('/auth/me/client-keys', signal ? { signal } : {})
+  }
+
+  /**
+   * Issue a fresh per-connector client key bound to `surface`. The raw key is
+   * returned exactly once — callers must persist it immediately. A surface the
+   * deployment does not know is refused server-side.
+   */
+  issueClientKey(surface: string, label?: string, signal?: AbortSignal): Promise<IssueClientKeyResponse> {
+    return this.request<IssueClientKeyResponse>('/auth/me/client-keys', {
+      method: 'POST',
+      body: JSON.stringify({ surface, ...(label ? { label } : {}) }),
+      ...(signal ? { signal } : {}),
+    })
   }
 
   // --- Models & MCP ---------------------------------------------------------

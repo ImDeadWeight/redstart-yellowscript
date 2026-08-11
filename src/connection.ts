@@ -261,7 +261,7 @@ export class ConnectionManager {
 
   /** Sign in with a username and password, storing the resulting session token. */
   async signInWithPassword(username: string, password: string, signal?: AbortSignal): Promise<ConnectionState> {
-    const url = this.urlForSignIn()
+    const url = this.privateUrlForSignIn()
     if (!url) return this.fail('Connect to a Nest before signing in.')
 
     const client = this.client ?? this.deps.createClient(url)
@@ -289,7 +289,7 @@ export class ConnectionManager {
 
   /** Sign in with a pasted `rst_` API key. */
   async signInWithApiKey(key: string, signal?: AbortSignal): Promise<ConnectionState> {
-    const url = this.urlForSignIn()
+    const url = this.privateUrlForSignIn()
     if (!url) return this.fail('Connect to a Nest before signing in.')
 
     const client = this.client ?? this.deps.createClient(url)
@@ -317,7 +317,7 @@ export class ConnectionManager {
 
   /** Forget the stored credential for the current server and drop to signed-out. */
   async signOut(): Promise<ConnectionState> {
-    const url = this.urlForSignIn()
+    const url = this.privateUrlForSignIn()
     if (!url) return this.current
 
     // Best-effort: tell the Nest to drop the session. A failure here doesn't
@@ -335,6 +335,40 @@ export class ConnectionManager {
     return this.current
   }
 
+  /**
+   * Sign in by issuing a per-connector client key bound to `surface`.
+   *
+   * Unlike a pasted account-wide apiKey, the surface rides with the key, so the
+   * Nest's gateway can tailor the injected system context to this client (e.g.
+   * the `yellowscript` surface) without trusting a header. Requires an already
+   * authenticated account, which is why this is offered only once a session or
+   * apiKey credential is in place.
+   */
+  async signInWithClient(client: NestClient, surface: string, label?: string, signal?: AbortSignal): Promise<ConnectionState> {
+    const url = this.privateUrlForSignIn()
+    if (!url) return this.fail('Connect to a Nest before signing in.')
+
+    this.client = client
+
+    try {
+      const issued = await client.issueClientKey(surface, label, signal)
+      const credential: Credential = { kind: 'clientKey', key: issued.apiKey, surface }
+      client.setCredential(credential)
+      const me = await client.getMe(signal)
+      await this.deps.credentials.set(url, credential)
+      await this.deps.state.setLastServerUrl(url)
+      this.setState({ status: 'connected', url, authRequired: me.authRequired, user: me.user })
+      return this.current
+    } catch (err) {
+      client.setCredential(null)
+      if (err instanceof NestHttpError && err.isUnauthorized) {
+        this.setState({ status: 'unauthenticated', url, reason: 'rejected' })
+        return this.current
+      }
+      return this.fail(`Could not issue a client key: ${messageOf(err)}`, url)
+    }
+  }
+
   /** Drop the connection entirely and stop auto-reconnecting to it. */
   async disconnect(): Promise<void> {
     this.client = null
@@ -347,7 +381,7 @@ export class ConnectionManager {
    * Moves us out of `connected` so the UI can prompt, without a full reconnect.
    */
   async handleUnauthorized(): Promise<void> {
-    const url = this.urlForSignIn()
+    const url = this.privateUrlForSignIn()
     if (!url) return
     const credential = this.client?.getCredential()
     await this.deps.credentials.delete(url)
@@ -355,12 +389,17 @@ export class ConnectionManager {
     this.setState({
       status: 'unauthenticated',
       url,
-      reason: credential?.kind === 'apiKey' ? 'key-rejected' : 'session-expired',
+      reason: credential?.kind === 'session' ? 'session-expired' : 'key-rejected',
     })
   }
 
+  /** Public view of the server a sign-in would target. */
+  urlForSignIn(): string | undefined {
+    return this.privateUrlForSignIn()
+  }
+
   /** The server a sign-in would target, in any state that has one. */
-  private urlForSignIn(): string | undefined {
+  private privateUrlForSignIn(): string | undefined {
     const state = this.current
     if (state.status === 'connected' || state.status === 'unauthenticated' || state.status === 'connecting') {
       return state.url

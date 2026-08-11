@@ -57,6 +57,7 @@ class Harness {
     let counter = 0
     this.session = new ChatSession({
       getClient: () => this.client,
+      conversationId: 'test',
       onUnauthorized: () => {
         this.unauthorizedCalls++
       },
@@ -314,7 +315,7 @@ describe('ChatSession — failures', () => {
 })
 
 describe('ChatSession — concurrency and abort', () => {
-  test('refuses a second send while a turn is streaming', async () => {
+  test('queues a second send while a turn is streaming', async () => {
     const h = new Harness()
     let release: (() => void) | undefined
     h.respond(async () => {
@@ -327,11 +328,18 @@ describe('ChatSession — concurrency and abort', () => {
     const first = h.session.send('one')
     await h.session.send('two')
 
-    assert.equal(h.ofType('notice')[0]?.level, 'warning')
-    assert.equal(h.requests.length, 1, 'a second request must not be issued')
+    // Second prompt is queued, not rejected. A pending user message is emitted.
+    const notices = h.ofType('notice')
+    assert.equal(notices.length, 0, 'no warning notice is emitted; the prompt queues')
+    const pending = h.ofType('message').find((m) => m.message.pending === true)
+    assert.ok(pending, 'queued prompt emits a pending user message')
+    assert.equal(pending.message.content, 'two')
+    assert.equal(h.requests.length, 1, 'only the first request is issued')
 
     release?.()
     await first
+    // After first completes, the queued turn runs as a second request.
+    assert.equal(h.requests.length, 2, 'queued turn runs after the first finishes')
   })
 
   test('abort passes a signal the client can observe', async () => {
@@ -441,6 +449,7 @@ describe('ChatSession with tools', () => {
     const emitted: HostMessage[] = []
     const session = new ChatSession({
       getClient: () => fakeClient(script),
+      conversationId: 'test',
       onUnauthorized: () => {},
       emit: (message) => emitted.push(message),
       newId: (() => {
@@ -450,7 +459,7 @@ describe('ChatSession with tools', () => {
       tools: () => registry(),
       toolContext: () => ({ workspaceRoots: [workspace] }),
     })
-    return { session, emitted }
+    return { session, emitted, ofType: <T extends HostMessage['type']>(type: T) => emitted.filter((m) => m.type === type) as Array<Extract<HostMessage, { type: T }>> }
   }
 
   test('executes a tool call and answers from its result', async () => {
@@ -468,12 +477,12 @@ describe('ChatSession with tools', () => {
     const h = withTools(readsThenAnswers())
     await h.session.send('read it')
 
-    const call = h.emitted.find((m) => m.type === 'tool/call')
+    const call = h.ofType('tool/call')[0]
     assert.ok(call && call.type === 'tool/call')
     assert.equal(call.name, 'ws_read_file')
     assert.equal(call.recovered, false)
 
-    const result = h.emitted.find((m) => m.type === 'tool/result')
+    const result = h.ofType('tool/result')[0]
     assert.ok(result && result.type === 'tool/result')
     assert.equal(result.isError, false)
     assert.equal(result.callId, call.callId)
@@ -494,10 +503,13 @@ describe('ChatSession with tools', () => {
     assert.ok(tools?.some((entry) => entry.function.name === 'ws_read_file'))
   })
 
-  test('sends a system message scoping what is actually available', async () => {
-    // The gateway's own injected context describes what NEST has configured,
-    // not what this client forwards — it told the model it could create .docx
-    // files. This narrows the claim; the gateway merges rather than duplicating.
+  test('sends no client system message — the Nest owns the system context', async () => {
+    // The Nest gateway derives capability claims from THIS request's tools
+    // array (it prepends an identity + tool-policy block that only fires when
+    // tools are actually present), and reads the Yellowscript surface from the
+    // credential. So Yellowscript must NOT send its own system prose: doing so
+    // would both duplicate the gateway's block and go stale the moment the tool
+    // set changes. The client sends only user/assistant turns and the tools.
     let seen: ChatCompletionRequest | undefined
     const h = withTools(async (request, handlers) => {
       seen = request
@@ -506,10 +518,14 @@ describe('ChatSession with tools', () => {
     })
     await h.session.send('hello')
 
-    const system = seen?.messages[0]
-    assert.equal(system?.role, 'system')
-    assert.match(system?.content ?? '', /ws_read_file/)
-    assert.match(system?.content ?? '', /list is complete/i)
+    assert.ok(
+      !seen?.messages.some((message) => message.role === 'system'),
+      'a client-supplied system message would double the gateway’s injected context',
+    )
+    // Tools still go out — that is what makes the gateway emit its capability
+    // block, and what lets the model actually call them.
+    const tools = seen?.tools as Array<{ function: { name: string } }> | undefined
+    assert.ok(tools?.some((entry) => entry.function.name === 'ws_read_file'))
   })
 
   test('withholding the registry keeps the Phase 1 single round trip', async () => {
@@ -525,6 +541,7 @@ describe('ChatSession with tools', () => {
         }),
       onUnauthorized: () => {},
       emit: (message) => emitted.push(message),
+      conversationId: 'test',
       tools: () => null,
     })
     await session.send('hi')

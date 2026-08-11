@@ -61,6 +61,29 @@ export interface ModelsResponse {
   data: Array<{ id: string; object?: string; created?: number; owned_by?: string }>
 }
 
+/** A surface (connector) id the Nest knows, e.g. `yellowscript`. */
+export type SurfaceId = string
+
+/** GET /auth/me/client-keys — the list of this account's per-connector keys. */
+export interface ClientKeySummary {
+  id: string
+  surface: string
+  label: string
+  keyPrefix: string
+  createdAt: string
+}
+
+export interface ClientKeysResponse {
+  clientKeys: ClientKeySummary[]
+  surfaces: SurfaceId[]
+}
+
+/** The raw key returned exactly once when a client key is issued. */
+export interface IssueClientKeyResponse {
+  apiKey: string
+  clientKey: { id: string; surface: string; label: string; createdAt: string }
+}
+
 /**
  * A complete, assembled tool call — OpenAI's shape, which is what we send back
  * in an assistant message's `tool_calls` and what the agent loop executes.
@@ -81,7 +104,7 @@ export interface ToolCall {
 
 /**
  * A credential for the `Authorization: Bearer <value>` header. Nest accepts
- * both kinds on the same header, but they fail differently and so must be
+ * several kinds on the same header, but they fail differently and so must be
  * told apart:
  *
  *  - `session` tokens live in the Nest's memory only. A Nest restart
@@ -89,13 +112,25 @@ export interface ToolCall {
  *    "log in again", not "your credentials are wrong".
  *  - `apiKey` (`rst_…`) is persistent. A 401 here means the key was revoked or
  *    mistyped, and re-prompting for the same key will not help.
+ *  - `clientKey` (`rst_…`) is a per-connector key issued against a real account
+ *    and bound to a `surface` (here, `yellowscript`). Unlike an account-wide
+ *    apiKey, the surface travels with the key so the Nest's gateway can tailor
+ *    its injected system context to this client without trusting a header. A 401
+ *    means the key was revoked or mistyped.
  */
 export type Credential =
   | { kind: 'session'; token: string; username: string }
   | { kind: 'apiKey'; key: string }
+  | { kind: 'clientKey'; key: string; surface: string }
 
 export function credentialValue(credential: Credential): string {
-  return credential.kind === 'session' ? credential.token : credential.key
+  switch (credential.kind) {
+    case 'session':
+      return credential.token
+    case 'apiKey':
+    case 'clientKey':
+      return credential.key
+  }
 }
 
 /** An HTTP-level failure from Nest, carrying the status so callers can branch. */

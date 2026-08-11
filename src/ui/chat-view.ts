@@ -26,9 +26,15 @@ export interface ChatViewHandlers {
   onSend: (text: string) => void
   onAbort: () => void
   onNewConversation: () => void
+  onListConversations: () => void
+  onSwitchConversation: (id: string) => void
+  onCreateConversation: () => void
+  onDeleteConversation: (id: string) => void
   onRunCommand: (command: 'connect' | 'signIn' | 'showStatus') => void
+  onSignIn: (message: { method: 'password'; username: string; password: string } | { method: 'apiKey'; key: string } | { method: 'clientKey' }) => void
   /** Called when the webview announces itself, so the host can reply with a
-   *  full snapshot. Fires again every time VSCode rebuilds a hidden view. */
+   *  full snapshot. Fires again every time VSCode rebuilds a view it destroyed
+   *  while hidden. */
   onReady: () => void
 }
 
@@ -49,19 +55,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     view.webview.options = {
       enableScripts: true,
-      // Nothing outside our own media folder is loadable, whatever the HTML asks
-      // for.
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media'), vscode.Uri.joinPath(this.extensionUri, 'dist')],
     }
-    view.webview.html = this.buildHtml(view.webview)
 
     view.webview.onDidReceiveMessage((raw: unknown) => {
-      // A webview is a browser context; treat what it posts as untrusted and
-      // validate it structurally before acting on it.
       const message = parseWebviewMessage(raw)
       if (!message) return
       this.dispatch(message)
     })
+
+    view.webview.html = this.buildHtml(view.webview)
 
     view.onDidDispose(() => {
       if (this.view === view) this.view = undefined
@@ -82,8 +85,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'newConversation':
         this.handlers.onNewConversation()
         break
+      case 'listConversations':
+        this.handlers.onListConversations()
+        break
+      case 'switchConversation':
+        this.handlers.onSwitchConversation(message.id)
+        break
+      case 'createConversation':
+        this.handlers.onCreateConversation()
+        break
+      case 'deleteConversation':
+        this.handlers.onDeleteConversation(message.id)
+        break
       case 'runCommand':
         this.handlers.onRunCommand(message.command)
+        break
+      case 'signIn':
+        this.handlers.onSignIn(message)
         break
     }
   }
@@ -104,8 +122,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await vscode.commands.executeCommand(`${ChatViewProvider.viewType}.focus`)
   }
 
-  sendInit(session: SessionSnapshot, messages: ChatMessageView[]): void {
-    this.post({ type: 'init', protocolVersion: PROTOCOL_VERSION, session, messages })
+  sendInit(session: SessionSnapshot, messages: ChatMessageView[], conversationId: string | null): void {
+    this.post({ type: 'init', protocolVersion: PROTOCOL_VERSION, session, messages, conversationId })
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -134,8 +152,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <title>Yellowscript</title>
 </head>
 <body>
+<div id="tab-strip" class="tab-strip"></div>
 <div id="banner" hidden></div>
 <div id="transcript"></div>
+<div id="login-screen" hidden></div>
 <div id="composer">
   <textarea id="prompt" rows="2" placeholder="Connect to a Redstart Nest to start." disabled></textarea>
   <div id="actions">

@@ -45,6 +45,11 @@
           "command": "redstartYellowscript.newChat",
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
+        },
+        {
+          "command": "redstartYellowscript.openSettings",
+          "when": "view == redstartYellowscript.chat",
+          "group": "navigation"
         }
       ]
     },
@@ -54,6 +59,12 @@
         "title": "New Chat",
         "category": "Yellowscript",
         "icon": "$(add)"
+      },
+      {
+        "command": "redstartYellowscript.openSettings",
+        "title": "Open Settings",
+        "category": "Yellowscript",
+        "icon": "$(settings)"
       },
       {
         "command": "redstartYellowscript.connect",
@@ -80,12 +91,17 @@
         "title": "Show Connection Status",
         "category": "Yellowscript"
       },
-      {
-        "command": "redstartYellowscript.inspectTools",
-        "title": "Inspect Workspace Tools",
-        "category": "Yellowscript"
-      }
-    ],
+    {
+      "command": "redstartYellowscript.inspectTools",
+      "title": "Inspect Workspace Tools",
+      "category": "Yellowscript"
+    },
+    {
+      "command": "redstartYellowscript.revertLastWrite",
+      "title": "Revert Last Write",
+      "category": "Yellowscript"
+    }
+  ],
     "configuration": {
       "title": "Redstart Yellowscript",
       "properties": {
@@ -110,6 +126,15 @@
           "type": "boolean",
           "default": true,
           "description": "Try to reconnect to the last known Nest when a window opens."
+        },
+        "redstartYellowscript.approvedWriteTools": {
+          "type": "array",
+          "default": [],
+          "description": "Write tools the user has chosen to always allow in this workspace.",
+          "items": {
+            "type": "string",
+            "enum": ["ws_write_file", "ws_edit_file"]
+          }
         }
       }
     }

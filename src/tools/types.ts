@@ -85,6 +85,57 @@ export interface ToolResult {
   /** True when `content` is a fragment. Also stated inside `content`, because
    *  this flag does not reach the model. */
   truncated: boolean
+  /**
+   * A write that is planned but NOT yet applied. Phase 3 write tools compute the
+   * change, describe it here, and return it for approval — the actual disk write
+   * happens only after the host's approval gate (see the agent loop). The model
+   * never triggers a write directly; a `pendingWrite` result is the request for a
+   * diff review, and the user is the only thing that turns it into bytes.
+   */
+  pendingWrite?: PendingWrite
+  /**
+   * A shell command the model wants run, planned but NOT yet executed.
+   * Phase 4.1's `ws_run_command` returns this for an always-ask confirmation:
+   * the host shows the command verbatim and only runs it on the user's go-ahead.
+   * Unlike `pendingWrite`, nothing is a "diff" — the value is the captured output
+   * the model reads back, so the card shows the command exactly as it will run.
+   */
+  pendingCommand?: PendingCommand
+}
+
+/** A shell command the model proposes to run, for always-ask approval. */
+export interface PendingCommand {
+  /** The verbatim command line. Shown to the user exactly; never rewritten. */
+  command: string
+  /** Absolute working directory, containment-resolved. Empty when unset. */
+  cwd: string
+  /** Human label for the UI card. */
+  label: string
+}
+
+/** A file the model wants written, decoded to absolute paths and final content.
+ *  JSON-safe so it can cross into the approval UI and back unchanged. */
+export interface PendingWrite {
+  /** Workspace-relative label for the UI card. */
+  label: string
+  changes: readonly FileChangePreview[]
+}
+
+export interface FileChangePreview {
+  /** Workspace-relative path, for display. */
+  path: string
+  /** Absolute, containment-resolved target — never used by the model. */
+  absolutePath: string
+  /** True for a brand-new file. */
+  isNew: boolean
+  /** True for a deletion. */
+  isDeleted: boolean
+  /** Full pre-write content (empty for new files). */
+  before: string
+  /** Full post-write content (empty for deletions). */
+  after: string
+  /** A short unified diff for the review UI. */
+  diff: string
 }
 
 export interface Tool {
@@ -100,8 +151,17 @@ export interface Tool {
 
 // --- Result construction ----------------------------------------------------
 
-export function toolOk(content: string, summary: string, truncated = false): ToolResult {
-  return { content, isError: false, summary, truncated }
+export function toolOk(
+  content: string,
+  summary: string,
+  truncated = false,
+  pendingWrite?: PendingWrite,
+  pendingCommand?: PendingCommand,
+): ToolResult {
+  const result: ToolResult = { content, isError: false, summary, truncated }
+  if (pendingWrite) result.pendingWrite = pendingWrite
+  if (pendingCommand) result.pendingCommand = pendingCommand
+  return result
 }
 
 /**

@@ -39,7 +39,7 @@ import type { StreamChannel } from '../nest/streaming.ts'
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -60,6 +60,10 @@ export interface ChatMessageView {
   streaming?: boolean
   /** True when the user stopped this turn — partial content is still valid. */
   aborted?: boolean
+  /** True while this prompt is queued behind a turn that is still running. It
+   *  becomes part of the transcript (pending flips to false) when its turn
+   *  starts, so a queued prompt shows in order, greyed, until then. */
+  pending?: boolean
   stats?: TurnStats
 }
 
@@ -69,6 +73,16 @@ export interface TurnStats {
   completionTokens?: number
   /** 'stop', 'length', 'tool_calls' … straight from the model. */
   finishReason?: string
+}
+
+/** One conversation tab. `busy` and `queued` let the strip show a running tab
+ *  and how many prompts are waiting behind it, without the webview tracking
+ *  every conversation's stream. */
+export interface ConversationView {
+  id: string
+  title: string
+  busy: boolean
+  queued: number
 }
 
 /**
@@ -87,10 +101,13 @@ export interface SessionSnapshot {
   /** Present once connected. Not a secret — but still only for display. */
   serverUrl?: string
   model?: string
-  /** False whenever sending would fail: not connected, or a turn is running. */
+  /** False whenever sending would fail: only when not connected. A queued turn
+   *  is allowed even while `busy`, so this no longer depends on `busy`. */
   canSend: boolean
-  /** True while a turn is streaming, so the UI can offer Stop. */
+  /** True while the active conversation's turn is streaming, so the UI can offer Stop. */
   busy: boolean
+  /** Prompts waiting behind the active conversation's running turn. */
+  queued: number
 }
 
 // ---------------------------------------------------------------------------
@@ -104,9 +121,18 @@ export type WebviewMessage =
   | { type: 'send'; text: string }
   | { type: 'abort' }
   | { type: 'newConversation' }
+  | { type: 'listConversations' }
+  | { type: 'switchConversation'; id: string }
+  | { type: 'createConversation' }
+  | { type: 'deleteConversation'; id: string }
   /** Delegate to an extension command — the webview never drives connection or
    *  auth logic itself, it only asks for the command the user clicked. */
   | { type: 'runCommand'; command: 'connect' | 'signIn' | 'showStatus' }
+  /** Webview-side sign-in form submission. Carries credentials directly so the
+   *  host can call the manager without native dialogs. */
+  | { type: 'signIn'; method: 'password'; username: string; password: string }
+  | { type: 'signIn'; method: 'apiKey'; key: string }
+  | { type: 'signIn'; method: 'clientKey' }
 
 // ---------------------------------------------------------------------------
 // host → webview
@@ -114,23 +140,29 @@ export type WebviewMessage =
 
 export type HostMessage =
   /** Full state handoff in reply to `ready`. Always safe to apply from scratch. */
-  | { type: 'init'; protocolVersion: number; session: SessionSnapshot; messages: ChatMessageView[] }
+  | { type: 'init'; protocolVersion: number; session: SessionSnapshot; messages: ChatMessageView[]; conversationId: string | null }
   | { type: 'session'; session: SessionSnapshot }
-  /** Replace the whole transcript (new conversation, restore, compaction). */
-  | { type: 'conversation'; messages: ChatMessageView[] }
+   /** Replace the whole transcript (switch / restore). Now carries which tab it
+    *  belongs to so a delta for a background tab can be dropped or buffered. */
+   | { type: 'conversation'; conversationId: string; messages: ChatMessageView[] }
+   /** The full list of local conversations, for the tab strip. */
+   | { type: 'conversationList'; conversations: ConversationView[]; activeId: string | null }
+   /** The active conversation changed (switch / create / delete). */
+   | { type: 'activeConversationChanged'; id: string | null }
   /** A message was added — user prompt or the empty assistant turn about to stream. */
-  | { type: 'message'; message: ChatMessageView }
-  | { type: 'turn/delta'; id: string; channel: StreamChannel; text: string }
-  | { type: 'turn/completed'; id: string; stats?: TurnStats; aborted?: boolean }
-  | { type: 'turn/failed'; id: string; message: string }
+  | { type: 'message'; conversationId: string; message: ChatMessageView }
+  | { type: 'turn/delta'; conversationId: string; id: string; channel: StreamChannel; text: string }
+  | { type: 'turn/completed'; conversationId: string; id: string; stats?: TurnStats; aborted?: boolean }
+  | { type: 'turn/failed'; conversationId: string; id: string; message: string }
   // Tool activity gets its own message types rather than a third text channel.
   // A tool call is STRUCTURE, and `turn/delta` carries text — repurposing it
   // would mean the renderer parsing prose to find out what ran. Both carry the
   // turn id so a late message from an aborted turn cannot attach itself to the
   // turn that replaced it.
-  | { type: 'tool/call'; turnId: string; callId: string; name: string; arguments: string; recovered: boolean }
+  | { type: 'tool/call'; conversationId: string; turnId: string; callId: string; name: string; arguments: string; recovered: boolean }
   | {
       type: 'tool/result'
+      conversationId: string
       turnId: string
       callId: string
       name: string
@@ -141,8 +173,15 @@ export type HostMessage =
       isError: boolean
       truncated: boolean
     }
-  /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
-  | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
+   /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
+   | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
+   /** Phase 4: the current tool-set inventory (local ws_* + live Nest tools), sent
+    *  so the webview can render the tool picker and grey out server-banned names.
+    *  Each entry carries its origin so the card can show "runs on Nest" vs local. */
+   | {
+       type: 'tools'
+       names: readonly string[]
+     }
 
 // ---------------------------------------------------------------------------
 // Guards
@@ -170,10 +209,34 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return { type: 'abort' }
     case 'newConversation':
       return { type: 'newConversation' }
+    case 'listConversations':
+      return { type: 'listConversations' }
+    case 'switchConversation':
+      return typeof msg.id === 'string' ? { type: 'switchConversation', id: msg.id } : null
+    case 'createConversation':
+      return { type: 'createConversation' }
+    case 'deleteConversation':
+      return typeof msg.id === 'string' ? { type: 'deleteConversation', id: msg.id } : null
     case 'runCommand':
       return msg.command === 'connect' || msg.command === 'signIn' || msg.command === 'showStatus'
         ? { type: 'runCommand', command: msg.command }
         : null
+    case 'signIn':
+      if (typeof msg.method !== 'string') return null
+      if (msg.method === 'password') {
+        return typeof msg.username === 'string' && typeof msg.password === 'string'
+          ? { type: 'signIn', method: 'password', username: msg.username, password: msg.password }
+          : null
+      }
+      if (msg.method === 'apiKey') {
+        return typeof msg.key === 'string'
+          ? { type: 'signIn', method: 'apiKey', key: msg.key }
+          : null
+      }
+      if (msg.method === 'clientKey') {
+        return { type: 'signIn', method: 'clientKey' }
+      }
+      return null
     default:
       return null
   }

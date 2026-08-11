@@ -1,4 +1,8 @@
 {
+  "redstartYellowscript.serverUrl": "http://192.168.0.213:19080",
+  "redstartYellowscript.approvedWriteTools": [
+    "ws_edit_file"
+  ]
   // Deliberately empty.
   //
   // This is the workspace F5 opens, and leaving `redstartYellowscript.serverUrl`

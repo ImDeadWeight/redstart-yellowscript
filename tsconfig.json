@@ -27,5 +27,5 @@
   // Everything else it imports (markdown.ts, chat/protocol.ts) is
   // environment-agnostic and is checked by both projects.
   "include": ["src/**/*.ts", "esbuild.mjs"],
-  "exclude": ["src/webview/main.ts"]
+  "exclude": ["src/webview/**/*.ts"]
 }

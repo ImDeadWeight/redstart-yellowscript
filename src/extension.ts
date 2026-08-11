@@ -20,7 +20,7 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
-import type { HostMessage, SessionSnapshot } from './chat/protocol.ts'
+import type { HostMessage, SessionSnapshot, ConversationView } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
@@ -31,16 +31,37 @@ import {
   editorStateProvider,
   resolveRipgrep,
   workspaceRoots,
+  approvalStore,
 } from './ui/tool-providers.ts'
+import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
+import { makeCommandGate } from './ui/run-command.ts'
+import { McpHost, type McpTool } from './nest/mcp-host.ts'
+import { openMcpSseStream } from './ui/mcp-stream.ts'
+import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
+import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
+import { conversationStore, type Conversation } from './ui/conversation-store.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
 let manager: ConnectionManager | undefined
 let statusBar: StatusBar | undefined
 let output: vscode.LogOutputChannel | undefined
-let session: ChatSession | undefined
 let chatView: ChatViewProvider | undefined
 let tools: ToolRegistry | undefined
+let mcpHost: McpHost | null = null
+let conversations: ReturnType<typeof conversationStore>
+let activeConversationId: string | null = null
+/** One ChatSession per conversation, keyed by conversation id. Tabs own their
+ *  own transcript and request lifecycle, so switching tabs is a pure view
+ *  change and a running turn keeps streaming in its own tab. */
+let sessions = new Map<string, ChatSession>()
+/** The merged registry — local ws_* tools + live Nest tools. Rebuilt whenever the
+ *  Nest tool set changes (on connect and on re-list). Cached because the agent
+ *  loop reads it per turn. */
+let mergedTools: ToolRegistry | null = null
+/** Last successful write checkpoint per workspace root, for `Revert Last Write`.
+ *  Only the most recent is kept — a multistep revert is out of scope for now. */
+const lastCheckpoint = new Map<string, { checkpoint: Checkpoint; files: readonly StagedFile[] }>()
 /** Resolved once — the binary does not move while the window is open, and
  *  probing the filesystem on every search would be wasteful. */
 let ripgrepPath: string | null = null
@@ -48,6 +69,14 @@ let ripgrepPath: string | null = null
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
   statusBar = new StatusBar()
+  conversations = conversationStore(context.workspaceState)
+
+  // The panel always has a conversation open, so the first chat is a real tab
+  // from the start — not an untracked transcript that vanishes on the first
+  // switch. Reuse the oldest existing conversation in a restored workspace;
+  // otherwise open a fresh "New chat" that participates in the tab strip.
+  const existing = conversations.list()[0]
+  activeConversationId = existing?.id ?? conversations.create('New chat').id
 
   manager = new ConnectionManager({
     credentials: new SecretCredentialStore(context.secrets),
@@ -85,49 +114,135 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output.debug(`ripgrep: ${ripgrepPath}`)
   }
 
-  session = new ChatSession({
-    getClient: () => manager?.activeClient ?? null,
-    onUnauthorized: () => manager?.handleUnauthorized(),
-    // Resolved per turn, not captured once: a user can add or remove a folder
-    // mid-conversation, and with no folder open the tools are withheld
-    // entirely rather than offered in a state where they can only refuse.
-    tools: () => (workspaceRoots().length > 0 ? (tools ?? null) : null),
-    toolContext: () => ({ workspaceRoots: workspaceRoots() }),
-    emit: (message) => {
-      chatView?.post(message)
-      // The status bar shows the generation rate of the most recent turn — the
-      // number that tells you at a glance whether the Nest is healthy.
-      if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
-        statusBar?.setModel(session?.currentModel ?? null, message.stats.tokensPerSecond)
-      }
-      logToolActivity(message)
-    },
-  })
+  // A session is created lazily per conversation (see getSession). No singleton
+  // here — the tab strip is the source of truth for which conversations exist.
 
   chatView = new ChatViewProvider(context.extensionUri, {
     onSend: (text) => {
-      const finished = session?.send(text)
-      // `send` marks itself busy synchronously before its first await, so this
-      // observes busy=true and the webview can swap Send for Stop immediately
-      // rather than after the whole turn.
+      let id = activeConversationId
+      // If there is no open tab, create one so the prompt has somewhere to go.
+      if (!id) {
+        const conv = conversations.create('New chat')
+        id = conv.id
+        activeConversationId = id
+        pushConversations()
+        pushActiveConversation()
+      }
+      const conv = conversations.get(id)
+      const finished = getSession(id).send(text)
       pushSession()
-      void finished?.then(pushSession)
+      // Auto-title a still-untitled conversation from its first prompt, then
+      // keep the tab strip in sync. Title only reads the transcript once the
+      // turn (or its queue) is underway.
+      void finished?.then(() => {
+        if (conv && conv.title === 'New chat') {
+          const firstUser = getSession(id).transcript.find((m) => m.role === 'user')
+          if (firstUser) {
+            conv.title = titleFor(firstUser.content)
+            conversations.save(conv)
+            pushConversations()
+          }
+        }
+        pushSession()
+      })
     },
     onAbort: () => {
-      session?.abort()
+      if (activeConversationId) getSession(activeConversationId).abort()
       pushSession()
     },
     onNewConversation: () => {
-      session?.reset()
+      const conv = conversations.create('New chat')
+      activeConversationId = conv.id
+      // Tell the webview which tab is active BEFORE reset emits the empty
+      // transcript, otherwise the conversation message is dropped because the
+      // webview's activeConversationId hasn't been updated yet.
+      pushActiveConversation()
+      getSession(conv.id).reset()
+      pushConversations()
       pushSession()
+    },
+    onListConversations: () => {
+      chatView?.post({
+        type: 'conversationList',
+        conversations: toViews(conversations.list()),
+        activeId: activeConversationId,
+      })
+    },
+    onSwitchConversation: (id) => {
+      switchConversation(id)
+    },
+    onCreateConversation: () => {
+      const conv = conversations.create('New chat')
+      activeConversationId = conv.id
+      // A fresh session — no transcript to load, so nothing aborts.
+      pushConversations()
+      pushActiveConversation()
+      // Send the empty transcript so the webview clears the old conversation
+      // from the screen. Without this, the previous tab's text lingers until
+      // the user switches away and back.
+      chatView?.post({ type: 'conversation', conversationId: conv.id, messages: [] })
+      pushSession()
+    },
+    onDeleteConversation: (id) => {
+      sessions.get(id)?.abort()
+      sessions.delete(id)
+      conversations.delete(id)
+      if (activeConversationId === id) {
+        const remaining = conversations.list()
+        activeConversationId = remaining[0]?.id ?? null
+        // Paint the new active conversation's transcript so the webview does
+        // not keep showing the conversation that was just closed.
+        if (activeConversationId) {
+          const session = getSession(activeConversationId)
+          chatView?.post({ type: 'conversation', conversationId: activeConversationId, messages: session.snapshot() })
+        }
+        pushActiveConversation()
+        pushSession()
+      }
+      pushConversations()
     },
     onRunCommand: (command) => {
       void vscode.commands.executeCommand(`redstartYellowscript.${command}`)
     },
+    onSignIn: async (message) => {
+      if (!manager) return
+      let result: ConnectionState | undefined
+      if (message.method === 'password') {
+        result = await manager.signInWithPassword(message.username, message.password)
+      } else if (message.method === 'apiKey') {
+        result = await manager.signInWithApiKey(message.key)
+      } else {
+        const url = manager.urlForSignIn()
+        if (!url) return
+        const client = new NestClient(url)
+        const existing = manager.activeClient?.getCredential()
+        if (existing) client.setCredential(existing)
+        result = await manager.signInWithClient(client, 'yellowscript', 'Yellowscript VS Code extension')
+      }
+      if (!result) return
+      if (result.status === 'connected') {
+        vscode.window.showInformationMessage(describeState(result))
+      } else if (result.status === 'unauthenticated' && result.reason === 'rejected') {
+        vscode.window.showErrorMessage('Sign-in failed. Check the credentials and try again.')
+      } else if (result.status === 'error') {
+        vscode.window.showErrorMessage(result.message)
+      }
+    },
     // Fires on first open AND every time VSCode rebuilds a view it destroyed
     // while hidden — so this must be a complete handoff, not a delta.
     onReady: () => {
-      chatView?.sendInit(snapshot(), session?.snapshot() ?? [])
+      pushConversations()
+      pushActiveConversation()
+      if (activeConversationId) {
+        const conv = conversations.get(activeConversationId)
+        const session = getSession(activeConversationId)
+        // If the active conversation has a saved transcript and nothing is
+        // streaming, seed the session so the panel opens on the right chat.
+        if (conv && !session.busy) session.load(conv.messages)
+        chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId)
+      } else {
+        chatView?.sendInit(snapshot(null), [], null)
+      }
     },
   })
 
@@ -147,23 +262,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.signOut', signOutCommand),
     vscode.commands.registerCommand('redstartYellowscript.showStatus', showStatusCommand),
     vscode.commands.registerCommand('redstartYellowscript.newChat', newChatCommand),
+    vscode.commands.registerCommand('redstartYellowscript.openSettings', openSettingsCommand),
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
+    vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
     // Silent: no scan and no error popup on startup. A user who opens a window
     // with the Nest switched off should see a quiet status bar, not a modal.
     void manager
-      .connect({ ...explicitUrl(), noDiscovery: !explicitUrl().url })
+      .connect({ ...explicitUrl(), noDiscovery: !!explicitUrl().url })
       .catch((err: unknown) => output?.error('Auto-connect failed', err))
   }
 }
 
 export function deactivate(): void {
+  mcpHost?.stop()
   statusBar?.dispose()
   statusBar = undefined
-  session?.abort()
-  session = undefined
+  // Cancel every conversation's in-flight turn before tearing down.
+  for (const session of sessions.values()) session.abort()
+  sessions.clear()
   chatView = undefined
   manager = undefined
 }
@@ -260,20 +379,87 @@ function loggedDiscovery(): () => Promise<DiscoveredNest[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-conversation sessions
+// ---------------------------------------------------------------------------
+
+/**
+ * The ChatSession for a conversation, created on demand and cached. Each tab
+ * owns its transcript, its AbortController, and its prompt queue, so switching
+ * tabs never touches another tab's running turn.
+ */
+function getSession(id: string): ChatSession {
+  let session = sessions.get(id)
+  if (!session) {
+    session = new ChatSession({
+      getClient: () => manager?.activeClient ?? null,
+      onUnauthorized: () => manager?.handleUnauthorized(),
+      // Resolved per turn, not captured once: a user can add or remove a folder
+      // mid-conversation, and with no folder open the tools are withheld
+      // entirely rather than offered in a state where they can only refuse.
+      // The merged registry (local ws_* + live Nest tools) is rebuilt whenever
+      // the Nest re-lists, which happens on every (re)connect (Phase 4.2/4.3).
+      tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
+      toolContext: () => ({ workspaceRoots: workspaceRoots() }),
+      approveChange: (pending) => {
+        const roots = workspaceRoots()
+        if (roots.length === 0) {
+          output?.warn('No workspace folder is open, so writes cannot be reviewed or applied.')
+          return Promise.resolve(false)
+        }
+        const gate = makeApprovalGate({
+          checkpoints: checkpointForWorkspace(roots[0]!),
+          store: approvalStore(),
+          recordCheckpoint: (checkpoint, files) => {
+            lastCheckpoint.set(roots[0]!, { checkpoint, files })
+          },
+        })
+        return gate(pending)
+      },
+      approveCommand: (pending) => makeCommandGate()(pending),
+      conversationId: id,
+      onPersist: () => persistConversation(id),
+      emit: (message) => {
+        chatView?.post(message)
+        if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
+          statusBar?.setModel(getSession(message.conversationId).currentModel ?? null, message.stats.tokensPerSecond)
+        }
+        logToolActivity(message)
+      },
+    })
+    sessions.set(id, session)
+  }
+  return session
+}
+
+/** Persist a conversation's transcript from its session to the store. */
+function persistConversation(id: string): void {
+  const session = sessions.get(id)
+  const conv = conversations.get(id)
+  if (!session || !conv) return
+  conv.messages = session.snapshot()
+  conversations.save(conv)
+}
+
+// ---------------------------------------------------------------------------
 // Session snapshot — the projection the webview renders around the transcript
 // ---------------------------------------------------------------------------
 
-function snapshot(): SessionSnapshot {
+/** Snapshot for one conversation: `connected` gates sending; `busy` and
+ *  `queued` describe that conversation's own turn, not a global one. */
+function snapshot(id: string | null): SessionSnapshot {
   const state = manager?.state ?? { status: 'disconnected' as const }
-  const busy = session?.busy === true
   const connected = state.status === 'connected'
+  const session = id ? sessions.get(id) : undefined
+  const busy = session?.busy === true
+  const queued = session?.queued ?? 0
 
   const base: SessionSnapshot = {
     connection: state.status,
     detail: describeState(state),
-    // Sending needs a connection AND no turn already running.
-    canSend: connected && !busy,
+    // Sending only needs a connection — a queued turn is allowed while busy.
+    canSend: connected,
     busy,
+    queued,
   }
   if ('url' in state && state.url) base.serverUrl = state.url
   const model = session?.currentModel
@@ -282,7 +468,50 @@ function snapshot(): SessionSnapshot {
 }
 
 function pushSession(): void {
-  chatView?.post({ type: 'session', session: snapshot() })
+  chatView?.post({ type: 'session', session: snapshot(activeConversationId) })
+}
+
+function pushConversations(): void {
+  chatView?.post({ type: 'conversationList', conversations: toViews(conversations.list()), activeId: activeConversationId })
+}
+
+function pushActiveConversation(): void {
+  chatView?.post({ type: 'activeConversationChanged', id: activeConversationId })
+}
+
+/** Save the active conversation's transcript to the store. Pure bookkeeping
+ *  now — it never aborts a turn, because switching tabs doesn't. */
+function saveCurrentConversation(): void {
+  if (!activeConversationId) return
+  persistConversation(activeConversationId)
+}
+
+/** Switch the visible tab. A pure view change: the target session is left
+ *  exactly as it is (streaming or idle), and we just hand its transcript to the
+ *  webview. The previously active session keeps running untouched. */
+function switchConversation(id: string): void {
+  const conv = conversations.get(id)
+  if (!conv || id === activeConversationId) return
+  activeConversationId = id
+  const session = getSession(id)
+  // Send activeConversationChanged FIRST so the webview's activeConversationId
+  // is updated before the conversation message arrives. Otherwise the
+  // conversation message is dropped (conversationId !== activeConversationId).
+  pushActiveConversation()
+  chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
+  pushSession()
+}
+
+function toViews(list: Conversation[]): ConversationView[] {
+  return list.map((c) => {
+    const session = sessions.get(c.id)
+    return { id: c.id, title: c.title, busy: session?.busy === true, queued: session?.queued ?? 0 }
+  })
+}
+
+function titleFor(text: string): string {
+  const cleaned = text.trim().replace(/\s+/g, ' ')
+  return cleaned.length <= 40 ? cleaned : cleaned.slice(0, 37).trimEnd() + '…'
 }
 
 // ---------------------------------------------------------------------------
@@ -314,9 +543,17 @@ async function refreshModel(): Promise<void> {
 }
 
 async function newChatCommand(): Promise<void> {
-  session?.reset()
+  const conv = conversations.create('New chat')
+  activeConversationId = conv.id
+  getSession(conv.id).reset()
+  pushConversations()
+  pushActiveConversation()
   pushSession()
   await chatView?.reveal()
+}
+
+async function openSettingsCommand(): Promise<void> {
+  await vscode.commands.executeCommand('workbench.action.openSettings', 'redstartYellowscript')
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +590,10 @@ async function connectCommand(): Promise<void> {
 }
 
 async function disconnectCommand(): Promise<void> {
+  mcpHost?.stop()
+  mcpHost = null
+  mergedTools = null
+  pushTools()
   await manager?.disconnect()
 }
 
@@ -374,12 +615,18 @@ async function signInCommand(): Promise<void> {
     [
       { label: '$(account) Username and password', detail: 'Sign in with a Redstart account', id: 'password' },
       { label: '$(key) API key', detail: 'Paste an rst_… key', id: 'apiKey' },
+      { label: '$(plug) Yellowscript connector key', detail: 'Issue a key bound to this client (shows the Yellowscript identity)', id: 'clientKey' },
     ],
     { title: 'Sign in to Redstart Nest', placeHolder: 'How do you want to authenticate?' },
   )
   if (!method) return
 
-  const result = method.id === 'password' ? await passwordFlow() : await apiKeyFlow()
+  const result =
+    method.id === 'password'
+      ? await passwordFlow()
+      : method.id === 'apiKey'
+        ? await apiKeyFlow()
+        : await clientKeyFlow()
   if (!result) return
 
   if (result.status === 'connected') {
@@ -430,6 +677,52 @@ async function apiKeyFlow(): Promise<ConnectionState | undefined> {
     { location: vscode.ProgressLocation.Window, title: 'Verifying key…' },
     () => manager!.signInWithApiKey(key),
   )
+}
+
+/**
+ * Issue a connector key bound to the `yellowscript` surface.
+ *
+ * The point of this path is the surface: a key issued here carries `surface:
+ * "yellowscript"`, which the Nest gateway reads from the credential (never a
+ * header) and uses to inject the Yellowscript identity block into the system
+ * context. It requires an already-authenticated account — the key is minted
+ * against whoever is signed in — so this is only offered from the sign-in
+ * picker, and only meaningful once a session or apiKey credential exists.
+ */
+async function clientKeyFlow(): Promise<ConnectionState | undefined> {
+  const state = manager?.state
+  if (
+    state?.status !== 'connected' &&
+    state?.status !== 'unauthenticated' &&
+    state?.status !== 'connecting' &&
+    state?.status !== 'error'
+  ) {
+    vscode.window.showWarningMessage('Connect and sign in to a Redstart Nest first.')
+    return undefined
+  }
+
+  const url = manager?.urlForSignIn?.()
+  if (!url) return undefined
+
+  const client = new NestClient(url)
+  // Reuse the existing session/apiKey so the request to issue a key is itself
+  // authenticated; signInWithClient re-points the live client at the new key.
+  const existing = manager?.activeClient?.getCredential()
+  if (existing) client.setCredential(existing)
+
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: 'Issuing Yellowscript connector key…' },
+    () => manager!.signInWithClient(client, 'yellowscript', 'Yellowscript VS Code extension'),
+  )
+
+  if (result.status === 'connected') {
+    vscode.window.showInformationMessage('Yellowscript connector key issued — the Nest now knows this is Yellowscript.')
+  } else if (result.status === 'error') {
+    vscode.window.showErrorMessage(result.message)
+  } else if (result.status === 'unauthenticated' && result.reason === 'rejected') {
+    vscode.window.showErrorMessage('Could not issue a connector key. Sign in with a username/password or API key first.')
+  }
+  return result
 }
 
 async function signOutCommand(): Promise<void> {
@@ -527,6 +820,49 @@ async function inspectToolsCommand(): Promise<void> {
   vscode.window.showInformationMessage('Yellowscript: tool report written to the output channel.')
 }
 
+/**
+ * Restore the files from the most recent approved write via the shadow git
+ * checkpoint. This is the safety net Phase 3 promised: every write is snapshotted
+ * before it touches disk, so a bad edit or a confused model can be undone.
+ *
+ * Only the LAST checkpoint is tracked (a multi-step undo history is out of
+ * scope). If no write has happened this session, or the checkpoint was never
+ * created (e.g. git was unavailable), we say so rather than guessing.
+ */
+async function revertLastWriteCommand(): Promise<void> {
+  const roots = workspaceRoots()
+  if (roots.length === 0) {
+    vscode.window.showWarningMessage('Open a workspace folder before reverting a write.')
+    return
+  }
+  const root = roots[0]!
+  const last = lastCheckpoint.get(root)
+  if (!last) {
+    vscode.window.showInformationMessage('Yellowscript: nothing to revert — no write has been checkpointed yet.')
+    return
+  }
+
+  const files = last.files.map((f) => f.workspaceAbsolute)
+  const choice = await vscode.window.showWarningMessage(
+    `Revert the last Yellowscript write? This restores ${files.length} file${files.length === 1 ? '' : 's'} to their pre-write state:`,
+    { modal: true, detail: files.join('\n') },
+    'Revert',
+  )
+  if (choice !== 'Revert') return
+
+  try {
+    const manager = checkpointForWorkspace(root)
+    await manager.revert(last.checkpoint, last.files)
+    lastCheckpoint.delete(root)
+    vscode.window.showInformationMessage(`Yellowscript: reverted the last write (${files.length} file${files.length === 1 ? '' : 's'}).`)
+    output?.info(`revert: restored ${files.length} file(s) from checkpoint ${last.checkpoint.revision.slice(0, 12)}`)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    vscode.window.showErrorMessage(`Could not revert the last write: ${reason}`)
+    output?.error('revert failed', err)
+  }
+}
+
 /** Manual fallback for a Nest discovery can't see (different subnet, VPN). */
 async function promptForServerUrl(): Promise<void> {
   const entered = await vscode.window.showInputBox({
@@ -587,6 +923,99 @@ function onStateChanged(state: ConnectionState): void {
   output?.info(`connection: ${state.status}${target}`)
 
   // Re-ask on every (re)connect rather than caching: the Nest operator can swap
-  // the loaded model without the connection ever dropping.
-  if (state.status === 'connected') void refreshModel()
+  // the loaded model without the connection ever dropping, and the MCP tool set
+  // follows the active profile — so both get re-fetched on every (re)connect.
+  if (state.status === 'connected') {
+    void refreshModel()
+    void connectMcpHost()
+  }
+}
+
+/**
+ * Bring up the MCP host against the connected Nest. Phase 4.2/4.3: discovers the
+ * built-in MCP server via /redstart/mcp-servers, opens the SSE stream, lists
+ * tools, and merges them with the local ws_* set under a disjointness assertion.
+ *
+ * Re-run on every (re)connect — the tool set follows the active profile, so a
+ * cached list is stale the moment an operator switches profiles without the
+ * connection dropping. On failure the extension still works with just the local
+ * ws_* tools — the MCP host is a bonus, not a hard dependency.
+ */
+function connectMcpHost(): void {
+  const client = manager?.activeClient
+  if (!client) return
+
+  // Drop any previous session: a reconnect means a new SSE stream and a fresh
+  // tool set.
+  mcpHost?.stop()
+  mcpHost = null
+  mergedTools = null
+  let currentDisabled = new Set<string>()
+  pushTools()
+  const host = new McpHost(
+    {
+      baseUrl: client.baseUrl,
+      listMcpServers: (signal) => client.listMcpServers(signal),
+      fetch: (input, init) => fetch(input, init),
+      getCredential: () => client.getCredential(),
+    },
+    {
+      openStream: (url: string) => openMcpSseStream((input, init) => fetch(input, init), url),
+      onTools: (mcpTools: readonly McpTool[]) => {
+        const refs: NestToolRef[] = mcpTools
+          .filter((t) => !currentDisabled.has(t.name))
+          .map((t) => {
+            const ref: NestToolRef = {
+              name: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+              execute: (args: unknown) => host.callTool(t.name, args),
+            }
+            if (t.meta) ref.meta = t.meta
+            return ref
+          })
+        const base = tools ?? mergedTools
+        if (!base) {
+          output?.warn('mcp: local tools not ready, dropping Nest tools')
+          return
+        }
+        try {
+          mergedTools = mergeNestTools(base, refs)
+          output?.info(
+            `mcp: merged ${refs.length} Nest tools with ${base.names.length} local ws_* tools`,
+          )
+          pushTools()
+        } catch (err) {
+          output?.error(`mcp: merge rejected — ${(err as Error).message}`)
+        }
+      },
+      onConnection: (conn) => {
+        output?.info(
+          `mcp: connected to ${conn.servers[0]?.name ?? 'unknown'} (${conn.servers.length} server(s))`,
+        )
+        // Track server-banned tool names for UX greying (HANDOFF 4.4). The
+        // gateway also strips them server-side — this is the visibility layer.
+        currentDisabled = new Set(conn.disabledTools)
+      },
+      onError: (err) => {
+        output?.error(`mcp: ${err.message}`)
+        // A dead MCP host should not brick the extension — clear the merged set
+        // so the model sees only local tools, and let the next reconnect retry.
+        mergedTools = null
+        pushTools()
+      },
+    },
+  )
+
+  mcpHost = host
+  void host.connect().catch((err: unknown) => {
+    output?.error('mcp: connect failed', err)
+  })
+}
+
+/** Push the current tool set to the webview so the picker and cards reflect it. */
+function pushTools(): void {
+  const current = mergedTools ?? tools
+  if (!current) return
+  chatView?.post({ type: 'tools', names: current.names })
 }

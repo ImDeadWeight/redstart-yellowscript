@@ -36,7 +36,7 @@ import type { ChatCompletionRequest, StreamHandlers, StreamResult } from '../nes
 import type { ToolCall } from '../nest/types.ts'
 import type { ToolCallDelta, StreamTimings } from '../nest/streaming.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
-import type { ToolContext, ToolResult } from '../tools/types.ts'
+import type { PendingCommand, PendingWrite, ToolContext, ToolResult } from '../tools/types.ts'
 import { createApiToolCalls, parseToolCallsFromTurn } from './tool-call-parser.ts'
 
 /**
@@ -97,6 +97,32 @@ export interface AgentLoopHandlers extends StreamHandlers {
   onIteration?: (iteration: number) => void
 }
 
+/**
+ * The approval gate for a planned write.
+ *
+ * The write tools return a `PendingWrite` (a decoded, containment-checked change
+ * that has NOT touched disk). The loop hands it to this gate, which the host
+ * implements: checkpoint the pre-write state, show the native diff editor, wait
+ * for the user's Apply/Reject, and — only on approve — materialise the bytes.
+ *
+ * Returning `true` means the change was applied; `false` means rejected (or a
+ * per-workspace "always allow" was not granted and the user declined). The loop
+ * reports the outcome honestly to the model either way. Kept as an injected port
+ * so the whole loop stays testable with a scripted gate — the real one lives in
+ * the host alongside `vscode`.
+ */
+export type ApprovalGate = (pending: PendingWrite) => Promise<boolean>
+
+/**
+ * The approval gate for a planned command (Phase 4.1). Unlike writes, a command
+ * is always-ask (no "always allow"): the host shows it verbatim, runs it in the
+ * integrated terminal on confirmation, captures the output, and returns it. The
+ * returned string is the captured stdout/stderr to feed the model; `null` means the
+ * user rejected it. Kept as an injected port for testability — the real one lives
+ * in the host alongside `vscode`.
+ */
+export type CommandApprovalGate = (pending: PendingCommand) => Promise<string | null>
+
 export interface AgentLoopOptions {
   client: CompletionStreamer
   /** The conversation so far. Not mutated — the loop works on a copy. */
@@ -106,6 +132,12 @@ export interface AgentLoopOptions {
   handlers?: AgentLoopHandlers
   signal?: AbortSignal
   maxIterations?: number
+  /** Phase 3 write approval. When present, a tool result carrying a
+   *  `pendingWrite` is routed through it before the loop continues. */
+  approveChange?: ApprovalGate | undefined
+  /** Phase 4.1 command approval. When present, a tool result carrying a
+   *  `pendingCommand` is routed through it (always-ask) before the loop continues. */
+  approveCommand?: CommandApprovalGate | undefined
 }
 
 /**
@@ -251,15 +283,38 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         call.function.arguments,
         options.toolContext,
       )
-      handlers.onToolResult?.(call, toolResult)
-      toolRuns.push({ call, result: toolResult, recovered: wasRecovered })
+
+      // Phase 3: a write tool returns a PLAN, not bytes. Route it through the
+      // host's approval gate (checkpoint → diff editor → Apply/Reject) before
+      // the loop continues. Without a gate the change cannot be applied at all —
+      // a configured "always allow" still goes through the gate, which is where
+      // the checkpoint is taken.
+      let resultForModel = toolResult
+      if (toolResult.pendingWrite && options.approveChange) {
+        const applied = await options.approveChange(toolResult.pendingWrite)
+        // Honest accounting: the model is told whether the write actually
+        // happened, never that a pending plan succeeded on its own.
+        resultForModel = applied
+          ? withAppliedNote(toolResult)
+          : withRejectedNote(toolResult)
+      } else if (toolResult.pendingCommand && options.approveCommand) {
+        // Phase 4.1: a command tool returns a PLAN, not a process. Route it
+        // through the always-ask gate (show verbatim → run on approval → capture
+        // output). The gate returns the captured output, or null if rejected —
+        // which becomes the tool result the model reads back.
+        const output = await options.approveCommand(toolResult.pendingCommand)
+        resultForModel = withCommandNote(toolResult, output)
+      }
+
+      handlers.onToolResult?.(call, resultForModel)
+      toolRuns.push({ call, result: resultForModel, recovered: wasRecovered })
 
       // A failure goes back as content, not as an exception: the model needs to
       // read why and try something else. This is also the shape a server-side
       // denial arrives in from Phase 4.
       messages.push({
         role: 'tool',
-        content: toolResult.content,
+        content: resultForModel.content,
         tool_call_id: call.id,
       })
     }
@@ -300,4 +355,57 @@ function recoverCalls(result: StreamResult, tools: ToolRegistry): ToolCall[] {
     availableTools: tools.names.map((name) => ({ name })),
   })
   return createApiToolCalls(parsed)
+}
+
+/** Replace a pending-write result's text with the honest "applied" outcome, so
+ *  the model knows the bytes actually moved and what it can assume next. */
+function withAppliedNote(result: ToolResult): ToolResult {
+  const next: ToolResult = {
+    ...result,
+    content: `${result.content}\n\n[Applied: the changes have been written to disk.]`,
+    summary: `${result.summary} — applied`,
+  }
+  // `pendingWrite` is optional and the project sets exactOptionalPropertyTypes,
+  // so it must be removed rather than assigned undefined.
+  delete next.pendingWrite
+  return next
+}
+
+/** Replace a pending-write result's text with the honest "rejected" outcome. */
+function withRejectedNote(result: ToolResult): ToolResult {
+  const next: ToolResult = {
+    ...result,
+    content:
+      `${result.content}\n\n[Rejected: the changes were NOT written. The file on disk is unchanged.]`,
+    summary: `${result.summary} — rejected`,
+    // A rejection is not a tool failure in the isError sense — but the model
+    // must not treat it as success, so it is flagged for the card.
+    isError: false,
+  }
+  delete next.pendingWrite
+  return next
+}
+
+/** Replace a pending-command result's text with the captured output, or a rejected
+ *  note. `output` is the captured stdout/stderr (already budgeted by the caller) or
+ *  null if the user declined — in which case the model is told it was not run. */
+function withCommandNote(result: ToolResult, output: string | null): ToolResult {
+  if (output === null) {
+    const next: ToolResult = {
+      ...result,
+      content: `${result.content}\n\n[Rejected: the command was NOT run.]`,
+      summary: `${result.summary} — rejected`,
+      isError: false,
+    }
+    delete next.pendingCommand
+    return next
+  }
+  const next: ToolResult = {
+    ...result,
+    content: output,
+    summary: `${result.summary} — ran`,
+    isError: false,
+  }
+  delete next.pendingCommand
+  return next
 }

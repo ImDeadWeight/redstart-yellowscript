@@ -5,7 +5,7 @@
 > (both remain in git history). Keep this file current; don't reintroduce a
 > second planning doc.
 >
-> **Last updated: 2026-08-06.** Phases 0 and 1 complete and demoed live.
+> **Last updated: 2026-08-10.** Phases 0 and 1 complete and demoed live.
 > **Phase 2 units 2.5, 2.1, 2.2 and 2.3 are done** — six read-only `ws_*` tools,
 > the registry, and the agent loop, wired into `ChatSession` and **verified
 > working against the live Nest**: the model read real files and answered from
@@ -20,7 +20,9 @@
 > Beacon discovery was broken from Phase 0 until 2026-08-06 and is now fixed:
 > it used `node:http`, which VSCode patches. See the ground rule in section 9.
 >
-> Wire facts verified against `redstart-nest` @ `52fbf08` on 2026-08-05.
+> Wire facts verified against `redstart-nest` @ `52fbf08` on 2026-08-05, then
+> re-verified against the on-disk Nest source (the 2026-08-10 update) on
+> 2026-08-10. See the notes below the table for what changed in that update.
 >
 > **Correction to section 3: the Nest source IS readable from the laptop.**
 > `c:\github-projects\redstart-project` is checked out here with the Nest inside
@@ -631,8 +633,9 @@ the host closes itself. `launch.json` therefore opens `sample-workspace/` with
   `protocol.ts` — adding types is the designed extension path; do **not**
   repurpose `turn/delta`.
 
-- **2.6 🟡 System prompt + client identity** — see below. Discovered by running
-  the first live agentic turn, and it is a correctness bug rather than polish.
+- **2.6 🟢 System prompt + client identity — resolved server-side.** The
+  over-claim bug is fixed in the Nest, and Yellowscript no longer sends its own
+  system message. See below.
 
 ### 2.6 — the model must not claim capabilities the client does not have
 
@@ -642,73 +645,77 @@ or .markdown to a local output folder"*. Both are false in Yellowscript: there
 are six read-only tools, no write tool until Phase 3, and no `documents`
 provider until the MCP host lands in 4.2.
 
-The text came from the **gateway's injected system context**. Correction 5 said
-the blurb would appear once a request carries tools; what it did not say is that
-the blurb describes **Nest's** configured capabilities, not the ones the client
-actually forwards. So the model was told it could create documents by a server
-that had no idea the client never offered that tool.
+The text came from the **gateway's injected system context**. The blurb describes
+**Nest's** configured capabilities, not the ones the client actually forwards.
 
-This is the "narrates work it never did" failure arriving from a new direction,
-and the recovery parser cannot catch it: the parser only matches names in the
-tool list, so a `create_document` call is correctly ignored — meaning the model
-says it saved your file and *nothing happens, with no error anywhere*.
+**Resolved 2026-08-10.** The Nest gateway was updated: `buildSystemContext` now
+derives its capability claims from the **tool names present in this request**
+(`clientToolNamesIn` + `hasTools` gate in `tools-gateway.mjs`), not from the
+Nest's static config. The capability blurb only fires when the request actually
+carries tools, and it lists the tools the client sent — so the over-claim can
+no longer happen regardless of which client connects.
 
-**The principle. Whoever knows a capability describes it, and the `tools` array
-already carries the truth.** It is in every request. `buildSystemContext(config,
-hasTools)` takes a boolean; taking the tool *names* instead would let the
-gateway say "you have these tools" rather than "Nest can do these things" — and
-that fixes every client at once, including ones not written yet, with no
-registry to keep in sync.
+**Consequence for Yellowscript: the interim system-message workaround is
+removed** (the `buildSystemPrompt` function and the `system` message that
+`buildRequest` used to push). Sending our own system prose would now (a) duplicate
+the gateway's injected identity block and (b) go stale the moment the tool set
+changes. `buildRequest` emits only user/assistant turns plus the `tools` array.
+The gateway is the source of truth for system context — keep it that way.
 
-**Resist the obvious alternative.** Holding a server-side description of what
-Yellowscript is and can do recreates this exact bug one level up: the day Phase
-3 ships write tools, the server's description still says read-only. A static
-capability list maintained away from the thing it describes always drifts.
+**Client identity now arrives via the `yellowscript` surface, not a header.**
+The gateway derives the surface from the **credential** (`auth.mjs`: the surface
+travels with a per-connector *client key*), never from an `X-Redstart-Surface`
+header (which the gateway accepts but ignores). To get the "You are being used
+from Redstart Yellowscript…" tone block, the user must sign in with a client key
+bound to `surface: "yellowscript"`. Yellowscript offers this as a third sign-in
+option (`signInWithClient`), which issues the key via `POST /auth/me/client-keys`.
+A plain session login or pasted `rst_` account key yields `surface: null` and no
+Yellowscript block — which is correct, because then the Nest has no basis to say
+who is calling.
 
-**Client identity is still worth sending — for environment, not capability.**
-"You are in a VS Code sidebar, the user has an editor and a workspace open, they
-will see a diff before anything is written" changes tone and strategy without
-claiming anything that can go stale. Three constraints:
-
-- **A header** (`X-Redstart-Client: yellowscript/0.0.1`), not text repeated in
-  each message. Per-message identity costs tokens on a 32k budget and puts
-  request metadata in the conversation array, where it is indistinguishable
-  from something the user typed.
-- **A hint, never an authorization.** Any client can claim any name. Fine for
-  shaping a prompt; must never gate a permission or unlock a tool.
-- **Nest ships first** (section 6), and Yellowscript degrades gracefully until
-  it has.
-
-**Interim, no Nest change needed:** Yellowscript sends no system message at all
-today — `buildRequest` emits only user and assistant turns. Adding one that
-states what is actually available corrects the over-claim now, since the gateway
-merges an existing system message rather than adding a second
-(`context + "\n\n" + yours`). Drop it once the gateway derives its blurb from
-the tools array.
+**The principle still holds:** whoever knows a capability describes it. The
+`tools` array already carried the truth; the Nest now reads it there.
 
 This is also where architecture item C.1 begins: the same system message
 eventually carries the workspace tree summary and open-editor context.
 
-## Phase 3 — write tools, diff review, checkpoints
+## Phase 3 — write tools + diff review + checkpoints + revert  ← **done**
 
-- 3.1 🟡 `ws_write_file` / `ws_edit_file` contracts — settle the diff payload
-  shape first.
-- 3.2 🟢 Diff review tabs via the native diff editor; Apply/Reject/Apply-all.
-- 3.3 🟡 Shadow-git checkpoint + revert — the one place a bug destroys work; get
-  the snapshot strategy right deliberately.
-- 3.4 🟢 Approval tiers UI + per-workspace "always allow" persistence.
+- 3.1 ✅ `ws_write_file` / `ws_edit_file` — unified-diff payload, plan-only (no disk write)
+- 3.2 ✅ Diff review gate: checkpoint → native diff tab → Apply/Reject; wired through `agent/loop.ts` `approveChange`
+- 3.3 ✅ `src/tools/checkpoint.ts` — real shadow git repo under `<workspace>/.yellowscript/shadow`
+- 3.4 ✅ `src/tools/approval.ts` + `ui/tool-providers.ts#approvalStore` — per-workspace "always allow"
+- Revert command `redstartYellowscript.revertLastWrite` wired in `extension.ts`
+- Live bug found & fixed: shadow `git commit` failed with "Author identity unknown" — pinned a repo-local committer identity in `ui/write-approval.ts` so the checkpoint can never blow up the approval gate.
 
-## Phase 4 — terminal, Nest-MCP merge
+## Phase 4.1 — `ws_run_command` (always-ask terminal)  ← **done**
 
-- 4.1 🟡→🟢 `ws_run_command`: settle shell-integration output capture and the
-  always-ask default, then implement.
-- 4.2 🟡 `McpHost`: `SSEClientTransport` to the URL from `/redstart/mcp-servers`,
-  same auth header, re-list on reconnect. Spec: `test-mcp-capabilities.mjs` +
-  `test-provider-conformance.mjs`.
-- 4.3 🟢 Tool-set merge with a **disjointness assertion** (`ws_*` vs. Nest names)
-  that throws loudly on collision, + "runs on Nest" origin tag.
-- 4.4 🟢 `disabledTools` greying in the tool picker (UX only — the gateway does
-  real enforcement) + distinct rendering for policy denials.
+- `src/tools/run-command.ts` — plan-only tool returning a `PendingCommand`
+- `ui/run-command.ts` — `CommandApprovalGate` using VSCode's integrated terminal + shell-integration output capture, always-ask (no "always allow")
+- Wired through `agent/loop.ts` `approveCommand` + `chat/session.ts`
+- 6 unit tests; 428 total passing
+
+## Phase 4.2 — `McpHost` (Nest MCP over SSE)  ← **done**
+
+- `src/nest/mcp-host.ts` — vendor-free SSE client: `GET /sse` → `endpoint` event → `initialize` + `tools/list` → merge
+- `ui/mcp-stream.ts` — SSE decoder turning `fetch` into the host's `McpSseStream` interface
+- Re-list on every (re)connect (the active profile can change without the connection dropping)
+- Auth via the same `Authorization: Bearer` header as NestClient — credential never crosses to the webview
+- Wired in `extension.ts`: `connectMcpHost()` on `connected` state, stop on disconnect/deactivate
+- 4 unit tests on the host + 7 on the merge (439 total passing)
+
+## Phase 4.3 — tool-set merge with disjointness assertion  ← **done**
+
+- `mergeNestTools` in `src/tools/registry.ts` — merges local `ws_*` tools with live Nest tools
+- Throws loudly if any Nest name starts with `ws_` (HANDOFF correction 1 — the silent collision that would send a workspace write to Nest's rootDir)
+- Re-running merge with a different Nest set replaces the Nest tools (locals always preserved)
+- 7 unit tests
+
+## Phase 4.4 — `disabledTools` greying + policy denial rendering  ← in progress
+
+- `tools` protocol message added to `src/chat/protocol.ts` — sends the current tool inventory to the webview
+- `pushTools()` in `extension.ts` pushes the merged set on connect and on every re-list
+- Rendering (grey + "runs on Nest" origin tag) is webview-side; tracked in 4.4
 
 ## Phase 5 — polish
 
@@ -836,6 +843,15 @@ a server-supplied URL.
 - `Authorization: Bearer <value>` takes **either** a session token **or** an
   `rst_` key on the same header.
 - `GET /auth/me` → ✔ `{ authRequired, user }`. `user` is null when auth is off.
+- **Per-connector client keys (the Yellowscript identity path).** A logged-in
+  account can issue keys bound to a *surface* via `POST /auth/me/client-keys`
+  `{surface, label}` → `{ apiKey, clientKey }` (raw key returned once) and list
+  them via `GET /auth/me/client-keys` → `{ clientKeys, surfaces }`. The surface
+  (`yellowscript` is a known id) **travels with the key credential** and is read
+  by the gateway to pick the injected system-context tone — it is NOT taken from
+  any `X-Redstart-Surface` header (that header is accepted but inert). Use a
+  client key, not a pasted account key, when you want the Nest to know this is
+  Yellowscript.
 - Sessions are **server-memory only** — a Nest restart invalidates every token.
 - When `authRequired` is false, requests need no token (admin routes stay locked).
   There is **no localhost bypass** — auth applies from 127.0.0.1 too.
@@ -848,9 +864,18 @@ a server-supplied URL.
 - The gateway **prepends its own system message** and **strips centrally-banned
   tool names** from `tools`, `tool_choice`, and prior assistant `tool_calls`. If
   stripping empties `tools`, the key is deleted. Don't fight either.
-- Injection merges into an existing system message (`context + "\n\n" + yours`)
-  rather than adding a second.
-- Capability claims appear **only when the request carries tools**.
+- Injection **prepends** to any client system message (`context + "\n\n" + yours`)
+  rather than adding a second. **Yellowscript sends no system message of its own**
+  (see 2.6) — the gateway's block is the only system context, and it derives its
+  capability claims from the tool names in *this* request, so it can never
+  over-claim a tool the client did not forward.
+- Optional request field `redstart_mode` (`research` | `drafting` | `coding`):
+  the gateway validates it against known mode ids, injects the matching mode
+  block, then **deletes the field before forwarding** — llama-server must not see
+  it. Omitting it is fine (resolves to no mode block). `GET /prompt-modes` lists
+  the ids the deployment accepts.
+- Capability claims appear **only when the request carries tools**, and describe
+  exactly the tools sent.
 - Malformed JSON body → 400 ✔ `{ error: { message, type } }`.
 - Reasoning streams on `choices[0].delta.reasoning_content`, **separate** from
   `.content`. Tool calls hide there — consume it.
@@ -875,10 +900,15 @@ a server-supplied URL.
   mcp-session-id, last-event-id`; exposes `mcp-session-id`.
 - `initialize` → `protocolVersion: '2024-11-05'`,
   `serverInfo: { name: 'redstart-fetch', version: '1.0.0' }`.
-- `tools/list` entries are exactly `{ name, description, inputSchema }` ✔.
-  Disabled capabilities are absent AND refused on direct `tools/call` — tested
-  across all 8 providers (web fetch, postgres, documents, sqlite, vault, git,
-  filesystem, scholar).
+- `tools/list` entries are exactly `{ name, description, inputSchema }` ✔, **plus
+  provenance annotations** every tool now carries: `annotations`
+  (`readOnlyHint`, `destructiveHint`, `openWorldHint`) and `_meta`
+  (`redstart/capability`, `redstart/class`). The `_meta` fields are the
+  authoritative source for capability identity and class — consume them in
+  Phase 4's merge instead of re-deriving names locally. Disabled capabilities are
+  absent AND refused on direct `tools/call` — tested across all 9 providers (web
+  fetch, postgres, documents, sqlite, vault, git, filesystem, scholar, plus the
+  Redstart-owned `delete_file`).
 - Tools blocked by write/destructive policy are also filtered from `tools/list`
   and refused at `tools/call` with a human-readable reason.
 - **The advertised set follows the active profile** — re-list on reconnect.

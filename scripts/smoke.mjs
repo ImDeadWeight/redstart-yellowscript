@@ -11,8 +11,11 @@
 //     YELLOWSCRIPT_TEST_LIVE_NEST=http://192.168.1.20:19080 node scripts/smoke.mjs
 //     YELLOWSCRIPT_TEST_LIVE_NEST=... YELLOWSCRIPT_TEST_TOKEN=rst_... node scripts/smoke.mjs
 //
-// Without the env var it exits 0 and does nothing, so it is safe to wire into
-// CI that has no Nest.
+// Without YELLOWSCRIPT_TEST_LIVE_NEST it exits 0 and does nothing, so it is safe
+// to wire into CI that has no Nest. The per-connector client-key checks (the
+// Yellowscript surface/identity path) additionally require YELLOWSCRIPT_TEST_TOKEN
+// — they are skipped, not failed, when it is absent, since you cannot issue a key
+// without being authenticated.
 // =============================================================================
 
 import { discoverNests, BEACON_PORT } from '../src/nest/discovery.ts'
@@ -85,7 +88,12 @@ await check('GET /auth/me returns an identity of the pinned shape', async () => 
   for (const field of ['id', 'username', 'role', 'apiKeyPrefix', 'createdAt']) {
     assert(field in body.user, `user.${field} is missing`)
   }
+  // lastLoginAt is optional (null for a freshly created account).
+  assert(body.user.lastLoginAt === undefined || typeof body.user.lastLoginAt === 'string' || body.user.lastLoginAt === null,
+    `user.lastLoginAt has the wrong type: ${typeof body.user.lastLoginAt}`)
   // The contract is that a secret never appears here. Assert it, don't assume.
+  // Note: apiKeyPrefix is allowed (it is a display stub, not a usable key); the
+  // regex matches only a trailing literal "apiKey".
   const leaked = Object.keys(body.user).filter((k) => /password|secret|apiKey$/i.test(k))
   assert(leaked.length === 0, `user object leaked: ${leaked.join(', ')}`)
   return `${body.user.username} (${body.user.role})`
@@ -114,6 +122,37 @@ await check('an unauthenticated request is refused when auth is on', async () =>
   assert(res.status === 401, `expected 401 without a token, got ${res.status}`)
   return '401 as expected'
 })
+
+// --- Per-connector client keys: the Yellowscript surface/identity path -------
+// Added when the Nest started deriving the client surface from a credential-
+// bound key rather than an X-Redstart-Surface header. These checks need an
+// authenticated token, so they skip (not fail) when one is not supplied.
+
+if (!token) {
+  console.log('  skip - per-connector client keys (set YELLOWSCRIPT_TEST_TOKEN to exercise the yellowscript surface path)')
+} else {
+  await check('GET /auth/me/client-keys lists keys and known surfaces', async () => {
+    const body = await getJson('/auth/me/client-keys')
+    assert(Array.isArray(body.clientKeys), 'clientKeys is not an array')
+    assert(Array.isArray(body.surfaces), 'surfaces is not an array')
+    assert(body.surfaces.includes('yellowscript'), `yellowscript is not a known surface: ${body.surfaces.join(', ')}`)
+    return `${body.surfaces.length} surface(s); ${body.clientKeys.length} existing key(s)`
+  })
+
+  await check('issuing a yellowscript client key returns a raw apiKey bound to the surface', async () => {
+    const res = await fetch(`${baseUrl}/auth/me/client-keys`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ surface: 'yellowscript', label: 'smoke-test' }),
+      signal: AbortSignal.timeout(5000),
+    })
+    assert(res.ok, `POST /auth/me/client-keys → ${res.status}`)
+    const body = await res.json()
+    assert(typeof body.apiKey === 'string' && body.apiKey.startsWith('rst_'), 'no raw rst_ apiKey returned')
+    assert(body.clientKey?.surface === 'yellowscript', `key not bound to yellowscript: ${body.clientKey?.surface}`)
+    return `issued key ${body.apiKey.slice(0, 8)}…`
+  })
+}
 
 const failed = results.filter((r) => !r.pass)
 console.log(`\n${results.length - failed.length}/${results.length} passed`)

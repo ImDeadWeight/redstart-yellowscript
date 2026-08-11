@@ -30,11 +30,14 @@ describe('createToolRegistry', () => {
   test('registers the whole Phase 2 read-only set', () => {
     assert.deepEqual([...registry().names].sort(), [
       'ws_diagnostics',
+      'ws_edit_file',
       'ws_editor_context',
       'ws_glob',
       'ws_grep',
       'ws_list_directory',
       'ws_read_file',
+      'ws_run_command',
+      'ws_write_file',
     ])
   })
 

@@ -10,3 +10,6 @@ out/
 # tracked, authoritative plan; anything here is a personal snapshot that can go
 # stale without hurting anyone.
 docs/STATUS.md
+
+sample-workspace/.yellowscript/
+sample-workspace/create hello.html

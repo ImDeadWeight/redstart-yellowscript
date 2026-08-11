@@ -250,13 +250,6 @@ function renderConversationList(list: ConversationView[], activeId: string | nul
     tabStrip.appendChild(tab)
   }
 
-  const addButton = document.createElement('button')
-  addButton.className = 'tab tab-add'
-  addButton.textContent = '+'
-  addButton.title = 'New conversation'
-  addButton.addEventListener('click', () => post({ type: 'createConversation' }))
-  tabStrip.appendChild(addButton)
-
   const historyButton = document.createElement('button')
   historyButton.className = 'tab tab-history'
   historyButton.textContent = '🕒'

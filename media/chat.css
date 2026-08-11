@@ -108,18 +108,6 @@ body {
   color: var(--vscode-foreground);
 }
 
-.tab-add {
-  width: 24px;
-  min-width: 24px;
-  padding: 4px;
-  font-size: 1rem;
-  color: var(--vscode-sideBarForeground);
-}
-
-.tab-add:hover {
-  color: var(--redstart-orange);
-}
-
 /* --- history panel (combobox dropdown) ------------------------------------ */
 
 .history-panel {

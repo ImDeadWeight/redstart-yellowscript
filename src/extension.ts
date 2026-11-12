@@ -20,7 +20,7 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
-import type { HostMessage, SessionSnapshot, ConversationView } from './chat/protocol.ts'
+import { EMPTY_CONVERSATION_STATE, type HostMessage, type SessionSnapshot, type ConversationView } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
@@ -190,7 +190,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // Send the empty transcript so the webview clears the old conversation
       // from the screen. Without this, the previous tab's text lingers until
       // the user switches away and back.
-      chatView?.post({ type: 'conversation', conversationId: conv.id, messages: [] })
+      postConversation(conv.id)
       pushSession()
     },
     onDeleteConversation: (id) => {
@@ -204,7 +204,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // not keep showing the conversation that was just closed.
         if (activeConversationId) {
           const session = getSession(activeConversationId)
-          chatView?.post({ type: 'conversation', conversationId: activeConversationId, messages: session.snapshot() })
+          postConversation(activeConversationId)
         }
         pushActiveConversation()
         pushSession()
@@ -249,14 +249,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const session = getSession(activeConversationId)
         // If the active conversation has a saved transcript and nothing is
         // streaming, seed the session so the panel opens on the right chat.
-        if (conv && !session.busy) session.load(conv.messages)
-        chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId)
+        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null)
+        chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId, session.state())
       } else {
-        chatView?.sendInit(snapshot(null), [], null)
+        chatView?.sendInit(snapshot(null), [], null, EMPTY_CONVERSATION_STATE)
       }
     },
     onOpenHistory: () => {
       pushHistoryPanel()
+    },
+    onAnswer: (id, answer) => {
+      if (activeConversationId) getSession(activeConversationId).answer(id, answer)
+    },
+    onClearPlan: () => {
+      if (activeConversationId) getSession(activeConversationId).clearPlan()
+    },
+    onContinueAtLimit: (go) => {
+      if (activeConversationId) getSession(activeConversationId).continueAtLimit(go)
     },
     onSearchHistory: (query) => {
       if (!currentAccountId) {
@@ -277,7 +286,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         activeConversationId = remaining[0]?.id ?? null
         if (activeConversationId) {
           const session = getSession(activeConversationId)
-          chatView?.post({ type: 'conversation', conversationId: activeConversationId, messages: session.snapshot() })
+          postConversation(activeConversationId)
         }
         pushActiveConversation()
         pushSession()
@@ -291,10 +300,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       conversations.unarchive(id)
       activeConversationId = id
       const session = getSession(id)
-      session.load(conv.messages)
+      session.load(conv.messages, conv.plan ?? null)
       pushConversations()
       pushActiveConversation()
-      chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
+      postConversation(id)
       pushSession()
       pushHistoryPanel()
       chatView?.reveal()
@@ -483,8 +492,8 @@ function getSession(id: string): ChatSession {
     // when clicked. The host already seeded the active tab on init; this covers
     // every other tab the user opens later.
     const conv = conversations.get(id)
-    if (conv && conv.messages.length > 0) {
-      session.load(conv.messages)
+    if (conv && (conv.messages.length > 0 || conv.plan)) {
+      session.load(conv.messages, conv.plan ?? null)
     }
   }
   return session
@@ -496,7 +505,16 @@ function persistConversation(id: string): void {
   const conv = conversations.get(id)
   if (!session || !conv) return
   conv.messages = session.snapshot()
+  const plan = session.planSnapshot()
+  if (plan) conv.plan = plan
+  else delete conv.plan
   conversations.save(conv)
+}
+
+/** Paint a conversation: its transcript and what sits around it. */
+function postConversation(id: string): void {
+  const session = getSession(id)
+  chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot(), state: session.state() })
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +575,7 @@ function switchConversation(id: string): void {
   // is updated before the conversation message arrives. Otherwise the
   // conversation message is dropped (conversationId !== activeConversationId).
   pushActiveConversation()
-  chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
+  postConversation(id)
   pushSession()
 }
 

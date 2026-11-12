@@ -16,7 +16,9 @@ import { randomBytes } from 'node:crypto'
 import {
   PROTOCOL_VERSION,
   parseWebviewMessage,
+  type AnswerView,
   type ChatMessageView,
+  type ConversationState,
   type HostMessage,
   type SessionSnapshot,
   type WebviewMessage,
@@ -40,6 +42,9 @@ export interface ChatViewHandlers {
   onSearchHistory: (query: string) => void
   onDeleteHistory: (id: string) => void
   onRestoreHistory: (id: string) => void
+  onAnswer: (id: string, answer: AnswerView | null) => void
+  onClearPlan: () => void
+  onContinueAtLimit: (go: boolean) => void
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -119,6 +124,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'restoreHistory':
         this.handlers.onRestoreHistory(message.id)
         break
+      case 'answer':
+        this.handlers.onAnswer(message.id, message.answer)
+        break
+      case 'clearPlan':
+        this.handlers.onClearPlan()
+        break
+      case 'continueAtLimit':
+        this.handlers.onContinueAtLimit(message.go)
+        break
     }
   }
 
@@ -138,14 +152,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await vscode.commands.executeCommand(`${ChatViewProvider.viewType}.focus`)
   }
 
-  sendInit(session: SessionSnapshot, messages: ChatMessageView[], conversationId: string | null): void {
-    this.post({ type: 'init', protocolVersion: PROTOCOL_VERSION, session, messages, conversationId })
+  sendInit(session: SessionSnapshot, messages: ChatMessageView[], conversationId: string | null, state: ConversationState): void {
+    this.post({ type: 'init', protocolVersion: PROTOCOL_VERSION, session, messages, conversationId, state })
   }
 
   private buildHtml(webview: vscode.Webview): string {
     const nonce = makeNonce()
     const script = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview.js'))
     const styles = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'chat.css'))
+    // The Svelte components' styles, compiled to a file (see esbuild.mjs).
+    const componentStyles = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview.css'))
 
     // `default-src 'none'` then re-grant only what is needed. The script must
     // carry the nonce, which is why the bundle is a separate file rather than
@@ -165,21 +181,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link href="${styles}" rel="stylesheet">
+<link href="${componentStyles}" rel="stylesheet">
 <title>Yellowscript</title>
 </head>
 <body>
-<div id="tab-strip" class="tab-strip"></div>
-<div id="banner" hidden></div>
-<div id="transcript"></div>
-<div id="login-screen" hidden></div>
-<div id="composer">
-  <textarea id="prompt" rows="2" placeholder="Connect to a Redstart Nest to start." disabled></textarea>
-  <div id="actions">
-    <button id="new" type="button" title="Start a new conversation">New</button>
-    <button id="stop" type="button" hidden>Stop</button>
-    <button id="send" type="button" disabled>Send</button>
-  </div>
-</div>
+<div id="app"></div>
 <script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`

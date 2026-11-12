@@ -10,7 +10,7 @@
 // =============================================================================
 
 import type * as vscode from 'vscode'
-import type { ChatMessageView } from '../chat/protocol.ts'
+import type { ChatMessageView, PlanStepView } from '../chat/protocol.ts'
 
 /** A record's effective tab position. Records written before `order` existed
  *  fall back to `createdAt`; anything still without that sorts to the bottom. */
@@ -41,6 +41,9 @@ export interface Conversation {
   /** True when the tab was closed — the conversation survives in history but
    *  no longer appears in the active tab strip. */
   archived?: boolean
+  /** The update_plan checklist, kept until the model finishes it or the
+   *  person clears it. */
+  plan?: PlanStepView[]
 }
 
 export interface HistoryEntry {

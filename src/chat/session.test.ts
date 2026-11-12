@@ -559,3 +559,132 @@ describe('ChatSession with tools', () => {
     assert.ok(!seen?.messages.some((message) => message.role === 'system'))
   })
 })
+
+// ---------------------------------------------------------------------------
+// The question, the plan and the turn limit (agent-core's host ports)
+// ---------------------------------------------------------------------------
+
+describe('ChatSession — ask_user, update_plan and the turn limit', () => {
+  const workspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-ports-')))
+  fs.writeFileSync(path.join(workspace, 'note.txt'), 'hello\n')
+  after(() => fs.rmSync(workspace, { recursive: true, force: true }))
+
+  const registry = () =>
+    createToolRegistry({
+      ripgrepPath: null,
+      diagnostics: () => [],
+      editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }),
+    })
+
+  /** Scripted round trips; each entry is one model reply. */
+  function scripted(replies: Array<Partial<StreamResult>>) {
+    const requests: ChatCompletionRequest[] = []
+    const emitted: HostMessage[] = []
+    let persisted = 0
+    let n = 0
+    const session = new ChatSession({
+      getClient: () =>
+        fakeClient(async (req, handlers) => {
+          requests.push(structuredClone(req))
+          const next = replies[requests.length - 1] ?? { content: 'fallback' }
+          if (next.content) handlers.onContent?.(next.content)
+          return emptyResult(next)
+        }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: (message) => emitted.push(message),
+      newId: () => `id-${++n}`,
+      tools: () => registry(),
+      toolContext: () => ({ workspaceRoots: [workspace] }),
+      onPersist: () => {
+        persisted++
+      },
+    })
+    const states = () => emitted.filter((m) => m.type === 'conversationState').map((m) => (m as Extract<HostMessage, { type: 'conversationState' }>).state)
+    return { session, requests, emitted, states, persisted: () => persisted }
+  }
+
+  const call = (name: string, args: unknown) => ({
+    toolCalls: [{ index: 0, id: 'q1', function: { name, arguments: JSON.stringify(args) } }],
+  })
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 1))
+  }
+
+  test('shows the question, and the picked option reaches the model', async () => {
+    const h = scripted([call('ask_user', { question: 'Which one?', options: ['A', 'B'] }), { content: 'Going with A.' }])
+    const done = h.session.send('do it')
+    await until(() => h.session.state().question !== null)
+
+    const question = h.session.state().question
+    assert.equal(question?.question, 'Which one?')
+    assert.deepEqual(question?.options, ['A', 'B'])
+    assert.equal(h.session.answer('not-this-one', { chosen: ['B'] }), false, 'an answer must name the open question')
+    assert.equal(h.session.answer(question!.id, { chosen: ['A'] }), true)
+    await done
+
+    assert.equal(h.session.state().question, null)
+    const toolMessage = h.requests[1]?.messages.find((m) => m.role === 'tool')
+    assert.match(String(toolMessage?.content), /\bA\b/)
+    const turn = h.session.snapshot().find((m) => m.role === 'assistant')
+    assert.equal(turn?.tools?.[0]?.name, 'ask_user')
+    assert.match(turn?.tools?.[0]?.summary ?? '', /Answered: A/)
+  })
+
+  test('a message typed while the question is open is the answer, not a queued prompt', async () => {
+    const h = scripted([call('ask_user', { question: 'Name?' }), { content: 'Hi Sam.' }])
+    const done = h.session.send('greet me')
+    await until(() => h.session.state().question !== null)
+    await h.session.send('Sam')
+    await done
+
+    assert.equal(h.session.queued, 0)
+    assert.equal(h.requests.length, 2)
+    assert.match(String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content), /Sam/)
+  })
+
+  test('stopping the flow skips the open question', async () => {
+    const h = scripted([call('ask_user', { question: 'Sure?' })])
+    const done = h.session.send('go')
+    await until(() => h.session.state().question !== null)
+    h.session.abort()
+    await done
+    assert.equal(h.session.state().question, null)
+  })
+
+  test('keeps the plan, saves it, and lets the person clear it', async () => {
+    const h = scripted([
+      call('update_plan', { steps: [{ text: 'Read', status: 'done' }, { text: 'Write', status: 'pending' }] }),
+      { content: 'Read it. Is that all?' },
+    ])
+    await h.session.send('plan it')
+
+    assert.deepEqual(h.session.planSnapshot()?.map((s) => s.status), ['done', 'pending'])
+    assert.ok(h.states().some((s) => s.plan?.length === 2), 'the panel was told')
+    assert.ok(h.persisted() > 0)
+
+    h.session.clearPlan()
+    assert.equal(h.session.state().plan, null)
+  })
+
+  test('a loaded plan rides on the next request as the tail note', async () => {
+    const h = scripted([{ content: 'ok' }])
+    h.session.load([], [{ text: 'Write the tests', status: 'in_progress' }])
+    await h.session.send('carry on')
+    const last = h.requests[0]?.messages.at(-1)
+    assert.match(String(last?.content), /Write the tests/)
+  })
+
+  test('waits at the turn limit, and goes on when the person says so', async () => {
+    const reads = Array.from({ length: 12 }, () => call('ws_read_file', { path: 'note.txt' }))
+    const h = scripted([...reads, { content: 'Finished.' }])
+    const done = h.session.send('read it a lot')
+    await until(() => h.session.state().atTurnLimit)
+    assert.equal(h.session.state().atTurnLimit, true)
+    h.session.continueAtLimit(true)
+    await done
+
+    assert.equal(h.session.state().atTurnLimit, false)
+    assert.match(h.session.snapshot().at(-1)?.content ?? '', /Finished\./)
+  })
+})

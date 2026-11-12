@@ -97,17 +97,17 @@
         "title": "Show Connection Status",
         "category": "Yellowscript"
       },
-    {
-      "command": "redstartYellowscript.inspectTools",
-      "title": "Inspect Workspace Tools",
-      "category": "Yellowscript"
-    },
-    {
-      "command": "redstartYellowscript.revertLastWrite",
-      "title": "Revert Last Write",
-      "category": "Yellowscript"
-    }
-  ],
+      {
+        "command": "redstartYellowscript.inspectTools",
+        "title": "Inspect Workspace Tools",
+        "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.revertLastWrite",
+        "title": "Revert Last Write",
+        "category": "Yellowscript"
+      }
+    ],
     "configuration": {
       "title": "Redstart Yellowscript",
       "properties": {
@@ -139,7 +139,10 @@
           "description": "Write tools the user has chosen to always allow in this workspace.",
           "items": {
             "type": "string",
-            "enum": ["ws_write_file", "ws_edit_file"]
+            "enum": [
+              "ws_write_file",
+              "ws_edit_file"
+            ]
           }
         }
       }
@@ -148,7 +151,7 @@
   "scripts": {
     "build": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
+    "typecheck": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.webview.json --fail-on-warnings",
     "test": "node --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke.mjs",
     "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
@@ -160,6 +163,9 @@
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
+    "esbuild-svelte": "0.9.5",
+    "svelte": "5.57.3",
+    "svelte-check": "4.7.8",
     "typescript": "^5.7.0"
   }
 }

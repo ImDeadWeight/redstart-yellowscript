@@ -34,6 +34,12 @@ import { credentialValue } from '../nest/types.ts'
 import { truncateForModel, MAX_RESULT_CHARS } from '../tools/types.ts'
 import { approvalRequired, type NestCallResult } from './approval.ts'
 
+/** The MCP experimental capability a client declares to be offered the
+ *  host-resolved tools (Nest interaction-tools.mjs HOST_TOOLS_CAPABILITY). */
+export const HOST_TOOLS_CAPABILITY = 'redstart/hostTools'
+/** The host-resolved tools Yellowscript answers. */
+export const HOST_RESOLVED_TOOLS = ['ask_user', 'update_plan'] as const
+
 /** A single JSON-RPC 2.0 request or response on the MCP wire. */
 export interface McpMessage {
   id: string
@@ -217,7 +223,17 @@ export class McpHost {
 
     const initRes = await this.postJsonRpc('initialize', {
       protocolVersion: '2024-11-05',
-      capabilities: { tools: {}, sampling: {}, prompts: {}, completion: {} },
+      capabilities: {
+        tools: {},
+        sampling: {},
+        prompts: {},
+        completion: {},
+        // The tools Nest defines but only the client's own loop can answer
+        // (Nest daemon/interaction-tools.mjs). Nest offers them only to a
+        // client that declares them here, and Yellowscript's loop (agent-core,
+        // with ChatSession's ask and plan ports) answers both.
+        experimental: { [HOST_TOOLS_CAPABILITY]: { names: [...HOST_RESOLVED_TOOLS] } },
+      },
       clientInfo: { name: 'yellowscript', version: '0.0.1' },
     })
 

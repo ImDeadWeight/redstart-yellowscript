@@ -100,6 +100,27 @@ pure view change — streaming continues in background tabs.
   sequentially.
 - **Auto-titled** from the first user prompt (truncated to 40 characters).
 - Transcripts are saved on every message, turn end, and conversation switch.
+- **Tool cards** show each call on its turn: status, arguments, the one-line
+  result, a **Nest** tag for tools that ran on the server, and **recovered**
+  when the model wrote the call as text. A finished turn with four or more
+  calls folds them into one "Used N tools" row.
+
+### Questions, plans and the turn limit
+
+Yellowscript declares to Nest that it can answer `ask_user` and `update_plan`,
+so the model is offered both (agent-core runs them; see below).
+
+- **Questions** appear above the composer: options to pick, a text field, Send
+  and Skip. Typing in the composer while a question is open answers it.
+- **The plan** is a checklist above the composer, open while steps are open.
+  It is saved with the conversation and sent with each request while steps are
+  open; the × clears it, so a plan you have moved on from stops steering.
+- **The turn limit** (10 model turns per request) asks before going on,
+  instead of stopping silently.
+
+The webview is Svelte 5 (`src/webview/components/`). Its state is a plain
+reducer, `src/webview/view-model.ts`, tested under `node --test`; the
+components only read it and post what you did.
 
 ## Workspace tools (`ws_*`)
 

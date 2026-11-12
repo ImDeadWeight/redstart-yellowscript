@@ -356,13 +356,21 @@ function wrapAsk(ask: NonNullable<AgentPorts['ask']>, handlers: AgentLoopHandler
         handlers.onToolResult?.(call as ToolCall, {
           content: '',
           isError: false,
-          summary: answer ? 'ask_user — answered' : 'ask_user — skipped',
+          summary: answerSummary(answer),
           truncated: false,
         })
       }
       return answer
     },
   }
+}
+
+/** One line for the ask_user card: what the person answered. */
+function answerSummary(answer: { chosen?: string[]; text?: string } | null): string {
+  if (!answer) return 'Skipped'
+  const parts = [...(answer.chosen ?? []), ...(answer.text ? [answer.text] : [])]
+  const line = parts.join(', ').replace(/\s+/g, ' ')
+  return `Answered: ${line.length > 80 ? line.slice(0, 79) + '…' : line}`
 }
 
 /**

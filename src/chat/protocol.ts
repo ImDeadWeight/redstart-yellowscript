@@ -39,7 +39,7 @@ import type { StreamChannel } from '../nest/streaming.ts'
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -65,6 +65,58 @@ export interface ChatMessageView {
    *  starts, so a queued prompt shows in order, greyed, until then. */
   pending?: boolean
   stats?: TurnStats
+  /** The tools this assistant turn ran, in order. Kept on the turn (not only
+   *  sent as live messages) so a rebuilt panel can draw the cards again. */
+  tools?: ToolCardView[]
+}
+
+/** One tool call on an assistant turn. */
+export interface ToolCardView {
+  callId: string
+  name: string
+  /** The raw arguments string, as the model sent it. */
+  arguments: string
+  /** True when the call was recovered from the model's text. */
+  recovered: boolean
+  status: 'running' | 'done' | 'error'
+  /** One line for the card, once the call has finished. */
+  summary?: string
+  truncated?: boolean
+}
+
+/** The assistant's ask_user question, waiting for the person (agent-core). */
+export interface QuestionView {
+  /** The tool call that asked; an answer names it so a late one cannot
+   *  answer a different question. */
+  id: string
+  question: string
+  options?: string[]
+  multiSelect: boolean
+}
+
+export interface PlanStepView {
+  text: string
+  status: 'pending' | 'in_progress' | 'done' | 'skipped'
+  note?: string
+}
+
+/** What a conversation shows around its transcript. Sent with `init` and
+ *  `conversation`, and on its own as `conversationState` when it changes. */
+export interface ConversationState {
+  /** The question the flow is waiting on, or null. */
+  question: QuestionView | null
+  /** The update_plan checklist, or null with no plan. */
+  plan: PlanStepView[] | null
+  /** True while the flow waits at the turn limit for "keep going?". */
+  atTurnLimit: boolean
+}
+
+export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false }
+
+/** The person's answer to a question; null is Skip. */
+export interface AnswerView {
+  chosen?: string[]
+  text?: string
 }
 
 export interface TurnStats {
@@ -138,6 +190,12 @@ export type WebviewMessage =
   | { type: 'searchHistory'; query: string }
   | { type: 'deleteHistory'; id: string }
   | { type: 'restoreHistory'; id: string }
+  /** Answer the open question (`id` is its QuestionView id); null skips it. */
+  | { type: 'answer'; id: string; answer: AnswerView | null }
+  /** Clear the active conversation's plan (the × on the checklist). */
+  | { type: 'clearPlan' }
+  /** At the turn limit: keep going, or stop. */
+  | { type: 'continueAtLimit'; go: boolean }
 
 // ---------------------------------------------------------------------------
 // host → webview
@@ -145,11 +203,20 @@ export type WebviewMessage =
 
 export type HostMessage =
   /** Full state handoff in reply to `ready`. Always safe to apply from scratch. */
-  | { type: 'init'; protocolVersion: number; session: SessionSnapshot; messages: ChatMessageView[]; conversationId: string | null }
+  | {
+      type: 'init'
+      protocolVersion: number
+      session: SessionSnapshot
+      messages: ChatMessageView[]
+      conversationId: string | null
+      state: ConversationState
+    }
   | { type: 'session'; session: SessionSnapshot }
    /** Replace the whole transcript (switch / restore). Now carries which tab it
     *  belongs to so a delta for a background tab can be dropped or buffered. */
-   | { type: 'conversation'; conversationId: string; messages: ChatMessageView[] }
+   | { type: 'conversation'; conversationId: string; messages: ChatMessageView[]; state: ConversationState }
+   /** The question, plan or turn-limit wait changed for a conversation. */
+   | { type: 'conversationState'; conversationId: string; state: ConversationState }
    /** The full list of local conversations, for the tab strip. */
    | { type: 'conversationList'; conversations: ConversationView[]; activeId: string | null }
    /** The active conversation changed (switch / create / delete). */
@@ -272,7 +339,30 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return typeof msg.id === 'string' ? { type: 'deleteHistory', id: msg.id } : null
     case 'restoreHistory':
       return typeof msg.id === 'string' ? { type: 'restoreHistory', id: msg.id } : null
+    case 'answer': {
+      if (typeof msg.id !== 'string') return null
+      if (msg.answer === null) return { type: 'answer', id: msg.id, answer: null }
+      const answer = parseAnswer(msg.answer)
+      return answer ? { type: 'answer', id: msg.id, answer } : null
+    }
+    case 'clearPlan':
+      return { type: 'clearPlan' }
+    case 'continueAtLimit':
+      return typeof msg.go === 'boolean' ? { type: 'continueAtLimit', go: msg.go } : null
     default:
       return null
   }
+}
+
+/** An answer from the webview: at least one pick or some text, nothing else. */
+function parseAnswer(value: unknown): AnswerView | null {
+  if (typeof value !== 'object' || value === null) return null
+  const a = value as Record<string, unknown>
+  const out: AnswerView = {}
+  if (Array.isArray(a.chosen)) {
+    const chosen = a.chosen.filter((c): c is string => typeof c === 'string')
+    if (chosen.length > 0) out.chosen = chosen
+  }
+  if (typeof a.text === 'string' && a.text.trim()) out.text = a.text.trim()
+  return out.chosen || out.text ? out : null
 }

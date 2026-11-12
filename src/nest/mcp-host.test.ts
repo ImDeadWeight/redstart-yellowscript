@@ -311,6 +311,34 @@ describe('McpHost', () => {
     host.stop()
   })
 
+  it('declares at initialize that it answers ask_user and update_plan', async () => {
+    const { client } = makeFakeClient()
+    let initParams: Record<string, unknown> | undefined
+    const realFetch = client.fetch
+    client.fetch = (url, init) => {
+      const body = decodeURIComponent(String(init?.body ?? '')).replace(/^message=/, '')
+      try {
+        const msg = JSON.parse(body) as McpMessage
+        if (msg.method === 'initialize') initParams = msg.params as Record<string, unknown>
+      } catch { /* not JSON-RPC */ }
+      return realFetch(url, init)
+    }
+    const stream = fakeStream()
+    const host = new McpHost(client, {
+      openStream: () => Promise.resolve(stream),
+      onTools: () => {},
+      onConnection: () => {},
+      onError: (err) => { throw err },
+    })
+    await host.connect()
+    stream.emit({ type: 'endpoint', data: 'http://nest:19082/message' })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const caps = initParams?.capabilities as { experimental?: Record<string, { names?: string[] }> }
+    assert.deepEqual(caps.experimental?.['redstart/hostTools']?.names, ['ask_user', 'update_plan'])
+    host.stop()
+  })
+
   it('ws_* names never collide with Nest tool names (disjointness)', async () => {
     const { client } = makeFakeClient()
     const stream = fakeStream()

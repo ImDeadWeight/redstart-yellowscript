@@ -47,6 +47,9 @@ const webviewBuild = {
   // Svelte's runtime is ESM with browser conditions.
   conditions: ['svelte', 'browser'],
   mainFields: ['svelte', 'browser', 'module', 'main'],
+  // The mascot SVG is imported as text and inlined: the CSP allows no image
+  // requests, and the drawing is static markup with no model text in it.
+  loader: { '.svg': 'text' },
   plugins: [
     sveltePlugin({
       // Svelte 5 strips `lang="ts"` itself: no preprocessor needed.

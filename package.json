@@ -2,6 +2,7 @@
   "name": "redstart-yellowscript",
   "displayName": "Redstart Yellowscript",
   "description": "Coding agent for a local Redstart Nest — zero-config discovery, Redstart login, workspace-aware tools.",
+  "icon": "media/icon.png",
   "version": "0.0.1",
   "publisher": "redstart",
   "license": "UNLICENSED",
@@ -18,7 +19,8 @@
   ],
   "main": "./dist/extension.cjs",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:redstartYellowscript.chatPanel"
   ],
   "contributes": {
     "viewsContainers": {
@@ -26,7 +28,7 @@
         {
           "id": "redstartYellowscript",
           "title": "Yellowscript",
-          "icon": "media/icon.svg"
+          "icon": "media/yellowscript-mono.svg"
         }
       ]
     },
@@ -42,6 +44,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "redstartYellowscript.openInEditor",
+          "when": "view == redstartYellowscript.chat",
+          "group": "navigation"
+        },
+        {
           "command": "redstartYellowscript.openHistory",
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
@@ -51,6 +58,13 @@
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "redstartYellowscript.openInEditor",
+          "group": "navigation@100",
+          "when": "config.redstartYellowscript.editorButton && activeWebviewPanelId != 'redstartYellowscript.chatPanel'"
+        }
       ]
     },
     "commands": [
@@ -59,6 +73,12 @@
         "title": "New Chat",
         "category": "Yellowscript",
         "icon": "$(add)"
+      },
+      {
+        "command": "redstartYellowscript.openInEditor",
+        "title": "Open in Editor Tab",
+        "category": "Yellowscript",
+        "icon": "media/yellowscript.svg"
       },
       {
         "command": "redstartYellowscript.openSettings",
@@ -154,9 +174,20 @@
               "ws_edit_file"
             ]
           }
+        },
+        "redstartYellowscript.editorButton": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the Yellowscript button in the editor title bar, which opens the chat as an editor tab."
         }
       }
-    }
+    },
+    "authentication": [
+      {
+        "id": "redstart",
+        "label": "Redstart"
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs --production",

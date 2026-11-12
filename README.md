@@ -50,7 +50,10 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: New Chat` | Create a new conversation tab and focus the panel |
 | `Yellowscript: Connect to Nest` | Discover (or use the configured URL) and connect |
 | `Yellowscript: Disconnect` | Drop the connection and stop auto-reconnecting |
-| `Yellowscript: Sign In to Nest` | Username/password, paste an `rst_` API key, or issue a connector key |
+| `Yellowscript: Open in Editor Tab` | Open the chat as an editor tab (also the bird button in the editor title bar) |
+| `Yellowscript: Choose Project` | Link this workspace to a Nest project |
+| `Yellowscript: Run Workflow` | Pick one of your Nest workflows |
+| `Yellowscript: Sign In to Nest` | Username and password (swapped at once for a key Nest issues to this app), or paste an `rst_` API key |
 | `Yellowscript: Sign Out` | Forget the stored credential, keep the server connection |
 | `Yellowscript: Show Connection Status` | Details view plus the next useful action |
 | `Yellowscript: Inspect Workspace Tools` | Run all `ws_*` tools with probe args and dump results to the output channel |
@@ -68,7 +71,14 @@ to open settings directly.
 | `redstartYellowscript.discovery.enabled` | `true` | Scan the LAN on connect. |
 | `redstartYellowscript.discovery.timeoutMs` | `400` | Per-host beacon timeout (50–5000 ms). Raise on a slow network. |
 | `redstartYellowscript.autoConnect` | `true` | Reconnect to the last-used Nest when a window opens. |
+| `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ws_write_file`, `ws_edit_file`). |
+
+A password is used once: Yellowscript signs in, has Nest issue a key for this
+app (surface `yellowscript`, labelled with this machine's name), ends the
+session, and keeps only the key. The key survives a Nest restart, which a
+session did not, and you can revoke it in the chat app. The signed-in account
+also shows in VS Code's **Accounts** menu, with Sign Out there.
 
 Credentials are **never** settings. They live in VSCode's `SecretStorage`,
 keyed per server, and never enter a log line or the model's context.

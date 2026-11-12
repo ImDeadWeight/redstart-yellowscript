@@ -2,8 +2,8 @@
   // Shown instead of the chat whenever the session is not connected:
   //   disconnected / error       → Connect (or Retry)
   //   discovering / connecting   → progress, with the auto-retry hint
-  //   unauthenticated            → sign-in: password, API key, or a key the
-  //                                 Nest issues to this app
+  //   unauthenticated            → sign-in: password (swapped by the host for
+  //                                 a key Nest issues to this app), or an API key
   // Credentials go to the host in one `signIn` message; nothing is stored or
   // shown here beyond what the person typed.
   import type { SessionSnapshot } from '../../chat/protocol.ts'
@@ -60,9 +60,11 @@
       <button type="submit" class="primary wide" disabled={!ready || submitting}>
         {#if submitting}<Icon name="spinner" size={12} />{/if}Sign in
       </button>
-      <button type="button" class="link" onclick={() => post({ type: 'signIn', method: 'clientKey' })}>
-        Or ask the Nest for a key for this app
-      </button>
+      <p class="hint">
+        {method === 'password'
+          ? 'Your password is used once: Yellowscript keeps a key for this app instead, which you can revoke in the chat app.'
+          : 'A key from the chat app: Your account, then app keys.'}
+      </p>
     </form>
   {:else if working}
     <div class="progress"><Icon name="spinner" size={18} label="Connecting" /></div>
@@ -87,7 +89,7 @@
     padding: 24px 20px;
     text-align: center;
   }
-  .crest :global(svg) { width: 56px; height: 56px; image-rendering: pixelated; }
+  .crest :global(svg) { display: block; width: 96px; height: 96px; image-rendering: pixelated; }
   h1 { margin: 4px 0 0; font-size: 1.3em; font-weight: 600; }
   .detail { margin: 0 0 8px; max-width: 280px; opacity: 0.75; }
   form { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 280px; }

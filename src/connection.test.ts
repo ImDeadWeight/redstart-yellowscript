@@ -356,6 +356,49 @@ describe('ConnectionManager — sign-in', () => {
     })
   })
 
+  test('with an app key configured, a password sign-in keeps only the issued key', async () => {
+    const seen: string[] = []
+    const manager = new ConnectionManager({
+      credentials,
+      state,
+      createClient: makeClientFactory(
+        {
+          '/auth/config': ok({ authRequired: true }),
+          '/auth/login': ok({ token: 'session-token', user: USER }),
+          '/auth/me/client-keys': ok({ apiKey: 'rst_app_key', clientKey: { id: 'k1', surface: 'yellowscript' } }),
+          '/auth/logout': () => ({ status: 204, body: null }),
+        },
+        seen,
+      ),
+      discover: async () => [],
+      appKey: { surface: 'yellowscript', label: 'Yellowscript (test)' },
+    })
+    await manager.connect()
+
+    const result = await manager.signInWithPassword('ada', 'hunter2')
+    assert.equal(result.status, 'connected')
+    assert.deepEqual(await credentials.get(url), { kind: 'clientKey', key: 'rst_app_key', surface: 'yellowscript' })
+    assert.ok(seen.indexOf('POST /auth/logout') > seen.indexOf('POST /auth/me/client-keys'), 'the session ends after the key is issued')
+  })
+
+  test('when Nest will not issue an app key, the session is kept', async () => {
+    const manager = new ConnectionManager({
+      credentials,
+      state,
+      createClient: makeClientFactory({
+        '/auth/config': ok({ authRequired: true }),
+        '/auth/login': ok({ token: 'session-token', user: USER }),
+        '/auth/me/client-keys': () => ({ status: 400, body: { error: 'surface not allowed' } }),
+      }),
+      discover: async () => [],
+      appKey: { surface: 'yellowscript', label: 'Yellowscript (test)' },
+    })
+    await manager.connect()
+
+    assert.equal((await manager.signInWithPassword('ada', 'hunter2')).status, 'connected')
+    assert.deepEqual(await credentials.get(url), { kind: 'session', token: 'session-token', username: 'ada' })
+  })
+
   test('bad credentials return to the prompt without claiming which field was wrong', async () => {
     // Nest returns the same 401 message for an unknown user as for a wrong
     // password, on purpose (no username enumeration). Don't invent a

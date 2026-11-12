@@ -97,6 +97,14 @@ export interface ConnectionDeps {
   state: StateStore
   createClient: (baseUrl: string) => NestClient
   discover: () => Promise<DiscoveredNest[]>
+  /**
+   * When set, a password sign-in is swapped at once for a key Nest issues to
+   * this app (POST /auth/me/client-keys), and only the key is kept. A session
+   * token dies with a Nest restart, which signed the person out mid-chat; the
+   * key does not, carries the app's surface, and is revocable from the chat
+   * app. Absent, the session token is kept, as before.
+   */
+  appKey?: { surface: string; label: string }
 }
 
 export interface ConnectOptions {
@@ -269,9 +277,11 @@ export class ConnectionManager {
 
     try {
       const result = await client.login(username, password, signal)
-      const credential: Credential = { kind: 'session', token: result.token, username: result.user.username }
-      await this.deps.credentials.set(url, credential)
+      const session: Credential = { kind: 'session', token: result.token, username: result.user.username }
+      client.setCredential(session)
+      const credential = (await this.exchangeForAppKey(client, signal)) ?? session
       client.setCredential(credential)
+      await this.deps.credentials.set(url, credential)
       await this.deps.state.setLastServerUrl(url)
       this.setState({ status: 'connected', url, authRequired: true, user: result.user })
       return this.current
@@ -285,6 +295,26 @@ export class ConnectionManager {
       }
       return this.fail(`Sign-in failed: ${messageOf(err)}`, url)
     }
+  }
+
+  /**
+   * Swap the signed-in session for an app key (see ConnectionDeps.appKey).
+   * Returns null, keeping the session, when no app key is configured or Nest
+   * will not issue one (an older Nest, or a role limited to other apps).
+   */
+  private async exchangeForAppKey(client: NestClient, signal?: AbortSignal): Promise<Credential | null> {
+    const app = this.deps.appKey
+    if (!app) return null
+    let key: string
+    try {
+      key = (await client.issueClientKey(app.surface, app.label, signal)).apiKey
+    } catch {
+      return null
+    }
+    // The session did its job. End it while it is still the credential in
+    // use, so a sign-in leaves exactly one credential behind.
+    await client.logout(signal).catch(() => {})
+    return { kind: 'clientKey', key, surface: app.surface }
   }
 
   /** Sign in with a pasted `rst_` API key. */

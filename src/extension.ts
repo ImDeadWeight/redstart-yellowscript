@@ -11,6 +11,7 @@
 // =============================================================================
 
 import * as vscode from 'vscode'
+import { hostname } from 'node:os'
 
 import { ConnectionManager, describeState, type ConnectionState } from './connection.ts'
 import {
@@ -46,6 +47,7 @@ import { makeCommandGate } from './ui/run-command.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
 import { approvalInfo, callWithApproval } from './nest/approval.ts'
 import { makeNestApprovalDeps } from './ui/nest-approval.ts'
+import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
 import { openMcpSseStream } from './ui/mcp-stream.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
@@ -106,6 +108,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     state: new WorkspaceStateStore(context.workspaceState),
     createClient: (baseUrl) => new NestClient(baseUrl),
     discover: loggedDiscovery(),
+    // A password sign-in becomes a key Nest issues to this app, named for this
+    // machine so it is recognisable in the chat app's list of app keys.
+    appKey: { surface: 'yellowscript', label: `Yellowscript on ${hostname()}` },
+  })
+  const authProvider = new RedstartAuthProvider(manager, {
+    signIn: async () => {
+      // Sign-in happens in the panel; the Accounts menu just opens it there.
+      if (manager?.state.status === 'disconnected' || manager?.state.status === 'error') await manager.connect()
+      await chatView?.reveal()
+    },
+    signOut: () => signOutCommand(),
   })
 
   // The ws_* tools. Built at activation so a missing ripgrep is a known,
@@ -313,6 +326,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     statusBar,
     manager.onDidChangeState(onStateChanged),
+    // The Redstart account in VS Code's Accounts menu.
+    authProvider,
+    vscode.authentication.registerAuthenticationProvider(AUTH_PROVIDER_ID, 'Redstart', authProvider, {
+      supportsMultipleAccounts: false,
+    }),
+    // The same chat as an editor tab, restored after a window reload.
+    vscode.window.registerWebviewPanelSerializer(ChatViewProvider.panelType, chatView),
+    vscode.commands.registerCommand('redstartYellowscript.openInEditor', () => chatView?.openInEditor()),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatView, {
       // Keep the transcript alive when the panel is hidden. Without this the
       // webview is torn down and the user loses their place in the conversation
@@ -877,20 +898,14 @@ async function signInCommand(): Promise<void> {
 
   const method = await vscode.window.showQuickPick(
     [
-      { label: '$(account) Username and password', detail: 'Sign in with a Redstart account', id: 'password' },
+      { label: '$(account) Username and password', detail: 'Used once: Yellowscript keeps a key for this app instead', id: 'password' },
       { label: '$(key) API key', detail: 'Paste an rst_… key', id: 'apiKey' },
-      { label: '$(plug) Yellowscript connector key', detail: 'Issue a key bound to this client (shows the Yellowscript identity)', id: 'clientKey' },
     ],
     { title: 'Sign in to Redstart Nest', placeHolder: 'How do you want to authenticate?' },
   )
   if (!method) return
 
-  const result =
-    method.id === 'password'
-      ? await passwordFlow()
-      : method.id === 'apiKey'
-        ? await apiKeyFlow()
-        : await clientKeyFlow()
+  const result = method.id === 'password' ? await passwordFlow() : await apiKeyFlow()
   if (!result) return
 
   if (result.status === 'connected') {
@@ -943,51 +958,6 @@ async function apiKeyFlow(): Promise<ConnectionState | undefined> {
   )
 }
 
-/**
- * Issue a connector key bound to the `yellowscript` surface.
- *
- * The point of this path is the surface: a key issued here carries `surface:
- * "yellowscript"`, which the Nest gateway reads from the credential (never a
- * header) and uses to inject the Yellowscript identity block into the system
- * context. It requires an already-authenticated account — the key is minted
- * against whoever is signed in — so this is only offered from the sign-in
- * picker, and only meaningful once a session or apiKey credential exists.
- */
-async function clientKeyFlow(): Promise<ConnectionState | undefined> {
-  const state = manager?.state
-  if (
-    state?.status !== 'connected' &&
-    state?.status !== 'unauthenticated' &&
-    state?.status !== 'connecting' &&
-    state?.status !== 'error'
-  ) {
-    vscode.window.showWarningMessage('Connect and sign in to a Redstart Nest first.')
-    return undefined
-  }
-
-  const url = manager?.urlForSignIn?.()
-  if (!url) return undefined
-
-  const client = new NestClient(url)
-  // Reuse the existing session/apiKey so the request to issue a key is itself
-  // authenticated; signInWithClient re-points the live client at the new key.
-  const existing = manager?.activeClient?.getCredential()
-  if (existing) client.setCredential(existing)
-
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Window, title: 'Issuing Yellowscript connector key…' },
-    () => manager!.signInWithClient(client, 'yellowscript', 'Yellowscript VS Code extension'),
-  )
-
-  if (result.status === 'connected') {
-    vscode.window.showInformationMessage('Yellowscript connector key issued — the Nest now knows this is Yellowscript.')
-  } else if (result.status === 'error') {
-    vscode.window.showErrorMessage(result.message)
-  } else if (result.status === 'unauthenticated' && result.reason === 'rejected') {
-    vscode.window.showErrorMessage('Could not issue a connector key. Sign in with a username/password or API key first.')
-  }
-  return result
-}
 
 async function signOutCommand(): Promise<void> {
   const state = await manager?.signOut()

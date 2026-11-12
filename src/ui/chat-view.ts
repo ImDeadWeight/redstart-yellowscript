@@ -52,12 +52,18 @@ export interface ChatViewHandlers {
   onContinueAtLimit: (go: boolean) => void
 }
 
-export class ChatViewProvider implements vscode.WebviewViewProvider {
+export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.WebviewPanelSerializer {
   static readonly viewType = 'redstartYellowscript.chat'
+  /** The same chat, opened as an editor tab. */
+  static readonly panelType = 'redstartYellowscript.chatPanel'
 
   private readonly extensionUri: vscode.Uri
   private readonly handlers: ChatViewHandlers
   private view: vscode.WebviewView | undefined
+  private panel: vscode.WebviewPanel | undefined
+  /** Every live webview (the sidebar view, the editor tab). Each renders the
+   *  same host state, so every message goes to all of them. */
+  private readonly webviews = new Set<vscode.Webview>()
 
   constructor(extensionUri: vscode.Uri, handlers: ChatViewHandlers) {
     this.extensionUri = extensionUri
@@ -66,23 +72,62 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view
+    this.attach(view.webview)
+    view.onDidDispose(() => {
+      this.webviews.delete(view.webview)
+      if (this.view === view) this.view = undefined
+    })
+  }
 
-    view.webview.options = {
+  /**
+   * Open the chat as an editor tab, or bring the open one forward. One tab at
+   * a time: a second would only be the same chat twice.
+   */
+  openInEditor(): void {
+    if (this.panel) {
+      this.panel.reveal()
+      return
+    }
+    const panel = vscode.window.createWebviewPanel(
+      ChatViewProvider.panelType,
+      'Yellowscript',
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+      // Kept alive while hidden, like the sidebar view: a streaming turn keeps
+      // painting in a tab the person has switched away from.
+      { retainContextWhenHidden: true },
+    )
+    this.adoptPanel(panel)
+  }
+
+  /** VSCode reopening the tab after a window reload. */
+  async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+    this.adoptPanel(panel)
+  }
+
+  private adoptPanel(panel: vscode.WebviewPanel): void {
+    this.panel?.dispose()
+    this.panel = panel
+    panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'yellowscript.svg')
+    this.attach(panel.webview)
+    panel.onDidDispose(() => {
+      this.webviews.delete(panel.webview)
+      if (this.panel === panel) this.panel = undefined
+    })
+  }
+
+  /** Lock a webview down, give it the page, and route what it posts. */
+  private attach(webview: vscode.Webview): void {
+    webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media'), vscode.Uri.joinPath(this.extensionUri, 'dist')],
     }
-
-    view.webview.onDidReceiveMessage((raw: unknown) => {
+    webview.onDidReceiveMessage((raw: unknown) => {
       const message = parseWebviewMessage(raw)
       if (!message) return
       this.dispatch(message)
     })
-
-    view.webview.html = this.buildHtml(view.webview)
-
-    view.onDidDispose(() => {
-      if (this.view === view) this.view = undefined
-    })
+    webview.html = this.buildHtml(webview)
+    this.webviews.add(webview)
   }
 
   private dispatch(message: WebviewMessage): void {
@@ -153,15 +198,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Post to the webview. A no-op when the panel has never been opened, which
-   *  is the common case — the extension activates long before the user looks
-   *  at the sidebar. */
+  /** Post to every open webview. A no-op when none is open, which is the
+   *  common case: the extension activates long before anyone looks at it. */
   post(message: HostMessage): void {
-    void this.view?.webview.postMessage(message)
+    for (const webview of this.webviews) void webview.postMessage(message)
   }
 
-  /** Bring the panel into focus (used by the "new chat" command). */
+  /** Bring the chat into view: the editor tab when one is open, else the sidebar. */
   async reveal(): Promise<void> {
+    if (this.panel) {
+      this.panel.reveal(undefined, false)
+      return
+    }
     if (this.view) {
       this.view.show(true)
       return

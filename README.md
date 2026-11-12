@@ -153,6 +153,19 @@ client-side.
 Nest tools are merged with the local `ws_*` set (disjointness asserted) and
 tagged `(ran on Nest)` in summaries.
 
+### Approvals for Nest's tools
+
+Each Nest tool carries an approval rule in its `_meta`: reads run, writes ask
+unless you have chosen **Always allow**, and destructive tools ask on every
+call. Yellowscript asks in a modal before the call reaches Nest.
+
+Nest itself refuses an unapproved destructive call, from any client. When it
+does, Yellowscript posts the decision you just made to `/approvals/:id` and
+repeats the call with the approval's id. It never answers that exchange for a
+call you did not approve in the prompt for that call. **Always allow** is kept
+on Nest for your account, so it applies in the chat app and Twig too, and you
+revoke it from the chat app's settings. The logic is in `src/nest/approval.ts`.
+
 ## Development
 
 ```bash

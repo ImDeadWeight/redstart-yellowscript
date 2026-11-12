@@ -36,6 +36,8 @@ import {
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
+import { approvalInfo, callWithApproval } from './nest/approval.ts'
+import { makeNestApprovalDeps } from './ui/nest-approval.ts'
 import { openMcpSseStream } from './ui/mcp-stream.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
@@ -1029,6 +1031,9 @@ function connectMcpHost(): void {
   mergedTools = null
   let currentDisabled = new Set<string>()
   pushTools()
+  // Approvals for Nest's own tools: per connection, because the grant cache
+  // belongs to the account this client is signed in as.
+  const approvals = makeNestApprovalDeps(client, (m) => output?.warn(m))
   const host = new McpHost(
     {
       baseUrl: client.baseUrl,
@@ -1046,7 +1051,13 @@ function connectMcpHost(): void {
               name: t.name,
               description: t.description,
               inputSchema: t.inputSchema,
-              execute: (args: unknown) => host.callTool(t.name, args),
+              execute: async (args: unknown) =>
+                (
+                  await callWithApproval(t.name, args, approvalInfo(t.meta), {
+                    ...approvals,
+                    call: (meta) => host.callToolResult(t.name, args, meta),
+                  })
+                ).text,
             }
             if (t.meta) ref.meta = t.meta
             return ref

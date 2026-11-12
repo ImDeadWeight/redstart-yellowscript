@@ -32,6 +32,7 @@
 import type { McpServersResponse, Credential } from '../nest/types.ts'
 import { credentialValue } from '../nest/types.ts'
 import { truncateForModel, MAX_RESULT_CHARS } from '../tools/types.ts'
+import { approvalRequired, type NestCallResult } from './approval.ts'
 
 /** A single JSON-RPC 2.0 request or response on the MCP wire. */
 export interface McpMessage {
@@ -320,19 +321,36 @@ export class McpHost {
    * The caller is responsible for origin-tagging so the model knows it ran on the
    * Nest, not locally (HANDOFF 4.3).
    */
-   async callTool(name: string, args: unknown): Promise<string> {
-    const res = await this.postJsonRpc('tools/call', { name, arguments: args })
-    if (res.error) return `[Tool ${name} failed: ${res.error.message}]`
+  async callTool(name: string, args: unknown): Promise<string> {
+    return (await this.callToolResult(name, args)).text
+  }
+
+  /**
+   * One tools/call, with what the approval exchange needs: `meta` is sent as
+   * `params._meta` (the approval id on a repeated call), and a pending approval
+   * in the result's `_meta` is handed back rather than flattened into text.
+   */
+  async callToolResult(name: string, args: unknown, meta?: Record<string, unknown>): Promise<NestCallResult> {
+    const params: Record<string, unknown> = { name, arguments: args }
+    if (meta && Object.keys(meta).length > 0) params._meta = meta
+    const res = await this.postJsonRpc('tools/call', params)
+    if (res.error) return { text: `[Tool ${name} failed: ${res.error.message}]`, isError: true, approval: null }
     const result = res.result as Record<string, unknown> | undefined
+    const approval = approvalRequired(result)
+    if (approval) return { text: this.extractText(result), isError: true, approval }
     // MCP tools/call returns isError + content. A server-side policy denial
     // (write/destructive policy, banned tool) arrives as isError=true with a
     // human-readable reason in the content — render it distinctly so the model
     // knows this was refused by the server, not a local failure. (HANDOFF 4.4)
     if (result && result.isError === true) {
       const reason = this.extractText(result)
-      return `[Server denial for "${name}": ${reason || 'policy refusal, tool not available'}]`
+      return {
+        text: `[Server denial for "${name}": ${reason || 'policy refusal, tool not available'}]`,
+        isError: true,
+        approval: null,
+      }
     }
-    return this.extractText(res.result)
+    return { text: this.extractText(res.result), isError: false, approval: null }
   }
 
   // --- private plumbing -------------------------------------------------------
@@ -392,6 +410,9 @@ function normalizeTool(raw: Partial<McpTool>): McpTool {
     inputSchema: raw.inputSchema ?? { type: 'object', properties: {} },
   }
   if (raw.annotations) tool.annotations = raw.annotations
-  if (raw.meta) tool.meta = raw.meta
+  // MCP puts provenance in `_meta` (Nest stamps capability, class and the
+  // approval rule there). `meta` is accepted too, for older fixtures.
+  const meta = (raw as { _meta?: Record<string, unknown> })._meta ?? raw.meta
+  if (meta) tool.meta = meta
   return tool
 }

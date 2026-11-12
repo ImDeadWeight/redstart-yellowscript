@@ -8,7 +8,9 @@ import {
   buildAnswer,
   composerPlaceholder,
   initialViewState,
+  matchWorkflows,
   planProgress,
+  slashQuery,
   type ViewState,
 } from './view-model.ts'
 
@@ -121,5 +123,35 @@ describe('helpers', () => {
     assert.equal(buildAnswer([], '  '), null)
     assert.deepEqual(buildAnswer(['A'], ''), { chosen: ['A'] })
     assert.deepEqual(buildAnswer([], ' mine '), { text: 'mine' })
+  })
+})
+
+describe('projects, workflows and pages', () => {
+  test('pages, project lists and workflow lists come from the host', () => {
+    const s = run(
+      init(),
+      { type: 'showPage', page: 'projects' },
+      { type: 'projects', projects: [{ id: 'p1', name: 'Greenhouse' }], linkedId: 'p1' },
+      { type: 'workflows', workflows: [], error: 'No connection' },
+    )
+    assert.equal(s.page, 'projects')
+    assert.equal(s.projects.items?.[0]?.name, 'Greenhouse')
+    assert.equal(s.projects.linkedId, 'p1')
+    assert.equal(s.workflows.error, 'No connection')
+  })
+
+  test('slashQuery reads a /command only at the start, with nothing after it', () => {
+    assert.equal(slashQuery('/'), '')
+    assert.equal(slashQuery('/week'), 'week')
+    assert.equal(slashQuery('/weekly-report'), 'weekly-report')
+    assert.equal(slashQuery('/weekly report'), null)
+    assert.equal(slashQuery('see /weekly'), null)
+  })
+
+  test('matchWorkflows ranks prefix matches before contains matches', () => {
+    const w = (name: string, title: string) => ({ name, title, arguments: [] })
+    const list = [w('notes-to-report', 'Turn notes into a report'), w('report', 'Weekly report'), w('standup', 'Daily standup')]
+    assert.deepEqual(matchWorkflows(list, 'rep').map((x) => x.name), ['report', 'notes-to-report'])
+    assert.equal(matchWorkflows(list, '').length, 3)
   })
 })

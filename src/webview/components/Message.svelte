@@ -23,7 +23,14 @@
 
 <article class="message {message.role}" class:pending={message.pending} class:streaming={message.streaming}>
   {#if message.role === 'user'}
-    <div class="bubble">{message.content}</div>
+    {#if message.workflow}
+      <details class="bubble workflow">
+        <summary><Icon name="bolt" size={12} />{message.workflow.title}</summary>
+        <div class="workflow-text">{message.content}</div>
+      </details>
+    {:else}
+      <div class="bubble">{message.content}</div>
+    {/if}
     {#if message.pending}<span class="note">Queued</span>{/if}
   {:else}
     {#if message.reasoning}
@@ -87,6 +94,10 @@
     border: 1px solid var(--ys-user-bubble-border);
   }
   .pending .bubble { opacity: 0.55; font-style: italic; }
+  .workflow { white-space: normal; }
+  .workflow summary { display: flex; align-items: center; gap: 5px; cursor: pointer; font-weight: 600; }
+  .workflow summary :global(.icon) { color: var(--ys-accent); }
+  .workflow-text { margin-top: 6px; white-space: pre-wrap; font-size: 0.9em; opacity: 0.8; max-height: 200px; overflow-y: auto; }
   .note { font-size: 0.8em; opacity: 0.6; }
   .tools { display: flex; flex-direction: column; gap: 3px; }
   .group {

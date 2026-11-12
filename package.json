@@ -103,6 +103,16 @@
         "category": "Yellowscript"
       },
       {
+        "command": "redstartYellowscript.chooseProject",
+        "title": "Choose Project",
+        "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.runWorkflow",
+        "title": "Run Workflow",
+        "category": "Yellowscript"
+      },
+      {
         "command": "redstartYellowscript.revertLastWrite",
         "title": "Revert Last Write",
         "category": "Yellowscript"

@@ -6,6 +6,8 @@ import { applyHostMessage, initialViewState, type ViewState } from './view-model
 
 class ViewStore {
   current: ViewState = $state(initialViewState())
+  /** A workflow the Workflows page should open on (picked from `/` with inputs). */
+  workflowFocus: string | null = $state(null)
 
   apply(message: HostMessage): void {
     this.current = applyHostMessage(this.current, message)
@@ -13,6 +15,21 @@ class ViewStore {
 
   closeHistory(): void {
     this.current = { ...this.current, history: { ...this.current.history, open: false } }
+  }
+
+  openPage(page: 'projects' | 'workflows'): void {
+    this.current = {
+      ...this.current,
+      page,
+      history: { ...this.current.history, open: false },
+      // Show "loading" until the host answers.
+      ...(page === 'projects' ? { projects: { ...this.current.projects, items: null } } : {}),
+    }
+  }
+
+  closePage(): void {
+    this.current = { ...this.current, page: null }
+    this.workflowFocus = null
   }
 
   dismissNotice(id: number): void {

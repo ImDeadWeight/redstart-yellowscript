@@ -105,6 +105,19 @@ pure view change — streaming continues in background tabs.
   when the model wrote the call as text. A finished turn with four or more
   calls folds them into one "Used N tools" row.
 
+### Projects and workflows
+
+- **Project.** Link the workspace to one of your Nest projects with the chip
+  under the message box (or **Yellowscript: Choose Project**). Every request
+  then names it, and Nest adds the project's instructions and memories. Chats
+  stay in the workspace; the project is what Yellowscript shares with the chat
+  app, Twig and Greenhouse. The link is per workspace, and only counts for the
+  Nest and account it was made with.
+- **Workflows.** Type `/` in the message box, or use the bolt icon (or
+  **Yellowscript: Run Workflow**). These are the saved instructions from the
+  chat app's Workflows page, personal and organization. Nest composes the text
+  from its own copy; a workflow with inputs asks for them first.
+
 ### Questions, plans and the turn limit
 
 Yellowscript declares to Nest that it can answer `ask_user` and `update_plan`,

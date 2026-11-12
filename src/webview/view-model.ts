@@ -18,7 +18,10 @@ import {
   type ConversationState,
   type ConversationView,
   type HostMessage,
+  type PageName,
+  type ProjectView,
   type SessionSnapshot,
+  type WorkflowView,
 } from '../chat/protocol.ts'
 
 export interface HistoryItem {
@@ -44,6 +47,11 @@ export interface ViewState {
   tabs: ConversationView[]
   notices: Notice[]
   history: { open: boolean; items: HistoryItem[] }
+  /** A page that takes over the panel, or null for the chat. */
+  page: PageName | null
+  /** null while loading (or never loaded). */
+  projects: { items: ProjectView[] | null; linkedId: string | null; error?: string }
+  workflows: { items: WorkflowView[] | null; error?: string }
   /** Set when the host was built with a different protocol: the panel is stale. */
   stale: boolean
   /** Bumped when the whole transcript is replaced, so the view can jump to the
@@ -60,6 +68,9 @@ export function initialViewState(): ViewState {
     tabs: [],
     notices: [],
     history: { open: false, items: [] },
+    page: null,
+    projects: { items: null, linkedId: null },
+    workflows: { items: null },
     stale: false,
     generation: 0,
   }
@@ -199,7 +210,23 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
       return { ...state, history: { ...state.history, items: [...message.conversations] } }
 
     case 'showHistoryPanel':
-      return { ...state, history: { open: true, items: [...message.conversations] } }
+      return { ...state, page: null, history: { open: true, items: [...message.conversations] } }
+
+    case 'projects':
+      return {
+        ...state,
+        projects: {
+          items: message.projects,
+          linkedId: message.linkedId,
+          ...(message.error ? { error: message.error } : {}),
+        },
+      }
+
+    case 'workflows':
+      return { ...state, workflows: { items: message.workflows, ...(message.error ? { error: message.error } : {}) } }
+
+    case 'showPage':
+      return { ...state, page: message.page, history: { ...state.history, open: false } }
   }
 }
 
@@ -246,4 +273,21 @@ export function buildAnswer(selected: readonly string[], text: string): { chosen
     ...(selected.length > 0 ? { chosen: [...selected] } : {}),
     ...(trimmed ? { text: trimmed } : {}),
   }
+}
+
+/** Workflows whose name or title starts with (then contains) what follows `/`. */
+export function matchWorkflows(items: readonly WorkflowView[], typed: string): WorkflowView[] {
+  const q = typed.trim().toLowerCase()
+  if (!q) return [...items]
+  const starts = items.filter((w) => w.name.toLowerCase().startsWith(q) || w.title.toLowerCase().startsWith(q))
+  const contains = items.filter(
+    (w) => !starts.includes(w) && (w.name.toLowerCase().includes(q) || w.title.toLowerCase().includes(q)),
+  )
+  return [...starts, ...contains]
+}
+
+/** What the composer is typing when it is a `/workflow` command, or null. */
+export function slashQuery(text: string): string | null {
+  const m = /^\/([\w-]*)$/.exec(text)
+  return m ? (m[1] ?? '') : null
 }

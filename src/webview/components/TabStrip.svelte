@@ -1,7 +1,13 @@
 <script lang="ts">
   import type { ConversationView } from '../../chat/protocol.ts'
   import { post } from '../host.ts'
+  import { view } from '../store.svelte.ts'
   import Icon from './Icon.svelte'
+
+  function openPage(page: 'projects' | 'workflows') {
+    view.openPage(page)
+    post({ type: 'loadPage', page })
+  }
 
   let { tabs, activeId }: { tabs: ConversationView[]; activeId: string | null } = $props()
 </script>
@@ -34,6 +40,9 @@
   </div>
   <button type="button" class="icon-button" title="New chat" aria-label="New chat" onclick={() => post({ type: 'newConversation' })}>
     <Icon name="plus" />
+  </button>
+  <button type="button" class="icon-button" title="Workflows" aria-label="Workflows" onclick={() => openPage('workflows')}>
+    <Icon name="bolt" />
   </button>
   <button type="button" class="icon-button" title="History" aria-label="History" onclick={() => post({ type: 'openHistory' })}>
     <Icon name="history" />

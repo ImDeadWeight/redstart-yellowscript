@@ -92,7 +92,9 @@
     opacity: 0.6;
   }
   .clear:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
-  ol { list-style: none; margin: 6px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  /* A long plan scrolls in place, so the transcript keeps the room. (Not the
+     whole dock: that would clip the composer's / menu.) */
+  ol { list-style: none; margin: 6px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 3px; max-height: 30vh; overflow-y: auto; }
   li { display: flex; align-items: flex-start; gap: 6px; }
   li :global(.icon) { margin-top: 2px; }
   li.done :global(.icon) { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }

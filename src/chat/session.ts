@@ -73,6 +73,9 @@ export interface SessionDeps {
   /** Phase 4.1: gate for a command tool's planned command. When set, a tool
    *  result carrying a `pendingCommand` is routed through it (always-ask). */
   approveCommand?: CommandApprovalGate
+  /** The Nest project the workspace is linked to, sent with every request so
+   *  Nest adds its instructions and memories. */
+  projectId?: () => string | null
   /**
    * The conversation this session owns. Every protocol message it emits is
    * tagged with this id so the webview can route a delta to the right tab even
@@ -94,7 +97,7 @@ export class ChatSession {
   private model: string | null = null
   /** Prompts waiting behind a turn that is still streaming. Drained in order
    *  when the turn finishes, so a user can line up several asks per tab. */
-  private pending: { id: string; prompt: string }[] = []
+  private pending: { id: string; prompt: string; workflow?: { name: string; title: string } }[] = []
   /** The conversation's update_plan checklist. Kept by the model through the
    *  loop's plan port; saved with the conversation; cleared by the person. */
   private plan: PlanStepView[] | null = null
@@ -232,26 +235,27 @@ export class ChatSession {
    * a user can start a long ask and line up the next one in another tab or
    * below. Queued prompts drain in order as each turn finishes.
    */
-  async send(text: string): Promise<void> {
+  async send(text: string, workflow?: { name: string; title: string }): Promise<void> {
     const prompt = text.trim()
     if (!prompt) return
+    const extra = workflow ? { workflow: { ...workflow } } : {}
 
     // A message typed while the assistant waits on a question IS the answer
     // (agent-core's contract): it goes to the question, not into the queue.
-    if (this.question) {
+    if (this.question && !workflow) {
       this.answer(this.question.view.id, { text: prompt })
       return
     }
 
     if (this.busy) {
       const id = this.nextId()
-      this.pending.push({ id, prompt })
-      this.emit({ type: 'message', message: { id, role: 'user', content: prompt, pending: true } })
+      this.pending.push({ id, prompt, ...extra })
+      this.emit({ type: 'message', message: { id, role: 'user', content: prompt, pending: true, ...extra } })
       this.deps.onPersist?.()
       return
     }
 
-    await this.runTurn({ id: this.nextId(), role: 'user', content: prompt })
+    await this.runTurn({ id: this.nextId(), role: 'user', content: prompt, ...extra })
 
     // Drain anything that queued up while this turn ran.
     while (this.pending.length > 0) {
@@ -259,8 +263,9 @@ export class ChatSession {
       // Flip the queued user message to active: same id, pending cleared. The
       // webview updates the existing (greyed) bubble rather than adding a new
       // one.
-      this.emit({ type: 'message', message: { id: next.id, role: 'user', content: next.prompt, pending: false } })
-      await this.runTurn({ id: next.id, role: 'user', content: next.prompt })
+      const nextExtra = next.workflow ? { workflow: next.workflow } : {}
+      this.emit({ type: 'message', message: { id: next.id, role: 'user', content: next.prompt, pending: false, ...nextExtra } })
+      await this.runTurn({ id: next.id, role: 'user', content: next.prompt, ...nextExtra })
     }
   }
 
@@ -498,7 +503,8 @@ export class ChatSession {
     // only claims Nest capabilities in its injected system prompt when the
     // request actually carries tools, so a toolless request correctly produces a
     // model that does not believe it can call anything.
-    return { messages }
+    const projectId = this.deps.projectId?.() ?? null
+    return projectId ? { messages, redstart_project: projectId } : { messages }
   }
 
   private nextId(): string {

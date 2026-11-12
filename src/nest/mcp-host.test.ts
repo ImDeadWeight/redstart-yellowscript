@@ -339,6 +339,39 @@ describe('McpHost', () => {
     host.stop()
   })
 
+  it('lists workflows as prompts and composes one with its arguments', async () => {
+    const { client, control } = makeFakeClient()
+    const realFetch = client.fetch
+    client.fetch = (url, init) => {
+      const msg = JSON.parse(new URLSearchParams(String(init?.body ?? '')).get('message') ?? '{}') as McpMessage
+      const reply = (result: unknown) => Promise.resolve(new Response(JSON.stringify({ id: msg.id, jsonrpc: '2.0', result }), { status: 200 }))
+      if (msg.method === 'prompts/list') {
+        return reply({ prompts: [
+          { name: 'weekly', title: 'Weekly report', description: 'Notes to report', arguments: [{ name: 'notes', required: true }] },
+          { name: 'org-standup', arguments: [] },
+          { title: 'no name' },
+        ] })
+      }
+      if (msg.method === 'prompts/get') {
+        const p = msg.params as { name: string; arguments: Record<string, string> }
+        return reply({ messages: [{ role: 'user', content: { type: 'text', text: `${p.name}: ${p.arguments.notes}` } }] })
+      }
+      return realFetch(url, init)
+    }
+    void control
+    const stream = fakeStream()
+    const host = new McpHost(client, { openStream: () => Promise.resolve(stream), onTools: () => {}, onConnection: () => {}, onError: (e) => { throw e } })
+    await host.connect()
+    stream.emit({ type: 'endpoint', data: 'http://nest:19082/message' })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const prompts = await host.listPrompts()
+    assert.deepEqual(prompts.map((p) => [p.name, p.title]), [['weekly', 'Weekly report'], ['org-standup', 'org-standup']])
+    assert.deepEqual(prompts[0]?.arguments, [{ name: 'notes', required: true }])
+    assert.equal(await host.getPrompt('weekly', { notes: 'shipped it' }), 'weekly: shipped it')
+    host.stop()
+  })
+
   it('ws_* names never collide with Nest tool names (disjointness)', async () => {
     const { client } = makeFakeClient()
     const stream = fakeStream()

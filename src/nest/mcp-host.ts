@@ -67,6 +67,14 @@ export interface McpTool {
   meta?: Record<string, unknown>
 }
 
+/** A Nest workflow, as an MCP prompt. */
+export interface McpPrompt {
+  name: string
+  title: string
+  description?: string
+  arguments: Array<{ name: string; description?: string; required: boolean }>
+}
+
 /** The resolved built-in server the host is connected to. */
 export interface McpConnection {
   serverUrl: string
@@ -367,6 +375,52 @@ export class McpHost {
       }
     }
     return { text: this.extractText(res.result), isError: false, approval: null }
+  }
+
+  /**
+   * The account's workflows, as MCP prompts (Nest workflows-storage.mjs):
+   * personal ones, then the organization's (named `org-…`).
+   */
+  async listPrompts(): Promise<McpPrompt[]> {
+    const res = await this.postJsonRpc('prompts/list')
+    if (res.error) throw new Error(res.error.message)
+    const prompts = (res.result as { prompts?: unknown[] } | undefined)?.prompts ?? []
+    return prompts.flatMap((raw) => {
+      const p = raw as Record<string, unknown>
+      if (typeof p.name !== 'string' || !p.name) return []
+      const args = Array.isArray(p.arguments) ? p.arguments : []
+      return [{
+        name: p.name,
+        title: typeof p.title === 'string' && p.title ? p.title : p.name,
+        ...(typeof p.description === 'string' && p.description ? { description: p.description } : {}),
+        arguments: args.flatMap((a) => {
+          const r = a as Record<string, unknown>
+          if (typeof r.name !== 'string') return []
+          return [{
+            name: r.name,
+            required: r.required === true,
+            ...(typeof r.description === 'string' && r.description ? { description: r.description } : {}),
+          }]
+        }),
+      }]
+    })
+  }
+
+  /**
+   * Compose a workflow. Nest builds the text from its own copy of the
+   * workflow: a client can only name one and supply argument values, never
+   * inject the instructions themselves.
+   */
+  async getPrompt(name: string, args: Record<string, string>): Promise<string> {
+    const res = await this.postJsonRpc('prompts/get', { name, arguments: args })
+    if (res.error) throw new Error(res.error.message)
+    const messages = (res.result as { messages?: Array<{ content?: { type?: string; text?: string } }> } | undefined)?.messages ?? []
+    const text = messages
+      .map((m) => (m.content?.type === 'text' && typeof m.content.text === 'string' ? m.content.text : ''))
+      .filter(Boolean)
+      .join('\n\n')
+    if (!text) throw new Error(`Workflow "${name}" came back empty`)
+    return text
   }
 
   // --- private plumbing -------------------------------------------------------

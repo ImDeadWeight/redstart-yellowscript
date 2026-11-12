@@ -5,7 +5,7 @@
   type Name =
     | 'plus' | 'history' | 'stop' | 'send' | 'check' | 'x' | 'chevron-down' | 'chevron-up'
     | 'chevron-right' | 'list' | 'question' | 'tool' | 'alert' | 'circle' | 'circle-check'
-    | 'circle-dot' | 'circle-minus' | 'spinner' | 'server' | 'refresh'
+    | 'circle-dot' | 'circle-minus' | 'spinner' | 'server' | 'refresh' | 'folder' | 'bolt'
 
   let { name, size = 14, label }: { name: Name; size?: number; label?: string } = $props()
 
@@ -30,6 +30,8 @@
     spinner: 'M8 2a6 6 0 1 1-6 6',
     server: 'M3 3h10v4H3zM3 9h10v4H3zM5.5 5h.01M5.5 11h.01',
     refresh: 'M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3',
+    folder: 'M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.6h5A1.5 1.5 0 0 1 14 6.1v5.4a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z',
+    bolt: 'M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z',
   }
 </script>
 

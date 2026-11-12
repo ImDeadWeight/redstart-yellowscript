@@ -8,6 +8,8 @@
   import QuestionCard from './QuestionCard.svelte'
   import LimitPrompt from './LimitPrompt.svelte'
   import Composer from './Composer.svelte'
+  import ProjectsPage from './ProjectsPage.svelte'
+  import WorkflowsPage from './WorkflowsPage.svelte'
 
   const s = $derived(view.current)
   const connected = $derived(s.session.connection === 'connected')
@@ -26,6 +28,11 @@
     {#if s.history.open}
       <HistoryPanel items={s.history.items} />
     {/if}
+    {#if s.page === 'projects'}
+      <ProjectsPage items={s.projects.items} linkedId={s.projects.linkedId} error={s.projects.error} />
+    {:else if s.page === 'workflows'}
+      <WorkflowsPage items={s.workflows.items} error={s.workflows.error} focus={view.workflowFocus} />
+    {:else}
     <Transcript messages={s.messages} notices={s.notices} generation={s.generation} />
     <div class="dock">
       {#if s.conversation.plan && s.conversation.plan.length > 0}
@@ -40,6 +47,7 @@
       {/if}
       <Composer session={s.session} viewState={s} />
     </div>
+    {/if}
   </div>
 {/if}
 
@@ -56,9 +64,6 @@
     flex-direction: column;
     gap: 6px;
     padding: 6px 8px 8px;
-    /* The plan and a question can be tall; the transcript keeps the room. */
-    max-height: 70vh;
-    overflow-y: auto;
     border-top: 1px solid var(--vscode-panel-border, transparent);
     background: var(--ys-surface);
   }

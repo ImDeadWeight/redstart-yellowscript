@@ -39,7 +39,7 @@ import type { StreamChannel } from '../nest/streaming.ts'
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -65,6 +65,9 @@ export interface ChatMessageView {
    *  starts, so a queued prompt shows in order, greyed, until then. */
   pending?: boolean
   stats?: TurnStats
+  /** A user message that ran a workflow: the content is the text Nest
+   *  composed (what the model reads); this is what the bubble shows. */
+  workflow?: { name: string; title: string }
   /** The tools this assistant turn ran, in order. Kept on the turn (not only
    *  sent as live messages) so a rebuilt panel can draw the cards again. */
   tools?: ToolCardView[]
@@ -110,6 +113,26 @@ export interface ConversationState {
   /** True while the flow waits at the turn limit for "keep going?". */
   atTurnLimit: boolean
 }
+
+/** A Nest project, as the Projects page lists it. */
+export interface ProjectView {
+  id: string
+  name: string
+  /** The first part of its instructions, for the list. */
+  instructions?: string
+  folder?: string
+}
+
+/** A Nest workflow (an MCP prompt), as the Workflows page and `/` list it. */
+export interface WorkflowView {
+  name: string
+  title: string
+  description?: string
+  arguments: Array<{ name: string; description?: string; required: boolean }>
+}
+
+/** The pages that take over the panel. */
+export type PageName = 'projects' | 'workflows'
 
 export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false }
 
@@ -160,6 +183,8 @@ export interface SessionSnapshot {
   busy: boolean
   /** Prompts waiting behind the active conversation's running turn. */
   queued: number
+  /** The Nest project this workspace is linked to. */
+  project?: { id: string; name: string }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +215,13 @@ export type WebviewMessage =
   | { type: 'searchHistory'; query: string }
   | { type: 'deleteHistory'; id: string }
   | { type: 'restoreHistory'; id: string }
+  /** Load a page's data; the host answers with `projects` or `workflows`. The webview decides what is on screen. */
+  | { type: 'loadPage'; page: PageName }
+  /** Link this workspace to a Nest project, or unlink it (null). */
+  | { type: 'linkProject'; id: string | null }
+  | { type: 'createProject'; name: string }
+  /** Run a workflow with its argument values. */
+  | { type: 'runWorkflow'; name: string; args: Record<string, string> }
   /** Answer the open question (`id` is its QuestionView id); null skips it. */
   | { type: 'answer'; id: string; answer: AnswerView | null }
   /** Clear the active conversation's plan (the × on the checklist). */
@@ -215,6 +247,12 @@ export type HostMessage =
    /** Replace the whole transcript (switch / restore). Now carries which tab it
     *  belongs to so a delta for a background tab can be dropped or buffered. */
    | { type: 'conversation'; conversationId: string; messages: ChatMessageView[]; state: ConversationState }
+   /** The Projects page's data. `projects` null while loading. */
+   | { type: 'projects'; projects: ProjectView[] | null; linkedId: string | null; error?: string }
+   /** The account's workflows, for the page and for `/`. */
+   | { type: 'workflows'; workflows: WorkflowView[] | null; error?: string }
+   /** Show a page (sent by a command, e.g. "Choose Project"). */
+   | { type: 'showPage'; page: PageName }
    /** The question, plan or turn-limit wait changed for a conversation. */
    | { type: 'conversationState'; conversationId: string; state: ConversationState }
    /** The full list of local conversations, for the tab strip. */
@@ -347,6 +385,21 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
     }
     case 'clearPlan':
       return { type: 'clearPlan' }
+    case 'loadPage':
+      return msg.page === 'projects' || msg.page === 'workflows' ? { type: 'loadPage', page: msg.page } : null
+    case 'linkProject':
+      return msg.id === null || typeof msg.id === 'string' ? { type: 'linkProject', id: msg.id } : null
+    case 'createProject':
+      return typeof msg.name === 'string' && msg.name.trim() ? { type: 'createProject', name: msg.name.trim() } : null
+    case 'runWorkflow': {
+      if (typeof msg.name !== 'string' || !msg.name) return null
+      if (typeof msg.args !== 'object' || msg.args === null || Array.isArray(msg.args)) return null
+      const args: Record<string, string> = {}
+      for (const [k, v] of Object.entries(msg.args as Record<string, unknown>)) {
+        if (typeof v === 'string') args[k] = v
+      }
+      return { type: 'runWorkflow', name: msg.name, args }
+    }
     case 'continueAtLimit':
       return typeof msg.go === 'boolean' ? { type: 'continueAtLimit', go: msg.go } : null
     default:

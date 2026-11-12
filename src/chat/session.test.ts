@@ -688,3 +688,33 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     assert.match(h.session.snapshot().at(-1)?.content ?? '', /Finished\./)
   })
 })
+
+describe('ChatSession — projects and workflows', () => {
+  test('names the linked project on every request, and nothing when unlinked', async () => {
+    let project: string | null = 'p-123'
+    const requests: ChatCompletionRequest[] = []
+    const session = new ChatSession({
+      getClient: () => fakeClient(async (req) => {
+        requests.push(req)
+        return emptyResult({ content: 'ok' })
+      }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: () => {},
+      projectId: () => project,
+    })
+    await session.send('one')
+    project = null
+    await session.send('two')
+    assert.equal(requests[0]?.redstart_project, 'p-123')
+    assert.equal('redstart_project' in (requests[1] ?? {}), false)
+  })
+
+  test('a workflow message carries the composed text and shows the workflow', async () => {
+    const h = new Harness()
+    await h.session.send('Turn these notes into the weekly report: …', { name: 'weekly', title: 'Weekly report' })
+    const user = h.session.transcript[0]
+    assert.equal(user?.workflow?.title, 'Weekly report')
+    assert.match(h.lastRequest.messages[0]?.content ?? '', /weekly report/)
+  })
+})

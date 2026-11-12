@@ -184,6 +184,21 @@ export class NestClient {
     return this.request<McpServersResponse>('/redstart/mcp-servers', signal ? { signal } : {})
   }
 
+  // --- Projects -------------------------------------------------------------
+
+  /** The signed-in account's Nest projects (owner-only until sharing lands). */
+  listProjects(signal?: AbortSignal): Promise<{ projects: NestProject[] }> {
+    return this.request<{ projects: NestProject[] }>('/projects', signal ? { signal } : {})
+  }
+
+  /** Create a project. Nest refuses a duplicate name (409) and past its limit. */
+  createProject(name: string, instructions = ''): Promise<NestProject> {
+    return this.request<NestProject>('/projects', {
+      method: 'POST',
+      body: JSON.stringify({ name, instructions }),
+    })
+  }
+
   // --- Completions ----------------------------------------------------------
 
   /**
@@ -304,6 +319,19 @@ export interface ChatCompletionRequest {
    *  only claims Nest capabilities when a request actually carries tools. */
   tools?: unknown[]
   tool_choice?: unknown
+  /** The Nest project this chat works in. Nest checks the caller may read it,
+   *  then adds its instructions and memories to the prompt. */
+  redstart_project?: string
+}
+
+/** A Nest project, as GET /projects lists it. */
+export interface NestProject {
+  id: string
+  name: string
+  instructions?: string
+  /** The project's files folder, relative to the account's Documents. */
+  folder?: string
+  updatedAt?: number
 }
 
 export interface StreamHandlers {

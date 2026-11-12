@@ -20,6 +20,7 @@ import {
   type ChatMessageView,
   type ConversationState,
   type HostMessage,
+  type PageName,
   type SessionSnapshot,
   type WebviewMessage,
 } from '../chat/protocol.ts'
@@ -42,6 +43,10 @@ export interface ChatViewHandlers {
   onSearchHistory: (query: string) => void
   onDeleteHistory: (id: string) => void
   onRestoreHistory: (id: string) => void
+  onOpenPage: (page: PageName) => void
+  onLinkProject: (id: string | null) => void
+  onCreateProject: (name: string) => void
+  onRunWorkflow: (name: string, args: Record<string, string>) => void
   onAnswer: (id: string, answer: AnswerView | null) => void
   onClearPlan: () => void
   onContinueAtLimit: (go: boolean) => void
@@ -123,6 +128,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break
       case 'restoreHistory':
         this.handlers.onRestoreHistory(message.id)
+        break
+      case 'loadPage':
+        this.handlers.onOpenPage(message.page)
+        break
+      case 'linkProject':
+        this.handlers.onLinkProject(message.id)
+        break
+      case 'createProject':
+        this.handlers.onCreateProject(message.name)
+        break
+      case 'runWorkflow':
+        this.handlers.onRunWorkflow(message.name, message.args)
         break
       case 'answer':
         this.handlers.onAnswer(message.id, message.answer)

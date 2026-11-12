@@ -318,10 +318,15 @@ describe('ChatSession — concurrency and abort', () => {
   test('queues a second send while a turn is streaming', async () => {
     const h = new Harness()
     let release: (() => void) | undefined
+    let requests = 0
     h.respond(async () => {
-      await new Promise<void>((resolve) => {
-        release = resolve
-      })
+      // Only the first request blocks. The queued turn that drains after it
+      // must be answered, or `await first` waits on it forever.
+      if (requests++ === 0) {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      }
       return emptyResult({ content: 'done' })
     })
 

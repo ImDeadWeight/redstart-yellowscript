@@ -151,7 +151,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
     "test": "node --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke.mjs",
-    "check": "npm run typecheck && npm run test",
+    "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
+    "sync:agent-core": "node scripts/sync-agent-core.mjs",
     "package": "npm run check && npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {

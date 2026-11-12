@@ -93,7 +93,7 @@ export interface IssueClientKeyResponse {
  * arguments are streamed across many chunks. This is the finished article, and
  * it has two possible origins that the loop must treat identically — the
  * structured `tool_calls` field, and the recovery parser reading a call the
- * model wrote as plain text. See agent/tool-call-parser.ts for why the second
+ * model wrote as plain text. See agent-core's tool-call-parser.mjs (via agent/agent-core.ts) for why the second
  * path is not optional on local models.
  */
 export interface ToolCall {

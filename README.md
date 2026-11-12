@@ -178,6 +178,23 @@ npm run smoke      # live Nest smoke test
 npm run package    # check + build + vsce package
 ```
 
+### The agent loop is agent-core
+
+The loop (turns, the per-reply call limit, recovering calls a model wrote as
+text, `ask_user`, `update_plan` and its completion check) is the same code
+chat-ui, the agent bench and Nest's task runner run: redstart-project's
+`shared/agent-core/`. It is copied into `src/vendor/agent-core/`, pinned to a
+commit recorded in `VENDORED.json`, and never edited here. `src/agent/loop.ts`
+supplies its ports, and `src/agent/agent-core.ts` gives it TypeScript types.
+
+```bash
+npm run sync:agent-core -- ../redstart-project origin/feat/agent-core   # re-sync at a ref
+node scripts/sync-agent-core.mjs --check    # part of npm run check: fails on a local edit
+```
+
+A behaviour change to the loop goes to redstart-project first, then comes back
+with a sync.
+
 ### Two TypeScript projects
 
 - `tsconfig.json` — extension host (Node types, no DOM)

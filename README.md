@@ -5,11 +5,10 @@ the private, on-premises AI server — instead of a cloud API. Zero-config
 network discovery, Redstart account authentication, streaming chat in the
 sidebar, and workspace-aware tools the model can drive.
 
-> **Status: Phase 4.3 shipped.** Connect, sign in, streaming conversation,
-> six read-only tools, write tools with shadow-git checkpointing, command
-> execution, Nest MCP tool discovery, server-side tool banning, and a settings
-> menu. **[docs/HANDOFF.md](docs/HANDOFF.md) is the single planning document**
-> — state, roadmap, ground rules, and the Nest wire reference.
+> **Status:** connect and sign in (password swapped for an app key, or an API
+> key), streaming chat in the sidebar or an editor tab, workspace tools with
+> diff review and checkpoints, Nest's tools with their approvals, the shared
+> agent-core loop with questions and plans, and Nest projects and workflows.
 
 ## Why not just point a generic client at the Nest?
 

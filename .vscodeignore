@@ -10,3 +10,6 @@ tsconfig.json
 .gitignore
 **/*.map
 **/*.test.ts
+sample-workspace/**
+scripts/**
+tsconfig.webview.json

@@ -6,6 +6,7 @@
 // fail to load. The explicit `.cjs` extension keeps both true at once.
 
 import * as esbuild from 'esbuild'
+import sveltePlugin from 'esbuild-svelte'
 
 const production = process.argv.includes('--production')
 const watch = process.argv.includes('--watch')
@@ -37,10 +38,24 @@ const extensionBuild = {
 const webviewBuild = {
   ...shared,
   entryPoints: ['src/webview/main.ts'],
+  // Also writes dist/webview.css: the components' styles go to a file, not
+  // into <style> tags at runtime, because the CSP has no 'unsafe-inline'.
   outfile: 'dist/webview.js',
   format: 'iife',
   platform: 'browser',
-  target: 'es2020',
+  target: 'es2022',
+  // Svelte's runtime is ESM with browser conditions.
+  conditions: ['svelte', 'browser'],
+  mainFields: ['svelte', 'browser', 'module', 'main'],
+  // The mascot SVG is imported as text and inlined: the CSP allows no image
+  // requests, and the drawing is static markup with no model text in it.
+  loader: { '.svg': 'text' },
+  plugins: [
+    sveltePlugin({
+      // Svelte 5 strips `lang="ts"` itself: no preprocessor needed.
+      compilerOptions: { css: 'external', dev: !production },
+    }),
+  ],
 }
 
 const builds = [extensionBuild, webviewBuild]

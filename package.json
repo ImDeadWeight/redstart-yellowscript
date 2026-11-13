@@ -2,6 +2,7 @@
   "name": "redstart-yellowscript",
   "displayName": "Redstart Yellowscript",
   "description": "Coding agent for a local Redstart Nest — zero-config discovery, Redstart login, workspace-aware tools.",
+  "icon": "media/icon.png",
   "version": "0.0.1",
   "publisher": "redstart",
   "license": "UNLICENSED",
@@ -18,7 +19,8 @@
   ],
   "main": "./dist/extension.cjs",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:redstartYellowscript.chatPanel"
   ],
   "contributes": {
     "viewsContainers": {
@@ -26,7 +28,7 @@
         {
           "id": "redstartYellowscript",
           "title": "Yellowscript",
-          "icon": "media/icon.svg"
+          "icon": "media/yellowscript-mono.svg"
         }
       ]
     },
@@ -42,6 +44,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "redstartYellowscript.openInEditor",
+          "when": "view == redstartYellowscript.chat",
+          "group": "navigation"
+        },
+        {
           "command": "redstartYellowscript.openHistory",
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
@@ -51,6 +58,13 @@
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "redstartYellowscript.openInEditor",
+          "group": "navigation@100",
+          "when": "config.redstartYellowscript.editorButton && activeWebviewPanelId != 'redstartYellowscript.chatPanel'"
+        }
       ]
     },
     "commands": [
@@ -59,6 +73,12 @@
         "title": "New Chat",
         "category": "Yellowscript",
         "icon": "$(add)"
+      },
+      {
+        "command": "redstartYellowscript.openInEditor",
+        "title": "Open in Editor Tab",
+        "category": "Yellowscript",
+        "icon": "media/yellowscript.svg"
       },
       {
         "command": "redstartYellowscript.openSettings",
@@ -97,17 +117,27 @@
         "title": "Show Connection Status",
         "category": "Yellowscript"
       },
-    {
-      "command": "redstartYellowscript.inspectTools",
-      "title": "Inspect Workspace Tools",
-      "category": "Yellowscript"
-    },
-    {
-      "command": "redstartYellowscript.revertLastWrite",
-      "title": "Revert Last Write",
-      "category": "Yellowscript"
-    }
-  ],
+      {
+        "command": "redstartYellowscript.inspectTools",
+        "title": "Inspect Workspace Tools",
+        "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.chooseProject",
+        "title": "Choose Project",
+        "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.runWorkflow",
+        "title": "Run Workflow",
+        "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.revertLastWrite",
+        "title": "Revert Last Write",
+        "category": "Yellowscript"
+      }
+    ],
     "configuration": {
       "title": "Redstart Yellowscript",
       "properties": {
@@ -139,19 +169,34 @@
           "description": "Write tools the user has chosen to always allow in this workspace.",
           "items": {
             "type": "string",
-            "enum": ["ws_write_file", "ws_edit_file"]
+            "enum": [
+              "ws_write_file",
+              "ws_edit_file"
+            ]
           }
+        },
+        "redstartYellowscript.editorButton": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the Yellowscript button in the editor title bar, which opens the chat as an editor tab."
         }
       }
-    }
+    },
+    "authentication": [
+      {
+        "id": "redstart",
+        "label": "Redstart"
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
+    "typecheck": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.webview.json --fail-on-warnings",
     "test": "node --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke.mjs",
-    "check": "npm run typecheck && npm run test",
+    "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
+    "sync:agent-core": "node scripts/sync-agent-core.mjs",
     "package": "npm run check && npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {
@@ -159,6 +204,9 @@
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
+    "esbuild-svelte": "0.9.5",
+    "svelte": "5.57.3",
+    "svelte-check": "4.7.8",
     "typescript": "^5.7.0"
   }
 }

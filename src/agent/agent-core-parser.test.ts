@@ -1,24 +1,12 @@
 // =============================================================================
-// Tests for the vendored fallback tool-call parser.  [VENDORED]
+// The fallback tool-call parser, as Yellowscript runs it (agent-core).
 // =============================================================================
-// Origin repo:   redstart-project (github.com/ImDeadWeight/redstart-project)
-// Origin path:   redstart-nest/src/chat-ui/tests/unit/tool-call-parser.test.ts
-// Origin commit: a41c9d3 (2026-08-05)
-// Vendored:      2026-08-06
-//
-// The cases are the origin's, one for one, including the two condensed from
-// real sessions. The assertions are rewritten from vitest to node:test +
-// node:assert/strict, since this repo runs tests through Node's native type
-// stripping with no test-runner dependency:
-//
-//   expect(x).toHaveLength(n)  →  assert.equal(x.length, n)
-//   expect(x).toStrictEqual(y) →  assert.deepEqual(x, y)   (strict mode)
-//   expect(x).toBe(y)          →  assert.equal(x, y)
-//   expect(x).toContain(s)     →  assert.ok(x.includes(s))
-//
-// `onlyCall` also covers what chat-ui's `calls[0]` did implicitly: this repo
-// sets noUncheckedIndexedAccess, so an index access is `T | undefined` and has
-// to be narrowed before use.
+// These cases were written against Yellowscript's own copy of chat-ui's parser
+// (vendored 2026-08-06 from redstart-project a41c9d3). That copy is gone: the
+// parser is agent-core's now (src/vendor/agent-core/tool-call-parser.mjs), and
+// these run against it unchanged, so a change upstream that breaks a shape a
+// local model really emits fails here too. Two cases are condensed from real
+// sessions.
 // =============================================================================
 
 import { test, describe } from 'node:test'
@@ -30,7 +18,7 @@ import {
   createApiToolCalls,
   type ParsedToolCall,
   type ToolCallParserConfig,
-} from './tool-call-parser.ts'
+} from './agent-core.ts'
 
 const TOOLS = [{ name: 'create_document' }, { name: 'write_file' }, { name: 'search_files' }]
 

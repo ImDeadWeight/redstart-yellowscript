@@ -11,6 +11,7 @@
 // =============================================================================
 
 import * as vscode from 'vscode'
+import { hostname } from 'node:os'
 
 import { ConnectionManager, describeState, type ConnectionState } from './connection.ts'
 import {
@@ -20,8 +21,16 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
-import type { HostMessage, SessionSnapshot, ConversationView } from './chat/protocol.ts'
-import { NestClient, normalizeBaseUrl } from './nest/client.ts'
+import {
+  EMPTY_CONVERSATION_STATE,
+  type ConversationView,
+  type HostMessage,
+  type PageName,
+  type ProjectView,
+  type SessionSnapshot,
+  type WorkflowView,
+} from './chat/protocol.ts'
+import { NestClient, normalizeBaseUrl, type NestProject } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider } from './ui/chat-view.ts'
@@ -36,6 +45,9 @@ import {
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
+import { approvalInfo, callWithApproval } from './nest/approval.ts'
+import { makeNestApprovalDeps } from './ui/nest-approval.ts'
+import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
 import { openMcpSseStream } from './ui/mcp-stream.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
@@ -54,6 +66,10 @@ let activeConversationId: string | null = null
 /** The currently signed-in account username, used to scope conversation history.
  *  Set from `/auth/me` on connect/sign-in; cleared on sign-out/disconnect. */
 let currentAccountId: string | null = null
+/** Where the workspace's project link is kept (per workspace, like the tabs). */
+let workspaceMemento: vscode.Memento | undefined
+/** The account's workflows, from the last prompts/list. */
+let workflowCache: WorkflowView[] = []
 /** One ChatSession per conversation, keyed by conversation id. Tabs own their
  *  own transcript and request lifecycle, so switching tabs is a pure view
  *  change and a running turn keeps streaming in its own tab. */
@@ -73,6 +89,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
+  workspaceMemento = context.workspaceState
 
   const pruned = conversations.prune(14)
   if (pruned > 0) {
@@ -91,6 +108,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     state: new WorkspaceStateStore(context.workspaceState),
     createClient: (baseUrl) => new NestClient(baseUrl),
     discover: loggedDiscovery(),
+    // A password sign-in becomes a key Nest issues to this app, named for this
+    // machine so it is recognisable in the chat app's list of app keys.
+    appKey: { surface: 'yellowscript', label: `Yellowscript on ${hostname()}` },
+  })
+  const authProvider = new RedstartAuthProvider(manager, {
+    signIn: async () => {
+      // Sign-in happens in the panel; the Accounts menu just opens it there.
+      if (manager?.state.status === 'disconnected' || manager?.state.status === 'error') await manager.connect()
+      await chatView?.reveal()
+    },
+    signOut: () => signOutCommand(),
   })
 
   // The ws_* tools. Built at activation so a missing ripgrep is a known,
@@ -126,34 +154,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // here — the tab strip is the source of truth for which conversations exist.
 
   chatView = new ChatViewProvider(context.extensionUri, {
-    onSend: (text) => {
-      let id = activeConversationId
-      // If there is no open tab, create one so the prompt has somewhere to go.
-      if (!id) {
-        const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
-        id = conv.id
-        activeConversationId = id
-        pushConversations()
-        pushActiveConversation()
-      }
-      const conv = conversations.get(id)
-      const finished = getSession(id).send(text)
-      pushSession()
-      // Auto-title a still-untitled conversation from its first prompt, then
-      // keep the tab strip in sync. Title only reads the transcript once the
-      // turn (or its queue) is underway.
-      void finished?.then(() => {
-        if (conv && conv.title === 'New chat') {
-          const firstUser = getSession(id).transcript.find((m) => m.role === 'user')
-          if (firstUser) {
-            conv.title = titleFor(firstUser.content)
-            conversations.save(conv)
-            pushConversations()
-          }
-        }
-        pushSession()
-      })
-    },
+    onSend: (text) => sendToActive(text),
     onAbort: () => {
       if (activeConversationId) getSession(activeConversationId).abort()
       pushSession()
@@ -188,7 +189,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // Send the empty transcript so the webview clears the old conversation
       // from the screen. Without this, the previous tab's text lingers until
       // the user switches away and back.
-      chatView?.post({ type: 'conversation', conversationId: conv.id, messages: [] })
+      postConversation(conv.id)
       pushSession()
     },
     onDeleteConversation: (id) => {
@@ -202,7 +203,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // not keep showing the conversation that was just closed.
         if (activeConversationId) {
           const session = getSession(activeConversationId)
-          chatView?.post({ type: 'conversation', conversationId: activeConversationId, messages: session.snapshot() })
+          postConversation(activeConversationId)
         }
         pushActiveConversation()
         pushSession()
@@ -247,14 +248,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const session = getSession(activeConversationId)
         // If the active conversation has a saved transcript and nothing is
         // streaming, seed the session so the panel opens on the right chat.
-        if (conv && !session.busy) session.load(conv.messages)
-        chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId)
+        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null)
+        chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId, session.state())
       } else {
-        chatView?.sendInit(snapshot(null), [], null)
+        chatView?.sendInit(snapshot(null), [], null, EMPTY_CONVERSATION_STATE)
       }
     },
     onOpenHistory: () => {
       pushHistoryPanel()
+    },
+    onOpenPage: (page) => {
+      if (page === 'projects') void pushProjects()
+      else void pushWorkflows()
+    },
+    onLinkProject: (id) => {
+      void linkProject(id)
+    },
+    onCreateProject: (name) => {
+      void createProjectFromPanel(name)
+    },
+    onRunWorkflow: (name, args) => {
+      void runWorkflow(name, args)
+    },
+    onAnswer: (id, answer) => {
+      if (activeConversationId) getSession(activeConversationId).answer(id, answer)
+    },
+    onClearPlan: () => {
+      if (activeConversationId) getSession(activeConversationId).clearPlan()
+    },
+    onContinueAtLimit: (go) => {
+      if (activeConversationId) getSession(activeConversationId).continueAtLimit(go)
     },
     onSearchHistory: (query) => {
       if (!currentAccountId) {
@@ -275,7 +298,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         activeConversationId = remaining[0]?.id ?? null
         if (activeConversationId) {
           const session = getSession(activeConversationId)
-          chatView?.post({ type: 'conversation', conversationId: activeConversationId, messages: session.snapshot() })
+          postConversation(activeConversationId)
         }
         pushActiveConversation()
         pushSession()
@@ -289,10 +312,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       conversations.unarchive(id)
       activeConversationId = id
       const session = getSession(id)
-      session.load(conv.messages)
+      session.load(conv.messages, conv.plan ?? null)
       pushConversations()
       pushActiveConversation()
-      chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
+      postConversation(id)
       pushSession()
       pushHistoryPanel()
       chatView?.reveal()
@@ -303,6 +326,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     statusBar,
     manager.onDidChangeState(onStateChanged),
+    // The Redstart account in VS Code's Accounts menu.
+    authProvider,
+    vscode.authentication.registerAuthenticationProvider(AUTH_PROVIDER_ID, 'Redstart', authProvider, {
+      supportsMultipleAccounts: false,
+    }),
+    // The same chat as an editor tab, restored after a window reload.
+    vscode.window.registerWebviewPanelSerializer(ChatViewProvider.panelType, chatView),
+    vscode.commands.registerCommand('redstartYellowscript.openInEditor', () => chatView?.openInEditor()),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatView, {
       // Keep the transcript alive when the panel is hidden. Without this the
       // webview is torn down and the user loses their place in the conversation
@@ -317,6 +348,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.newChat', newChatCommand),
     vscode.commands.registerCommand('redstartYellowscript.openSettings', openSettingsCommand),
     vscode.commands.registerCommand('redstartYellowscript.openHistory', openHistoryCommand),
+    vscode.commands.registerCommand('redstartYellowscript.chooseProject', () => showPage('projects')),
+    vscode.commands.registerCommand('redstartYellowscript.runWorkflow', () => showPage('workflows')),
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
   )
@@ -466,6 +499,7 @@ function getSession(id: string): ChatSession {
       },
       approveCommand: (pending) => makeCommandGate()(pending),
       conversationId: id,
+      projectId: () => linkedProject()?.id ?? null,
       onPersist: () => persistConversation(id),
       emit: (message) => {
         chatView?.post(message)
@@ -481,11 +515,47 @@ function getSession(id: string): ChatSession {
     // when clicked. The host already seeded the active tab on init; this covers
     // every other tab the user opens later.
     const conv = conversations.get(id)
-    if (conv && conv.messages.length > 0) {
-      session.load(conv.messages)
+    if (conv && (conv.messages.length > 0 || conv.plan)) {
+      session.load(conv.messages, conv.plan ?? null)
     }
   }
   return session
+}
+
+/**
+ * Send to the active conversation (creating one if no tab is open), and title
+ * a new chat from its first prompt, or from the workflow it ran.
+ */
+function sendToActive(text: string, workflow?: { name: string; title: string }): void {
+  let id = activeConversationId
+  if (!id) {
+    const created = conversations.create('New chat', [], currentAccountId ?? undefined)
+    id = created.id
+    activeConversationId = id
+    pushConversations()
+    pushActiveConversation()
+  }
+  const conversationId = id
+  const conv = conversations.get(conversationId)
+  if (conv && conv.title === 'New chat' && workflow) {
+    conv.title = titleFor(workflow.title)
+    conversations.save(conv)
+    pushConversations()
+  }
+  const finished = getSession(conversationId).send(text, workflow)
+  pushSession()
+  // Title a still-untitled chat once its turn (or its queue) is underway.
+  void finished.then(() => {
+    if (conv && conv.title === 'New chat') {
+      const firstUser = getSession(conversationId).transcript.find((m) => m.role === 'user')
+      if (firstUser) {
+        conv.title = titleFor(firstUser.content)
+        conversations.save(conv)
+        pushConversations()
+      }
+    }
+    pushSession()
+  })
 }
 
 /** Persist a conversation's transcript from its session to the store. */
@@ -494,7 +564,16 @@ function persistConversation(id: string): void {
   const conv = conversations.get(id)
   if (!session || !conv) return
   conv.messages = session.snapshot()
+  const plan = session.planSnapshot()
+  if (plan) conv.plan = plan
+  else delete conv.plan
   conversations.save(conv)
+}
+
+/** Paint a conversation: its transcript and what sits around it. */
+function postConversation(id: string): void {
+  const session = getSession(id)
+  chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot(), state: session.state() })
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +600,138 @@ function snapshot(id: string | null): SessionSnapshot {
   if ('url' in state && state.url) base.serverUrl = state.url
   const model = session?.currentModel
   if (model) base.model = model
+  const project = connected ? linkedProject() : null
+  if (project) base.project = { id: project.id, name: project.name }
   return base
+}
+
+// ---------------------------------------------------------------------------
+// Projects — this workspace's link to a Nest project
+// ---------------------------------------------------------------------------
+// Conversations stay in the workspace; the PROJECT is what is shared with the
+// other Redstart apps: its instructions and memories reach the model because
+// every request names it (`redstart_project`), and Nest checks the caller may
+// read it. The link is kept per workspace and is only valid for the server and
+// account it was made with: another Nest, or another account, starts unlinked.
+
+const PROJECT_LINK_KEY = 'redstartYellowscript.projectLink'
+
+interface ProjectLink {
+  server: string
+  account: string
+  id: string
+  name: string
+}
+
+function linkScope(): { server: string; account: string } | null {
+  const state = manager?.state
+  if (!state || state.status !== 'connected' || !('url' in state) || !state.url) return null
+  return { server: state.url, account: currentAccountId ?? '' }
+}
+
+function linkedProject(): ProjectLink | null {
+  const scope = linkScope()
+  const link = workspaceMemento?.get<ProjectLink>(PROJECT_LINK_KEY)
+  if (!scope || !link) return null
+  return link.server === scope.server && link.account === scope.account ? link : null
+}
+
+async function pushProjects(): Promise<void> {
+  const client = manager?.activeClient
+  const linkedId = linkedProject()?.id ?? null
+  chatView?.post({ type: 'projects', projects: null, linkedId })
+  if (!client) {
+    chatView?.post({ type: 'projects', projects: [], linkedId, error: 'Not connected to a Nest.' })
+    return
+  }
+  try {
+    const { projects } = await client.listProjects()
+    // A linked project that is gone (deleted in the chat app) is unlinked
+    // here, so the panel does not claim a project the requests no longer get.
+    if (linkedId && !projects.some((p) => p.id === linkedId)) {
+      await workspaceMemento?.update(PROJECT_LINK_KEY, undefined)
+      pushSession()
+    }
+    chatView?.post({
+      type: 'projects',
+      projects: projects.map(toProjectView),
+      linkedId: linkedProject()?.id ?? null,
+    })
+  } catch (err) {
+    chatView?.post({ type: 'projects', projects: [], linkedId, error: describeError(err, 'Could not load projects') })
+  }
+}
+
+function toProjectView(p: NestProject): ProjectView {
+  const view: ProjectView = { id: p.id, name: p.name }
+  const instructions = p.instructions?.trim()
+  if (instructions) view.instructions = instructions.length > 160 ? `${instructions.slice(0, 159)}…` : instructions
+  if (p.folder) view.folder = p.folder
+  return view
+}
+
+async function linkProject(id: string | null): Promise<void> {
+  const scope = linkScope()
+  if (!scope) return
+  if (id === null) {
+    await workspaceMemento?.update(PROJECT_LINK_KEY, undefined)
+  } else {
+    const client = manager?.activeClient
+    const project = client ? (await client.listProjects().catch(() => ({ projects: [] as NestProject[] }))).projects.find((p) => p.id === id) : undefined
+    if (!project) {
+      chatView?.post({ type: 'notice', level: 'error', message: 'That project is no longer on the Nest.' })
+      return
+    }
+    const link: ProjectLink = { ...scope, id: project.id, name: project.name }
+    await workspaceMemento?.update(PROJECT_LINK_KEY, link)
+  }
+  pushSession()
+  await pushProjects()
+}
+
+async function createProjectFromPanel(name: string): Promise<void> {
+  const client = manager?.activeClient
+  if (!client) return
+  try {
+    const project = await client.createProject(name)
+    await linkProject(project.id)
+  } catch (err) {
+    chatView?.post({ type: 'notice', level: 'error', message: describeError(err, 'Could not create the project') })
+    await pushProjects()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workflows — the account's saved instructions, run from `/` or the page
+// ---------------------------------------------------------------------------
+
+async function pushWorkflows(): Promise<void> {
+  if (!mcpHost) {
+    chatView?.post({ type: 'workflows', workflows: [], error: 'Workflows need the Nest connection. Try reconnecting.' })
+    return
+  }
+  try {
+    workflowCache = (await mcpHost.listPrompts()).map((p) => ({ ...p, arguments: p.arguments.map((a) => ({ ...a })) }))
+    chatView?.post({ type: 'workflows', workflows: workflowCache })
+  } catch (err) {
+    chatView?.post({ type: 'workflows', workflows: [], error: describeError(err, 'Could not load workflows') })
+  }
+}
+
+async function runWorkflow(name: string, args: Record<string, string>): Promise<void> {
+  if (!mcpHost) return
+  try {
+    // Nest composes the text from its own copy of the workflow.
+    const text = await mcpHost.getPrompt(name, args)
+    const title = workflowCache.find((w) => w.name === name)?.title ?? name
+    sendToActive(text, { name, title })
+  } catch (err) {
+    chatView?.post({ type: 'notice', level: 'error', message: describeError(err, `Could not run the workflow "${name}"`) })
+  }
+}
+
+function describeError(err: unknown, lead: string): string {
+  return `${lead}: ${err instanceof Error ? err.message : String(err)}`
 }
 
 function pushSession(): void {
@@ -555,7 +765,7 @@ function switchConversation(id: string): void {
   // is updated before the conversation message arrives. Otherwise the
   // conversation message is dropped (conversationId !== activeConversationId).
   pushActiveConversation()
-  chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot() })
+  postConversation(id)
   pushSession()
 }
 
@@ -611,6 +821,15 @@ async function newChatCommand(): Promise<void> {
 
 async function openSettingsCommand(): Promise<void> {
   await vscode.commands.executeCommand('workbench.action.openSettings', 'redstartYellowscript')
+}
+
+/** Reveal the panel on a page, and load its data. */
+function showPage(page: PageName): void {
+  void chatView?.reveal().then(() => {
+    chatView?.post({ type: 'showPage', page })
+    if (page === 'projects') void pushProjects()
+    else void pushWorkflows()
+  })
 }
 
 function openHistoryCommand(): void {
@@ -679,20 +898,14 @@ async function signInCommand(): Promise<void> {
 
   const method = await vscode.window.showQuickPick(
     [
-      { label: '$(account) Username and password', detail: 'Sign in with a Redstart account', id: 'password' },
+      { label: '$(account) Username and password', detail: 'Used once: Yellowscript keeps a key for this app instead', id: 'password' },
       { label: '$(key) API key', detail: 'Paste an rst_… key', id: 'apiKey' },
-      { label: '$(plug) Yellowscript connector key', detail: 'Issue a key bound to this client (shows the Yellowscript identity)', id: 'clientKey' },
     ],
     { title: 'Sign in to Redstart Nest', placeHolder: 'How do you want to authenticate?' },
   )
   if (!method) return
 
-  const result =
-    method.id === 'password'
-      ? await passwordFlow()
-      : method.id === 'apiKey'
-        ? await apiKeyFlow()
-        : await clientKeyFlow()
+  const result = method.id === 'password' ? await passwordFlow() : await apiKeyFlow()
   if (!result) return
 
   if (result.status === 'connected') {
@@ -745,51 +958,6 @@ async function apiKeyFlow(): Promise<ConnectionState | undefined> {
   )
 }
 
-/**
- * Issue a connector key bound to the `yellowscript` surface.
- *
- * The point of this path is the surface: a key issued here carries `surface:
- * "yellowscript"`, which the Nest gateway reads from the credential (never a
- * header) and uses to inject the Yellowscript identity block into the system
- * context. It requires an already-authenticated account — the key is minted
- * against whoever is signed in — so this is only offered from the sign-in
- * picker, and only meaningful once a session or apiKey credential exists.
- */
-async function clientKeyFlow(): Promise<ConnectionState | undefined> {
-  const state = manager?.state
-  if (
-    state?.status !== 'connected' &&
-    state?.status !== 'unauthenticated' &&
-    state?.status !== 'connecting' &&
-    state?.status !== 'error'
-  ) {
-    vscode.window.showWarningMessage('Connect and sign in to a Redstart Nest first.')
-    return undefined
-  }
-
-  const url = manager?.urlForSignIn?.()
-  if (!url) return undefined
-
-  const client = new NestClient(url)
-  // Reuse the existing session/apiKey so the request to issue a key is itself
-  // authenticated; signInWithClient re-points the live client at the new key.
-  const existing = manager?.activeClient?.getCredential()
-  if (existing) client.setCredential(existing)
-
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Window, title: 'Issuing Yellowscript connector key…' },
-    () => manager!.signInWithClient(client, 'yellowscript', 'Yellowscript VS Code extension'),
-  )
-
-  if (result.status === 'connected') {
-    vscode.window.showInformationMessage('Yellowscript connector key issued — the Nest now knows this is Yellowscript.')
-  } else if (result.status === 'error') {
-    vscode.window.showErrorMessage(result.message)
-  } else if (result.status === 'unauthenticated' && result.reason === 'rejected') {
-    vscode.window.showErrorMessage('Could not issue a connector key. Sign in with a username/password or API key first.')
-  }
-  return result
-}
 
 async function signOutCommand(): Promise<void> {
   const state = await manager?.signOut()
@@ -1029,6 +1197,9 @@ function connectMcpHost(): void {
   mergedTools = null
   let currentDisabled = new Set<string>()
   pushTools()
+  // Approvals for Nest's own tools: per connection, because the grant cache
+  // belongs to the account this client is signed in as.
+  const approvals = makeNestApprovalDeps(client, (m) => output?.warn(m))
   const host = new McpHost(
     {
       baseUrl: client.baseUrl,
@@ -1046,7 +1217,13 @@ function connectMcpHost(): void {
               name: t.name,
               description: t.description,
               inputSchema: t.inputSchema,
-              execute: (args: unknown) => host.callTool(t.name, args),
+              execute: async (args: unknown) =>
+                (
+                  await callWithApproval(t.name, args, approvalInfo(t.meta), {
+                    ...approvals,
+                    call: (meta) => host.callToolResult(t.name, args, meta),
+                  })
+                ).text,
             }
             if (t.meta) ref.meta = t.meta
             return ref

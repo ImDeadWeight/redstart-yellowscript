@@ -32,6 +32,13 @@
 import type { McpServersResponse, Credential } from '../nest/types.ts'
 import { credentialValue } from '../nest/types.ts'
 import { truncateForModel, MAX_RESULT_CHARS } from '../tools/types.ts'
+import { approvalRequired, type NestCallResult } from './approval.ts'
+
+/** The MCP experimental capability a client declares to be offered the
+ *  host-resolved tools (Nest interaction-tools.mjs HOST_TOOLS_CAPABILITY). */
+export const HOST_TOOLS_CAPABILITY = 'redstart/hostTools'
+/** The host-resolved tools Yellowscript answers. */
+export const HOST_RESOLVED_TOOLS = ['ask_user', 'update_plan'] as const
 
 /** A single JSON-RPC 2.0 request or response on the MCP wire. */
 export interface McpMessage {
@@ -58,6 +65,14 @@ export interface McpTool {
   }
   /** Server-supplied provenance. Source of truth for capability/class. */
   meta?: Record<string, unknown>
+}
+
+/** A Nest workflow, as an MCP prompt. */
+export interface McpPrompt {
+  name: string
+  title: string
+  description?: string
+  arguments: Array<{ name: string; description?: string; required: boolean }>
 }
 
 /** The resolved built-in server the host is connected to. */
@@ -216,7 +231,17 @@ export class McpHost {
 
     const initRes = await this.postJsonRpc('initialize', {
       protocolVersion: '2024-11-05',
-      capabilities: { tools: {}, sampling: {}, prompts: {}, completion: {} },
+      capabilities: {
+        tools: {},
+        sampling: {},
+        prompts: {},
+        completion: {},
+        // The tools Nest defines but only the client's own loop can answer
+        // (Nest daemon/interaction-tools.mjs). Nest offers them only to a
+        // client that declares them here, and Yellowscript's loop (agent-core,
+        // with ChatSession's ask and plan ports) answers both.
+        experimental: { [HOST_TOOLS_CAPABILITY]: { names: [...HOST_RESOLVED_TOOLS] } },
+      },
       clientInfo: { name: 'yellowscript', version: '0.0.1' },
     })
 
@@ -320,19 +345,82 @@ export class McpHost {
    * The caller is responsible for origin-tagging so the model knows it ran on the
    * Nest, not locally (HANDOFF 4.3).
    */
-   async callTool(name: string, args: unknown): Promise<string> {
-    const res = await this.postJsonRpc('tools/call', { name, arguments: args })
-    if (res.error) return `[Tool ${name} failed: ${res.error.message}]`
+  async callTool(name: string, args: unknown): Promise<string> {
+    return (await this.callToolResult(name, args)).text
+  }
+
+  /**
+   * One tools/call, with what the approval exchange needs: `meta` is sent as
+   * `params._meta` (the approval id on a repeated call), and a pending approval
+   * in the result's `_meta` is handed back rather than flattened into text.
+   */
+  async callToolResult(name: string, args: unknown, meta?: Record<string, unknown>): Promise<NestCallResult> {
+    const params: Record<string, unknown> = { name, arguments: args }
+    if (meta && Object.keys(meta).length > 0) params._meta = meta
+    const res = await this.postJsonRpc('tools/call', params)
+    if (res.error) return { text: `[Tool ${name} failed: ${res.error.message}]`, isError: true, approval: null }
     const result = res.result as Record<string, unknown> | undefined
+    const approval = approvalRequired(result)
+    if (approval) return { text: this.extractText(result), isError: true, approval }
     // MCP tools/call returns isError + content. A server-side policy denial
     // (write/destructive policy, banned tool) arrives as isError=true with a
     // human-readable reason in the content — render it distinctly so the model
     // knows this was refused by the server, not a local failure. (HANDOFF 4.4)
     if (result && result.isError === true) {
       const reason = this.extractText(result)
-      return `[Server denial for "${name}": ${reason || 'policy refusal, tool not available'}]`
+      return {
+        text: `[Server denial for "${name}": ${reason || 'policy refusal, tool not available'}]`,
+        isError: true,
+        approval: null,
+      }
     }
-    return this.extractText(res.result)
+    return { text: this.extractText(res.result), isError: false, approval: null }
+  }
+
+  /**
+   * The account's workflows, as MCP prompts (Nest workflows-storage.mjs):
+   * personal ones, then the organization's (named `org-…`).
+   */
+  async listPrompts(): Promise<McpPrompt[]> {
+    const res = await this.postJsonRpc('prompts/list')
+    if (res.error) throw new Error(res.error.message)
+    const prompts = (res.result as { prompts?: unknown[] } | undefined)?.prompts ?? []
+    return prompts.flatMap((raw) => {
+      const p = raw as Record<string, unknown>
+      if (typeof p.name !== 'string' || !p.name) return []
+      const args = Array.isArray(p.arguments) ? p.arguments : []
+      return [{
+        name: p.name,
+        title: typeof p.title === 'string' && p.title ? p.title : p.name,
+        ...(typeof p.description === 'string' && p.description ? { description: p.description } : {}),
+        arguments: args.flatMap((a) => {
+          const r = a as Record<string, unknown>
+          if (typeof r.name !== 'string') return []
+          return [{
+            name: r.name,
+            required: r.required === true,
+            ...(typeof r.description === 'string' && r.description ? { description: r.description } : {}),
+          }]
+        }),
+      }]
+    })
+  }
+
+  /**
+   * Compose a workflow. Nest builds the text from its own copy of the
+   * workflow: a client can only name one and supply argument values, never
+   * inject the instructions themselves.
+   */
+  async getPrompt(name: string, args: Record<string, string>): Promise<string> {
+    const res = await this.postJsonRpc('prompts/get', { name, arguments: args })
+    if (res.error) throw new Error(res.error.message)
+    const messages = (res.result as { messages?: Array<{ content?: { type?: string; text?: string } }> } | undefined)?.messages ?? []
+    const text = messages
+      .map((m) => (m.content?.type === 'text' && typeof m.content.text === 'string' ? m.content.text : ''))
+      .filter(Boolean)
+      .join('\n\n')
+    if (!text) throw new Error(`Workflow "${name}" came back empty`)
+    return text
   }
 
   // --- private plumbing -------------------------------------------------------
@@ -392,6 +480,9 @@ function normalizeTool(raw: Partial<McpTool>): McpTool {
     inputSchema: raw.inputSchema ?? { type: 'object', properties: {} },
   }
   if (raw.annotations) tool.annotations = raw.annotations
-  if (raw.meta) tool.meta = raw.meta
+  // MCP puts provenance in `_meta` (Nest stamps capability, class and the
+  // approval rule there). `meta` is accepted too, for older fixtures.
+  const meta = (raw as { _meta?: Record<string, unknown> })._meta ?? raw.meta
+  if (meta) tool.meta = meta
   return tool
 }

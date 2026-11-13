@@ -5,11 +5,10 @@ the private, on-premises AI server — instead of a cloud API. Zero-config
 network discovery, Redstart account authentication, streaming chat in the
 sidebar, and workspace-aware tools the model can drive.
 
-> **Status: Phase 4.3 shipped.** Connect, sign in, streaming conversation,
-> six read-only tools, write tools with shadow-git checkpointing, command
-> execution, Nest MCP tool discovery, server-side tool banning, and a settings
-> menu. **[docs/HANDOFF.md](docs/HANDOFF.md) is the single planning document**
-> — state, roadmap, ground rules, and the Nest wire reference.
+> **Status:** connect and sign in (password swapped for an app key, or an API
+> key), streaming chat in the sidebar or an editor tab, workspace tools with
+> diff review and checkpoints, Nest's tools with their approvals, the shared
+> agent-core loop with questions and plans, and Nest projects and workflows.
 
 ## Why not just point a generic client at the Nest?
 
@@ -50,7 +49,10 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: New Chat` | Create a new conversation tab and focus the panel |
 | `Yellowscript: Connect to Nest` | Discover (or use the configured URL) and connect |
 | `Yellowscript: Disconnect` | Drop the connection and stop auto-reconnecting |
-| `Yellowscript: Sign In to Nest` | Username/password, paste an `rst_` API key, or issue a connector key |
+| `Yellowscript: Open in Editor Tab` | Open the chat as an editor tab (also the bird button in the editor title bar) |
+| `Yellowscript: Choose Project` | Link this workspace to a Nest project |
+| `Yellowscript: Run Workflow` | Pick one of your Nest workflows |
+| `Yellowscript: Sign In to Nest` | Username and password (swapped at once for a key Nest issues to this app), or paste an `rst_` API key |
 | `Yellowscript: Sign Out` | Forget the stored credential, keep the server connection |
 | `Yellowscript: Show Connection Status` | Details view plus the next useful action |
 | `Yellowscript: Inspect Workspace Tools` | Run all `ws_*` tools with probe args and dump results to the output channel |
@@ -68,7 +70,14 @@ to open settings directly.
 | `redstartYellowscript.discovery.enabled` | `true` | Scan the LAN on connect. |
 | `redstartYellowscript.discovery.timeoutMs` | `400` | Per-host beacon timeout (50–5000 ms). Raise on a slow network. |
 | `redstartYellowscript.autoConnect` | `true` | Reconnect to the last-used Nest when a window opens. |
+| `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ws_write_file`, `ws_edit_file`). |
+
+A password is used once: Yellowscript signs in, has Nest issue a key for this
+app (surface `yellowscript`, labelled with this machine's name), ends the
+session, and keeps only the key. The key survives a Nest restart, which a
+session did not, and you can revoke it in the chat app. The signed-in account
+also shows in VS Code's **Accounts** menu, with Sign Out there.
 
 Credentials are **never** settings. They live in VSCode's `SecretStorage`,
 keyed per server, and never enter a log line or the model's context.
@@ -100,6 +109,40 @@ pure view change — streaming continues in background tabs.
   sequentially.
 - **Auto-titled** from the first user prompt (truncated to 40 characters).
 - Transcripts are saved on every message, turn end, and conversation switch.
+- **Tool cards** show each call on its turn: status, arguments, the one-line
+  result, a **Nest** tag for tools that ran on the server, and **recovered**
+  when the model wrote the call as text. A finished turn with four or more
+  calls folds them into one "Used N tools" row.
+
+### Projects and workflows
+
+- **Project.** Link the workspace to one of your Nest projects with the chip
+  under the message box (or **Yellowscript: Choose Project**). Every request
+  then names it, and Nest adds the project's instructions and memories. Chats
+  stay in the workspace; the project is what Yellowscript shares with the chat
+  app, Twig and Greenhouse. The link is per workspace, and only counts for the
+  Nest and account it was made with.
+- **Workflows.** Type `/` in the message box, or use the bolt icon (or
+  **Yellowscript: Run Workflow**). These are the saved instructions from the
+  chat app's Workflows page, personal and organization. Nest composes the text
+  from its own copy; a workflow with inputs asks for them first.
+
+### Questions, plans and the turn limit
+
+Yellowscript declares to Nest that it can answer `ask_user` and `update_plan`,
+so the model is offered both (agent-core runs them; see below).
+
+- **Questions** appear above the composer: options to pick, a text field, Send
+  and Skip. Typing in the composer while a question is open answers it.
+- **The plan** is a checklist above the composer, open while steps are open.
+  It is saved with the conversation and sent with each request while steps are
+  open; the × clears it, so a plan you have moved on from stops steering.
+- **The turn limit** (10 model turns per request) asks before going on,
+  instead of stopping silently.
+
+The webview is Svelte 5 (`src/webview/components/`). Its state is a plain
+reducer, `src/webview/view-model.ts`, tested under `node --test`; the
+components only read it and post what you did.
 
 ## Workspace tools (`ws_*`)
 
@@ -153,6 +196,19 @@ client-side.
 Nest tools are merged with the local `ws_*` set (disjointness asserted) and
 tagged `(ran on Nest)` in summaries.
 
+### Approvals for Nest's tools
+
+Each Nest tool carries an approval rule in its `_meta`: reads run, writes ask
+unless you have chosen **Always allow**, and destructive tools ask on every
+call. Yellowscript asks in a modal before the call reaches Nest.
+
+Nest itself refuses an unapproved destructive call, from any client. When it
+does, Yellowscript posts the decision you just made to `/approvals/:id` and
+repeats the call with the approval's id. It never answers that exchange for a
+call you did not approve in the prompt for that call. **Always allow** is kept
+on Nest for your account, so it applies in the chat app and Twig too, and you
+revoke it from the chat app's settings. The logic is in `src/nest/approval.ts`.
+
 ## Development
 
 ```bash
@@ -164,6 +220,23 @@ npm run build      # esbuild production bundle
 npm run smoke      # live Nest smoke test
 npm run package    # check + build + vsce package
 ```
+
+### The agent loop is agent-core
+
+The loop (turns, the per-reply call limit, recovering calls a model wrote as
+text, `ask_user`, `update_plan` and its completion check) is the same code
+chat-ui, the agent bench and Nest's task runner run: redstart-project's
+`shared/agent-core/`. It is copied into `src/vendor/agent-core/`, pinned to a
+commit recorded in `VENDORED.json`, and never edited here. `src/agent/loop.ts`
+supplies its ports, and `src/agent/agent-core.ts` gives it TypeScript types.
+
+```bash
+npm run sync:agent-core -- ../redstart-project origin/feat/agent-core   # re-sync at a ref
+node scripts/sync-agent-core.mjs --check    # part of npm run check: fails on a local edit
+```
+
+A behaviour change to the loop goes to redstart-project first, then comes back
+with a sync.
 
 ### Two TypeScript projects
 

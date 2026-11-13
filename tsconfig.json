@@ -13,6 +13,11 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
+    // The vendored agent-core is plain ESM. allowJs lets it be imported;
+    // checkJs stays off (it is checked upstream), and src/agent/agent-core.ts
+    // gives it types.
+    "allowJs": true,
+    "checkJs": false,
 
     "strict": true,
     "noUncheckedIndexedAccess": true,

@@ -17,8 +17,18 @@
 import { NestHttpError } from '../nest/types.ts'
 import { tokensPerSecond, type StreamTimings } from '../nest/streaming.ts'
 import type { ChatCompletionRequest, NestClient } from '../nest/client.ts'
-import type { ChatMessageView, HostMessage, TurnStats } from './protocol.ts'
+import type {
+  AnswerView,
+  ChatMessageView,
+  ConversationState,
+  HostMessage,
+  PlanStepView,
+  QuestionView,
+  ToolCardView,
+  TurnStats,
+} from './protocol.ts'
 import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
+import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext } from '../tools/types.ts'
 
@@ -63,6 +73,9 @@ export interface SessionDeps {
   /** Phase 4.1: gate for a command tool's planned command. When set, a tool
    *  result carrying a `pendingCommand` is routed through it (always-ask). */
   approveCommand?: CommandApprovalGate
+  /** The Nest project the workspace is linked to, sent with every request so
+   *  Nest adds its instructions and memories. */
+  projectId?: () => string | null
   /**
    * The conversation this session owns. Every protocol message it emits is
    * tagged with this id so the webview can route a delta to the right tab even
@@ -84,7 +97,14 @@ export class ChatSession {
   private model: string | null = null
   /** Prompts waiting behind a turn that is still streaming. Drained in order
    *  when the turn finishes, so a user can line up several asks per tab. */
-  private pending: { id: string; prompt: string }[] = []
+  private pending: { id: string; prompt: string; workflow?: { name: string; title: string } }[] = []
+  /** The conversation's update_plan checklist. Kept by the model through the
+   *  loop's plan port; saved with the conversation; cleared by the person. */
+  private plan: PlanStepView[] | null = null
+  /** The ask_user question the running flow is waiting on. */
+  private question: { view: QuestionView; resolve: (answer: AskAnswer | null) => void } | null = null
+  /** The running flow is waiting at its turn limit for "keep going?". */
+  private limitWait: ((go: boolean) => void) | null = null
 
   constructor(deps: SessionDeps) {
     this.deps = deps
@@ -113,12 +133,62 @@ export class ChatSession {
     return this.model
   }
 
+  /** What the panel shows around the transcript: question, plan, limit wait. */
+  state(): ConversationState {
+    return {
+      question: this.question ? { ...this.question.view } : null,
+      plan: this.plan ? this.plan.map((step) => ({ ...step })) : null,
+      atTurnLimit: this.limitWait !== null,
+    }
+  }
+
+  /** The plan, for persistence. */
+  planSnapshot(): PlanStepView[] | null {
+    return this.plan ? this.plan.map((step) => ({ ...step })) : null
+  }
+
+  private emitState(): void {
+    this.emit({ type: 'conversationState', state: this.state() })
+  }
+
+  /**
+   * Answer the open question. `id` must name it: a late click on a card the
+   * panel still showed must not answer the next question. Returns false when
+   * there was nothing to answer.
+   */
+  answer(id: string, answer: AnswerView | null): boolean {
+    const open = this.question
+    if (!open || open.view.id !== id) return false
+    this.question = null
+    open.resolve(answer)
+    this.emitState()
+    return true
+  }
+
+  /** Clear the plan (the × on the checklist). Steps no longer steer the chat. */
+  clearPlan(): void {
+    if (this.plan === null) return
+    this.plan = null
+    this.emitState()
+    this.deps.onPersist?.()
+  }
+
+  /** At the turn limit: keep going (true) or stop. */
+  continueAtLimit(go: boolean): void {
+    const wait = this.limitWait
+    if (!wait) return
+    this.limitWait = null
+    wait(go)
+    this.emitState()
+  }
+
   /** Discard the conversation. Aborts a turn in flight rather than orphaning it. */
   reset(): void {
     this.abort()
     this.pending = []
     this.messages = []
-    this.emit({ type: 'conversation', messages: [] })
+    this.plan = null
+    this.emit({ type: 'conversation', messages: [], state: this.state() })
     this.deps.onPersist?.()
   }
 
@@ -129,14 +199,18 @@ export class ChatSession {
    * and must be allowed to finish. Switching tabs never calls this; it is a
    * pure view change handled by the host.
    */
-  load(messages: ChatMessageView[]): void {
+  load(messages: ChatMessageView[], plan: PlanStepView[] | null = null): void {
     this.messages = messages.map((message) => ({ ...message }))
-    this.emit({ type: 'conversation', messages: this.messages })
+    if (!this.busy) this.plan = plan ? plan.map((step) => ({ ...step })) : null
+    this.emit({ type: 'conversation', messages: this.messages, state: this.state() })
   }
 
   /** A snapshot of the transcript, safe to hand across the webview boundary. */
   snapshot(): ChatMessageView[] {
-    return this.messages.map((message) => ({ ...message }))
+    return this.messages.map((message) => ({
+      ...message,
+      ...(message.tools ? { tools: message.tools.map((card) => ({ ...card })) } : {}),
+    }))
   }
 
   /** Stop the running turn. Whatever streamed so far stays on screen — the user
@@ -144,6 +218,9 @@ export class ChatSession {
   abort(): void {
     this.controller?.abort()
     this.controller = null
+    // A flow waiting on the person ends with the abort: nobody will answer.
+    if (this.question) this.answer(this.question.view.id, null)
+    this.continueAtLimit(false)
   }
 
   /**
@@ -158,19 +235,27 @@ export class ChatSession {
    * a user can start a long ask and line up the next one in another tab or
    * below. Queued prompts drain in order as each turn finishes.
    */
-  async send(text: string): Promise<void> {
+  async send(text: string, workflow?: { name: string; title: string }): Promise<void> {
     const prompt = text.trim()
     if (!prompt) return
+    const extra = workflow ? { workflow: { ...workflow } } : {}
+
+    // A message typed while the assistant waits on a question IS the answer
+    // (agent-core's contract): it goes to the question, not into the queue.
+    if (this.question && !workflow) {
+      this.answer(this.question.view.id, { text: prompt })
+      return
+    }
 
     if (this.busy) {
       const id = this.nextId()
-      this.pending.push({ id, prompt })
-      this.emit({ type: 'message', message: { id, role: 'user', content: prompt, pending: true } })
+      this.pending.push({ id, prompt, ...extra })
+      this.emit({ type: 'message', message: { id, role: 'user', content: prompt, pending: true, ...extra } })
       this.deps.onPersist?.()
       return
     }
 
-    await this.runTurn({ id: this.nextId(), role: 'user', content: prompt })
+    await this.runTurn({ id: this.nextId(), role: 'user', content: prompt, ...extra })
 
     // Drain anything that queued up while this turn ran.
     while (this.pending.length > 0) {
@@ -178,8 +263,9 @@ export class ChatSession {
       // Flip the queued user message to active: same id, pending cleared. The
       // webview updates the existing (greyed) bubble rather than adding a new
       // one.
-      this.emit({ type: 'message', message: { id: next.id, role: 'user', content: next.prompt, pending: false } })
-      await this.runTurn({ id: next.id, role: 'user', content: next.prompt })
+      const nextExtra = next.workflow ? { workflow: next.workflow } : {}
+      this.emit({ type: 'message', message: { id: next.id, role: 'user', content: next.prompt, pending: false, ...nextExtra } })
+      await this.runTurn({ id: next.id, role: 'user', content: next.prompt, ...nextExtra })
     }
   }
 
@@ -244,9 +330,27 @@ export class ChatSession {
             signal: controller.signal,
             approveChange: this.deps.approveChange,
             approveCommand: this.deps.approveCommand,
+            ask: { user: (request, signal, call) => this.ask(request, call?.id, signal) },
+            plan: {
+              get: () => this.plan,
+              save: (steps: PlanStep[]) => {
+                this.plan = steps.map((step) => ({ ...step }))
+                this.emitState()
+                this.deps.onPersist?.()
+              },
+            },
+            askContinue: (signal) => this.waitAtLimit(signal),
             handlers: {
               ...handlers,
               onToolCall: (call, recovered) => {
+                const card: ToolCardView = {
+                  callId: call.id,
+                  name: call.function.name,
+                  arguments: call.function.arguments,
+                  recovered,
+                  status: 'running',
+                }
+                turn.tools = [...(turn.tools ?? []), card]
                 this.emit({
                   type: 'tool/call',
                   turnId: turn.id,
@@ -257,6 +361,16 @@ export class ChatSession {
                 })
               },
               onToolResult: (call, toolResult) => {
+                turn.tools = (turn.tools ?? []).map((card) =>
+                  card.callId === call.id
+                    ? {
+                        ...card,
+                        status: toolResult.isError ? 'error' : 'done',
+                        summary: toolResult.summary,
+                        truncated: toolResult.truncated,
+                      }
+                    : card,
+                )
                 this.emit({
                   type: 'tool/result',
                   turnId: turn.id,
@@ -316,6 +430,46 @@ export class ChatSession {
     }
   }
 
+  /** The loop's ask port: show the question, wait for the person. */
+  private ask(request: AskRequest, callId: string | undefined, signal?: AbortSignal): Promise<AskAnswer | null> {
+    if (signal?.aborted) return Promise.resolve(null)
+    // One question at a time: a second ask_user while one is open (a reply
+    // with two) skips the first rather than stacking cards.
+    if (this.question) this.answer(this.question.view.id, null)
+    const view: QuestionView = {
+      id: callId ?? this.nextId(),
+      question: request.question,
+      multiSelect: request.multiSelect,
+      ...(request.options && request.options.length > 0 ? { options: [...request.options] } : {}),
+    }
+    return new Promise((resolve) => {
+      const onAbort = () => this.answer(view.id, null)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.question = {
+        view,
+        resolve: (answer) => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve(answer)
+        },
+      }
+      this.emitState()
+    })
+  }
+
+  /** The loop's limit port: wait for "keep going?" at the turn limit. */
+  private waitAtLimit(signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return Promise.resolve(false)
+    return new Promise((resolve) => {
+      const onAbort = () => this.continueAtLimit(false)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.limitWait = (go) => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve(go)
+      }
+      this.emitState()
+    })
+  }
+
   /**
    * Build the request body from the transcript.
    *
@@ -349,7 +503,8 @@ export class ChatSession {
     // only claims Nest capabilities in its injected system prompt when the
     // request actually carries tools, so a toolless request correctly produces a
     // model that does not believe it can call anything.
-    return { messages }
+    const projectId = this.deps.projectId?.() ?? null
+    return projectId ? { messages, redstart_project: projectId } : { messages }
   }
 
   private nextId(): string {

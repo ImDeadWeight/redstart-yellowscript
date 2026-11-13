@@ -27,6 +27,10 @@ interface FakeSseStream extends McpSseStream {
 interface FakeControl {
   tools: McpTool[]
   swapTools: (tools: McpTool[]) => void
+  /** Answer a tools/call; the default returns a fixed text result. */
+  onCall?: (params: Record<string, unknown>) => unknown
+  /** Every tools/call `params` the host sent, in order. */
+  calls: Array<Record<string, unknown>>
 }
 
 /** A fake SSE stream that lets the test inject events on demand. */
@@ -86,6 +90,7 @@ function makeFakeClient(): { client: McpNestClient; control: FakeControl } {
       { name: 'postgres_query', description: 'Run a SQL query', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true }, meta: { 'redstart/capability': 'postgres', 'redstart/class': 'read' } },
     ],
     swapTools(newTools: McpTool[]) { control.tools = newTools },
+    calls: [],
   }
 
   const parseRequest = (body: string): McpMessage | null => {
@@ -132,6 +137,9 @@ function makeFakeClient(): { client: McpNestClient; control: FakeControl } {
       }
 
       if (method === 'tools/call') {
+        const params = (req.params ?? {}) as Record<string, unknown>
+        control.calls.push(params)
+        if (control.onCall) return Promise.resolve(echoMessage(req, control.onCall(params)))
         return Promise.resolve(echoMessage(req, { content: [{ type: 'text', text: 'query result: 42 rows' }] }))
       }
 
@@ -240,6 +248,127 @@ describe('McpHost', () => {
 
     const text = await host.callTool('postgres_query', { query: 'SELECT 1' })
     assert.equal(text, 'query result: 42 rows')
+    host.stop()
+  })
+
+  it('reads a tool\'s provenance from the wire\'s `_meta`', async () => {
+    const { client, control } = makeFakeClient()
+    control.swapTools([
+      {
+        name: 'delete_file',
+        description: 'Delete a file',
+        inputSchema: { type: 'object', properties: {} },
+        _meta: { 'redstart/class': 'destructive', 'redstart/approvalRule': 'always', 'redstart/approvalEnforced': true },
+      } as unknown as McpTool,
+    ])
+    const stream = fakeStream()
+    let listed: readonly McpTool[] = []
+    const host = new McpHost(client, {
+      openStream: () => Promise.resolve(stream),
+      onTools: (t) => { listed = t },
+      onConnection: () => {},
+      onError: (err) => { throw err },
+    })
+    await host.connect()
+    stream.emit({ type: 'endpoint', data: 'http://nest:19082/message' })
+    await new Promise((r) => setTimeout(r, 50))
+
+    assert.equal(listed[0]?.meta?.['redstart/approvalRule'], 'always')
+    host.stop()
+  })
+
+  it('callToolResult hands back a pending approval and sends `_meta` on the repeat', async () => {
+    const { client, control } = makeFakeClient()
+    control.onCall = (params) => {
+      const meta = params._meta as Record<string, unknown> | undefined
+      if (meta?.['redstart/approvalId'] === 'ap-1') return { content: [{ type: 'text', text: 'Deleted notes.md' }] }
+      return {
+        isError: true,
+        content: [{ type: 'text', text: 'Not done: needs approval' }],
+        _meta: { 'redstart/approval': { id: 'ap-1', tool: 'delete_file', summary: 'Delete notes.md', argsDigest: 'x', expiresAt: 1 } },
+      }
+    }
+    const stream = fakeStream()
+    const host = new McpHost(client, {
+      openStream: () => Promise.resolve(stream),
+      onTools: () => {},
+      onConnection: () => {},
+      onError: (err) => { throw err },
+    })
+    await host.connect()
+    stream.emit({ type: 'endpoint', data: 'http://nest:19082/message' })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const first = await host.callToolResult('delete_file', { path: 'notes.md' })
+    assert.equal(first.isError, true)
+    assert.equal(first.approval?.id, 'ap-1')
+    assert.equal(first.approval?.summary, 'Delete notes.md')
+    assert.equal(control.calls[0]?._meta, undefined, 'a first call sends no _meta')
+
+    const second = await host.callToolResult('delete_file', { path: 'notes.md' }, { 'redstart/approvalId': 'ap-1' })
+    assert.deepEqual(second, { text: 'Deleted notes.md', isError: false, approval: null })
+    assert.deepEqual(control.calls[1]?._meta, { 'redstart/approvalId': 'ap-1' })
+    host.stop()
+  })
+
+  it('declares at initialize that it answers ask_user and update_plan', async () => {
+    const { client } = makeFakeClient()
+    let initParams: Record<string, unknown> | undefined
+    const realFetch = client.fetch
+    client.fetch = (url, init) => {
+      const body = decodeURIComponent(String(init?.body ?? '')).replace(/^message=/, '')
+      try {
+        const msg = JSON.parse(body) as McpMessage
+        if (msg.method === 'initialize') initParams = msg.params as Record<string, unknown>
+      } catch { /* not JSON-RPC */ }
+      return realFetch(url, init)
+    }
+    const stream = fakeStream()
+    const host = new McpHost(client, {
+      openStream: () => Promise.resolve(stream),
+      onTools: () => {},
+      onConnection: () => {},
+      onError: (err) => { throw err },
+    })
+    await host.connect()
+    stream.emit({ type: 'endpoint', data: 'http://nest:19082/message' })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const caps = initParams?.capabilities as { experimental?: Record<string, { names?: string[] }> }
+    assert.deepEqual(caps.experimental?.['redstart/hostTools']?.names, ['ask_user', 'update_plan'])
+    host.stop()
+  })
+
+  it('lists workflows as prompts and composes one with its arguments', async () => {
+    const { client, control } = makeFakeClient()
+    const realFetch = client.fetch
+    client.fetch = (url, init) => {
+      const msg = JSON.parse(new URLSearchParams(String(init?.body ?? '')).get('message') ?? '{}') as McpMessage
+      const reply = (result: unknown) => Promise.resolve(new Response(JSON.stringify({ id: msg.id, jsonrpc: '2.0', result }), { status: 200 }))
+      if (msg.method === 'prompts/list') {
+        return reply({ prompts: [
+          { name: 'weekly', title: 'Weekly report', description: 'Notes to report', arguments: [{ name: 'notes', required: true }] },
+          { name: 'org-standup', arguments: [] },
+          { title: 'no name' },
+        ] })
+      }
+      if (msg.method === 'prompts/get') {
+        const p = msg.params as { name: string; arguments: Record<string, string> }
+        return reply({ messages: [{ role: 'user', content: { type: 'text', text: `${p.name}: ${p.arguments.notes}` } }] })
+      }
+      return realFetch(url, init)
+    }
+    void control
+    const stream = fakeStream()
+    const host = new McpHost(client, { openStream: () => Promise.resolve(stream), onTools: () => {}, onConnection: () => {}, onError: (e) => { throw e } })
+    await host.connect()
+    stream.emit({ type: 'endpoint', data: 'http://nest:19082/message' })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const prompts = await host.listPrompts()
+    assert.deepEqual(prompts.map((p) => [p.name, p.title]), [['weekly', 'Weekly report'], ['org-standup', 'org-standup']])
+    assert.deepEqual(prompts[0]?.arguments, [{ name: 'notes', required: true }])
+    assert.equal(await host.getPrompt('weekly', { notes: 'shipped it' }), 'weekly: shipped it')
     host.stop()
   })
 

@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_ITERATIONS,
   type CompletionStreamer,
 } from './loop.ts'
+import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
 import { createToolRegistry } from '../tools/registry.ts'
 import type { PendingWrite, Tool, ToolContext } from '../tools/types.ts'
 import type { EditorState } from '../tools/editor-context.ts'
@@ -466,5 +467,113 @@ describe('runAgentLoop — reporting', () => {
     // The model is told the write happened, and the plan flag is cleared.
     assert.match(result.toolRuns[0]?.result.content ?? '', /Applied/)
     assert.equal(result.toolRuns[0]?.result.pendingWrite, undefined)
+  })
+})
+
+// --- What agent-core brings ---------------------------------------------------
+// The loop is agent-core's now. These pin the behaviour Yellowscript gained by
+// hosting it, through Yellowscript's ports.
+
+describe('runAgentLoop — agent-core behaviour', () => {
+  test('routes ask_user to the host and gives the model the answer', async () => {
+    const client = scriptedStreamer([
+      streamResult({ toolCalls: [callDelta('ask_user', '{"question":"Which file?","options":["a.txt","b.txt"]}')] }),
+      streamResult({ content: 'Reading a.txt.' }),
+    ])
+    const asked: string[] = []
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools: registry(),
+      toolContext,
+      ask: {
+        user: async (request) => {
+          asked.push(request.question)
+          return { chosen: ['a.txt'] }
+        },
+      },
+    })
+
+    assert.deepEqual(asked, ['Which file?'])
+    const toolMessage = client.requests[1]?.messages.find((m) => m.role === 'tool')
+    assert.match(String(toolMessage?.content), /a\.txt/)
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('keeps a plan and gives one more turn when the answer leaves steps open', async () => {
+    const client = scriptedStreamer([
+      streamResult({
+        toolCalls: [callDelta('update_plan', '{"steps":[{"text":"Read a.txt","status":"in_progress"},{"text":"Summarise","status":"pending"}]}')],
+      }),
+      streamResult({ content: 'Here is a.txt.' }),
+      streamResult({ content: 'And the summary.' }),
+    ])
+    const store: { plan: PlanStep[] | null } = { plan: null }
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools: registry(),
+      toolContext,
+      plan: { get: () => store.plan, save: (steps) => { store.plan = steps } },
+    })
+
+    assert.equal(store.plan?.length, 2)
+    assert.equal(client.requests.length, 3, 'one extra turn for the open steps')
+    const tail = client.requests[2]?.messages.at(-1)
+    assert.match(String(tail?.content), /still open/)
+    assert.equal(result.content, 'Here is a.txt.\n\nAnd the summary.')
+  })
+
+  test('runs at most the per-reply limit of calls and answers the rest', async () => {
+    const many = Array.from({ length: MAX_TOOL_CALLS_PER_REPLY + 3 }, (_, i) =>
+      callDelta('ws_read_file', '{"path":"a.txt"}', i),
+    )
+    const client = scriptedStreamer([streamResult({ toolCalls: many }), streamResult({ content: 'ok' })])
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
+
+    assert.equal(result.toolRuns.length, MAX_TOOL_CALLS_PER_REPLY)
+    const results = client.requests[1]?.messages.filter((m) => m.role === 'tool') ?? []
+    assert.equal(results.length, many.length, 'every call has a result, run or not')
+  })
+
+  test('sends an earlier call with malformed arguments back as "{}"', async () => {
+    // llama-server fails the whole request when one call's arguments in the
+    // history do not parse.
+    const client = scriptedStreamer([
+      streamResult({ toolCalls: [callDelta('ws_read_file', '<parameter=path>a.txt')] }),
+      streamResult({ content: 'sorry' }),
+    ])
+    await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
+    const assistant = client.requests[1]?.messages.find((m) => m.role === 'assistant') as
+      | { tool_calls?: Array<{ function: { arguments: string } }> }
+      | undefined
+    assert.equal(assistant?.tool_calls?.[0]?.function.arguments, '{}')
+  })
+
+  test('goes on past the turn limit when the host says so', async () => {
+    let n = 0
+    const client: CompletionStreamer = {
+      async streamChatCompletion() {
+        n++
+        return n <= 3
+          ? streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] })
+          : streamResult({ content: 'done' })
+      },
+    }
+    let asked = 0
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools: registry(),
+      toolContext,
+      maxIterations: 2,
+      askContinue: async () => {
+        asked++
+        return true
+      },
+    })
+    assert.equal(asked, 1)
+    assert.equal(result.stopReason, 'complete')
+    assert.equal(result.content, 'done')
   })
 })

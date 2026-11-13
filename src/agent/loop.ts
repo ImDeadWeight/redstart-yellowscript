@@ -1,33 +1,33 @@
 // =============================================================================
-// The agent loop — stream, execute tools, feed results back, repeat.
+// The agent loop — Yellowscript's host for the shared agent-core loop.
 // =============================================================================
-// Replaces the single `streamChatCompletion` call in `ChatSession.send`. The
-// seam was left there deliberately in Phase 1, so transcript handling, abort
-// and error reporting stay exactly where they are: this module owns the
-// round-trip cycle and nothing else.
+// The loop itself (turns, the tool-call budget, recovering calls a model wrote
+// as text, steering, ask_user, update_plan and its completion check, the turn
+// limit) is agent-core's runAgentLoop: the same code chat-ui, the agent bench
+// and Nest's task runner run (redstart-project shared/agent-core, vendored
+// under src/vendor/agent-core). A fix to how the loop behaves goes there.
 //
-// FOUR THINGS THIS HAS TO GET RIGHT:
+// This file supplies agent-core's ports from Yellowscript's parts, and keeps
+// the result shape ChatSession already renders:
 //
-// 1. TOOL CALLS ARRIVE IN FRAGMENTS. `delta.tool_calls` streams a name a few
-//    characters at a time and arguments across many chunks, keyed by `index`.
-//    They must be reassembled before anything can be executed — see
-//    `assembleToolCalls`, which is where the off-by-one lives if it lives
-//    anywhere.
-//
-// 2. A TURN WITH NO STRUCTURED CALLS IS NOT NECESSARILY A TURN WITH NO CALLS.
-//    Local models emit them as plain text in half a dozen malformed shapes, and
-//    a client that only reads `tool_calls` drops them — the model then narrates
-//    work it never did. The vendored recovery parser is the fallback, and it
-//    reads the reasoning stream too, because that is where the call often is.
-//
-// 3. EVERY TOOL RESULT MUST CARRY ITS `tool_call_id`. The model matches results
-//    to calls by that id; without it a multi-call turn silently misattributes
-//    which answer belongs to which question.
-//
-// 4. THE LOOP MUST TERMINATE. A model that keeps calling the same tool, or
-//    responds to every result with another call, would otherwise run forever.
-//    The cap is a hard stop and is reported rather than hidden — a turn that
-//    ended because it ran out of iterations is not a turn that finished.
+//   model.streamTurn   NestClient.streamChatCompletion, with the tool payload
+//                      and wire-safe history. Tool-call fragments are
+//                      reassembled here (assembleToolCalls).
+//   tools.execute      the merged registry (ws_* plus Nest's tools). A write or
+//                      command tool returns a PLAN; its review (checkpoint →
+//                      diff → Apply/Reject, or the command prompt) runs here,
+//                      after the tool, because the change has to be computed
+//                      before it can be shown. Nest's tools ask inside their
+//                      own executor (nest/approval.ts).
+//   gate.approve       always true, for the reason above: every approval in
+//                      Yellowscript happens inside execute, on the computed
+//                      change, not on the bare call.
+//   ask / plan         passed through when the host can answer them (the
+//                      webview's question card and checklist).
+//   limit.askContinue  the host's prompt when the turn limit is reached;
+//                      absent, the flow stops there and says so ('turn-cap').
+//   steering           never: Yellowscript queues a prompt typed mid-flow
+//                      behind the running turn instead.
 //
 // No `vscode` import: the whole loop is testable against a fake streamer.
 // =============================================================================
@@ -37,7 +37,14 @@ import type { ToolCall } from '../nest/types.ts'
 import type { ToolCallDelta, StreamTimings } from '../nest/streaming.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { PendingCommand, PendingWrite, ToolContext, ToolResult } from '../tools/types.ts'
-import { createApiToolCalls, parseToolCallsFromTurn } from './tool-call-parser.ts'
+import {
+  FALLBACK_ID_PREFIX,
+  runAgentLoop as runCoreLoop,
+  wireSafeToolCalls,
+  type AgentMessage,
+  type AgentPorts,
+  type AgentToolCall,
+} from './agent-core.ts'
 
 /**
  * How many model round trips one user message may cost.
@@ -138,6 +145,13 @@ export interface AgentLoopOptions {
   /** Phase 4.1 command approval. When present, a tool result carrying a
    *  `pendingCommand` is routed through it (always-ask) before the loop continues. */
   approveCommand?: CommandApprovalGate | undefined
+  /** ask_user: put a question to the person. Absent, the core does not route
+   *  ask_user (and Nest does not offer it to a client that did not declare it). */
+  ask?: AgentPorts['ask']
+  /** update_plan: where the conversation's plan lives. */
+  plan?: AgentPorts['plan']
+  /** The turn limit was reached: may the flow go on? Absent: no. */
+  askContinue?: (signal?: AbortSignal) => Promise<boolean>
 }
 
 /**
@@ -199,134 +213,116 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   const maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS
   const handlers = options.handlers ?? {}
   const toolPayload = options.tools.payload()
+  const signal = options.signal
 
   // Worked on a copy: the caller's transcript is its own business, and the
-  // assistant/tool messages appended here are loop bookkeeping that
+  // assistant/tool messages the core appends are loop bookkeeping that
   // ChatSession renders from `toolRuns` instead.
-  const messages = [...options.request.messages]
+  const messages = [...options.request.messages] as AgentMessage[]
 
   const contentParts: string[] = []
   const reasoningParts: string[] = []
   const toolRuns: ToolRun[] = []
 
   let iterations = 0
-  let stopReason: StopReason = 'complete'
-  let aborted = false
+  let hitTurnCap = false
+  let streamCut = false
   let last: StreamResult | undefined
 
-  while (iterations < maxIterations) {
-    if (options.signal?.aborted) {
-      aborted = true
-      stopReason = 'aborted'
-      break
-    }
-
-    iterations++
-    handlers.onIteration?.(iterations)
-
-    const result = await options.client.streamChatCompletion(
-      {
-        ...options.request,
-        messages,
-        // Sending tools changes what the gateway injects: it only claims Nest
-        // capabilities when a request actually carries them. Expect a system
-        // block you did not write at the head of the prompt.
-        tools: toolPayload,
+  const ports: AgentPorts = {
+    model: {
+      streamTurn: async ({ acc, messages: turnMessages, signal: turnSignal }) => {
+        iterations++
+        handlers.onIteration?.(iterations)
+        const result = await options.client.streamChatCompletion(
+          {
+            ...options.request,
+            messages: toWire(turnMessages),
+            // Sending tools changes what the gateway injects: it only claims
+            // Nest capabilities when a request actually carries them.
+            tools: toolPayload,
+          },
+          {
+            ...handlers,
+            // Fill the accumulator as chunks arrive, so the core still has the
+            // partial answer if the stream fails mid-turn.
+            onContent: (chunk) => {
+              acc.content += chunk
+              handlers.onContent?.(chunk)
+            },
+            onReasoning: (chunk) => {
+              acc.reasoning += chunk
+              handlers.onReasoning?.(chunk)
+            },
+          },
+          turnSignal,
+        )
+        last = result
+        // The client's assembled strings are the record; the deltas paint.
+        acc.content = result.content
+        acc.reasoning = result.reasoning
+        if (result.timings) {
+          acc.timings = result.timings
+          acc.captured = result.timings
+        }
+        // A turn cut short ends the flow as an answer with what arrived. No
+        // calls from it run, not even ones recovered from its partial text.
+        streamCut = result.aborted
+        acc.toolCalls = result.aborted ? [] : assembleToolCalls(result.toolCalls)
       },
-      handlers,
-      options.signal,
-    )
-    last = result
-
-    if (result.content) contentParts.push(result.content)
-    if (result.reasoning) reasoningParts.push(result.reasoning)
-
-    if (result.aborted) {
-      aborted = true
-      stopReason = 'aborted'
-      break
-    }
-
-    const structured = assembleToolCalls(result.toolCalls)
-    // Only fall back when the structured field produced nothing. The parser is
-    // for malformed output; running it over a turn that already parsed cleanly
-    // would risk duplicating a call from text the model merely quoted.
-    const recovered = structured.length === 0 ? recoverCalls(result, options.tools) : []
-    const calls = structured.length > 0 ? structured : recovered
-    const wasRecovered = structured.length === 0 && recovered.length > 0
-
-    if (calls.length === 0) {
-      stopReason = 'complete'
-      break
-    }
-
-    // The assistant's own turn, carrying the calls, has to go back in the
-    // transcript — otherwise the tool results that follow answer questions the
-    // model has no record of asking.
-    messages.push({
-      role: 'assistant',
-      content: result.content,
-      tool_calls: calls,
-      ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
-    })
-
-    for (const call of calls) {
-      if (options.signal?.aborted) {
-        aborted = true
-        stopReason = 'aborted'
-        break
-      }
-
-      handlers.onToolCall?.(call, wasRecovered)
-      const toolResult = await options.tools.execute(
-        call.function.name,
-        call.function.arguments,
-        options.toolContext,
-      )
-
-      // Phase 3: a write tool returns a PLAN, not bytes. Route it through the
-      // host's approval gate (checkpoint → diff editor → Apply/Reject) before
-      // the loop continues. Without a gate the change cannot be applied at all —
-      // a configured "always allow" still goes through the gate, which is where
-      // the checkpoint is taken.
-      let resultForModel = toolResult
-      if (toolResult.pendingWrite && options.approveChange) {
-        const applied = await options.approveChange(toolResult.pendingWrite)
-        // Honest accounting: the model is told whether the write actually
-        // happened, never that a pending plan succeeded on its own.
-        resultForModel = applied
-          ? withAppliedNote(toolResult)
-          : withRejectedNote(toolResult)
-      } else if (toolResult.pendingCommand && options.approveCommand) {
-        // Phase 4.1: a command tool returns a PLAN, not a process. Route it
-        // through the always-ask gate (show verbatim → run on approval → capture
-        // output). The gate returns the captured output, or null if rejected —
-        // which becomes the tool result the model reads back.
-        const output = await options.approveCommand(toolResult.pendingCommand)
-        resultForModel = withCommandNote(toolResult, output)
-      }
-
-      handlers.onToolResult?.(call, resultForModel)
-      toolRuns.push({ call, result: resultForModel, recovered: wasRecovered })
-
-      // A failure goes back as content, not as an exception: the model needs to
-      // read why and try something else. This is also the shape a server-side
-      // denial arrives in from Phase 4.
-      messages.push({
-        role: 'tool',
-        content: resultForModel.content,
-        tool_call_id: call.id,
-      })
-    }
-
-    if (aborted) break
-
-    // Another pass: the model now sees the results and either answers or asks
-    // for more. Running out of iterations here is a distinct outcome from
-    // finishing, and is reported as one.
-    if (iterations >= maxIterations) stopReason = 'turn-cap'
+    },
+    tools: {
+      execute: async (call) => {
+        // A call the core recovered from the model's text, not from tool_calls.
+        // Worth surfacing: the model's output was malformed.
+        const recovered = call.id.startsWith(FALLBACK_ID_PREFIX)
+        const toolCall = call as ToolCall
+        handlers.onToolCall?.(toolCall, recovered)
+        const toolResult = await options.tools.execute(call.function.name, call.function.arguments, options.toolContext)
+        const resultForModel = await review(toolResult, options)
+        handlers.onToolResult?.(toolCall, resultForModel)
+        toolRuns.push({ call: toolCall, result: resultForModel, recovered })
+        // A failure goes back as content, not as an exception: the model needs
+        // to read why and try something else.
+        return { text: resultForModel.content, isError: resultForModel.isError }
+      },
+    },
+    gate: { approve: async () => true },
+    limit: {
+      askContinue: async (limitSignal) => {
+        const go = options.askContinue ? await options.askContinue(limitSignal) : false
+        if (!go) hitTurnCap = true
+        return go
+      },
+    },
+    steering: { pending: () => false },
+    fallbackParser: () => streamCut ? null : ({
+      patterns: ['braces', 'xml', 'fn', 'json'],
+      availableTools: options.tools.names.map((name) => ({ name })),
+    }),
+    // A host-resolved call (ask_user, update_plan) also shows as a card.
+    ...(options.ask ? { ask: wrapAsk(options.ask, handlers) } : {}),
+    ...(options.plan ? { plan: options.plan } : {}),
+    // The core waits a macrotask between steps so a browser can repaint. The
+    // extension host has nothing to repaint.
+    yield: () => Promise.resolve(),
   }
 
+  await runCoreLoop({
+    messages,
+    maxTurns: maxIterations,
+    ports,
+    ...(signal ? { signal } : {}),
+    callbacks: {
+      onAssistantTurnComplete: async (content, reasoning) => {
+        if (content) contentParts.push(content)
+        if (reasoning) reasoningParts.push(reasoning)
+      },
+    },
+  })
+
+  const aborted = signal?.aborted === true || last?.aborted === true
+  const stopReason: StopReason = aborted ? 'aborted' : hitTurnCap ? 'turn-cap' : 'complete'
   const result: AgentResult = {
     content: contentParts.join('\n\n'),
     reasoning: reasoningParts.join('\n\n'),
@@ -341,20 +337,62 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   return result
 }
 
+/** The history as it may be sent: earlier calls with malformed arguments go as
+ *  "{}", because llama-server refuses a whole request over one of them. */
+function toWire(messages: AgentMessage[]): ChatCompletionRequest['messages'] {
+  return messages.map((m) =>
+    m.tool_calls ? { ...m, tool_calls: wireSafeToolCalls(m.tool_calls) ?? [] } : m,
+  ) as ChatCompletionRequest['messages']
+}
+
+/** Show an ask_user call as a tool card too, so the transcript records it. */
+function wrapAsk(ask: NonNullable<AgentPorts['ask']>, handlers: AgentLoopHandlers): NonNullable<AgentPorts['ask']> {
+  return {
+    ...ask,
+    user: async (request, signal, call?: AgentToolCall) => {
+      if (call) handlers.onToolCall?.(call as ToolCall, false)
+      const answer = await ask.user(request, signal, call)
+      if (call) {
+        handlers.onToolResult?.(call as ToolCall, {
+          content: '',
+          isError: false,
+          summary: answerSummary(answer),
+          truncated: false,
+        })
+      }
+      return answer
+    },
+  }
+}
+
+/** One line for the ask_user card: what the person answered. */
+function answerSummary(answer: { chosen?: string[]; text?: string } | null): string {
+  if (!answer) return 'Skipped'
+  const parts = [...(answer.chosen ?? []), ...(answer.text ? [answer.text] : [])]
+  const line = parts.join(', ').replace(/\s+/g, ' ')
+  return `Answered: ${line.length > 80 ? line.slice(0, 79) + '…' : line}`
+}
+
 /**
- * Last-resort extraction for a turn that produced no structured calls.
- *
- * Reads the visible answer first and the reasoning stream second, because
- * reasoning models routinely emit the whole call inside their thinking and then
- * merely claim in the answer that it ran. Without this the user is told a tool
- * executed when nothing did.
+ * A write or command tool returns a PLAN, not bytes. Route it through the
+ * host's review before the model reads anything: without a gate the change
+ * cannot be applied at all — a configured "always allow" still goes through
+ * the gate, which is where the checkpoint is taken.
  */
-function recoverCalls(result: StreamResult, tools: ToolRegistry): ToolCall[] {
-  const parsed = parseToolCallsFromTurn(result.content, result.reasoning || undefined, {
-    patterns: ['braces', 'xml', 'fn', 'json'],
-    availableTools: tools.names.map((name) => ({ name })),
-  })
-  return createApiToolCalls(parsed)
+async function review(toolResult: ToolResult, options: AgentLoopOptions): Promise<ToolResult> {
+  if (toolResult.pendingWrite && options.approveChange) {
+    const applied = await options.approveChange(toolResult.pendingWrite)
+    // Honest accounting: the model is told whether the write actually
+    // happened, never that a pending plan succeeded on its own.
+    return applied ? withAppliedNote(toolResult) : withRejectedNote(toolResult)
+  }
+  if (toolResult.pendingCommand && options.approveCommand) {
+    // Always-ask: show verbatim → run on approval → capture output. The gate
+    // returns the captured output, or null if rejected.
+    const output = await options.approveCommand(toolResult.pendingCommand)
+    return withCommandNote(toolResult, output)
+  }
+  return toolResult
 }
 
 /** Replace a pending-write result's text with the honest "applied" outcome, so

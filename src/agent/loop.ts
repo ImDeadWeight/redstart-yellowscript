@@ -147,7 +147,14 @@ export type ApprovalGate = (pending: PendingWrite) => Promise<boolean>
  * user rejected it. Kept as an injected port for testability — the real one lives
  * in the host alongside `vscode`.
  */
-export type CommandApprovalGate = (pending: PendingCommand) => Promise<string | null>
+export type CommandApprovalGate = (pending: PendingCommand) => Promise<CommandOutcome | string | null>
+
+/** What an approved command produced: the model's text, and whether it failed
+ *  (non-zero exit, timeout, could not start), so the card shows it. */
+export interface CommandOutcome {
+  text: string
+  isError: boolean
+}
 
 export interface AgentLoopOptions {
   client: CompletionStreamer
@@ -501,7 +508,8 @@ function withRejectedNote(result: ToolResult): ToolResult {
 /** Replace a pending-command result's text with the captured output, or a rejected
  *  note. `output` is the captured stdout/stderr (already budgeted by the caller) or
  *  null if the user declined — in which case the model is told it was not run. */
-function withCommandNote(result: ToolResult, output: string | null): ToolResult {
+function withCommandNote(result: ToolResult, outcome: CommandOutcome | string | null): ToolResult {
+  const output = outcome === null ? null : typeof outcome === 'string' ? { text: outcome, isError: false } : outcome
   if (output === null) {
     const next: ToolResult = {
       ...result,
@@ -514,9 +522,9 @@ function withCommandNote(result: ToolResult, output: string | null): ToolResult 
   }
   const next: ToolResult = {
     ...result,
-    content: output,
-    summary: `${result.summary} — ran`,
-    isError: false,
+    content: output.text,
+    summary: `${result.summary.replace(/ \(pending approval\)$/, '')} — ${output.isError ? 'failed' : 'ran'}`,
+    isError: output.isError,
   }
   delete next.pendingCommand
   return next

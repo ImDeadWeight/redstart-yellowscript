@@ -30,6 +30,8 @@ import { createEditorContextTool, type EditorStateProvider } from './editor-cont
 import { createEditFileTool, createWriteFileTool, nodeWriteFs, type WriteFs } from './write-file.ts'
 import { runCommandTool } from './run-command.ts'
 import { createDeleteFileTool, createMoveFileTool, createReplaceTool } from './file-ops.ts'
+import { createProcessOutputTool, createProcessStopTool, processStartTool } from './process-tools.ts'
+import type { BackgroundProcesses } from './process-runner.ts'
 
 /** One entry of the OpenAI-compatible `tools` array. */
 export interface ToolPayloadEntry {
@@ -48,6 +50,8 @@ export interface ToolRegistryOptions {
   editorState: EditorStateProvider
   /** Read-only fs for the write tools' planning phase. Defaults to node:fs. */
   writeFs?: WriteFs
+  /** The window's background processes. Absent: no ys_process_* tools. */
+  processes?: BackgroundProcesses
 }
 
 export interface ToolRegistry {
@@ -78,6 +82,9 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     createDeleteFileTool(writeFs),
     createMoveFileTool(writeFs),
     runCommandTool,
+    ...(options.processes
+      ? [processStartTool, createProcessOutputTool(options.processes), createProcessStopTool(options.processes)]
+      : []),
   ]
 
   const byName = new Map<string, Tool>()

@@ -175,6 +175,12 @@
           "maximum": 500,
           "markdownDescription": "Model round trips one message may run before Yellowscript asks whether to keep going. **Continue** grants as many again. A repeated identical tool call is stopped sooner, whatever this says."
         },
+        "redstartYellowscript.allowedCommands": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "markdownDescription": "Command prefixes that run without asking in this workspace, e.g. `npm test` or `npx tsc`. A line that chains, pipes or redirects (`&&`, `|`, `;`, `>`) always asks. Added by the **Always allow** button on a command prompt."
+        },
         "redstartYellowscript.approvedWriteTools": {
           "type": "array",
           "default": [],

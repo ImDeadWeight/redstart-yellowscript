@@ -45,7 +45,9 @@ export const runCommandTool: Tool = {
       'Propose running a shell command in the workspace. The command is shown to the user verbatim and ' +
       'runs only after they approve it — it is NEVER executed automatically. Use it for builds, tests, ' +
       'linting, git, and other local operations. The working directory stays inside the workspace. ' +
-      'Prefer this over editing files by hand when the task is "run X and tell me the output".',
+      'Prefer this over editing files by hand when the task is "run X and tell me the output". The result ' +
+      'starts with the exit code. It waits for the command to finish (timeout_s, default 120); for a server ' +
+      'or watcher that never exits, use ys_process_start.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -58,6 +60,10 @@ export const runCommandTool: Tool = {
           description:
             'Optional workspace-relative directory to run in. Omit for the workspace root. ' +
             'Must be inside the workspace.',
+        },
+        timeout_s: {
+          type: 'number',
+          description: 'Seconds before the command is stopped (default 120, max 900).',
         },
       },
       required: ['command'],
@@ -96,6 +102,8 @@ export const runCommandTool: Tool = {
     const label = describeWorkspacePath(context.workspaceRoots, cwd)
     const trimmed = command.trim()
     const pending: PendingCommand = { command: trimmed, cwd, label }
+    const timeoutS = Number((args as { timeout_s?: unknown })?.timeout_s)
+    if (Number.isFinite(timeoutS) && timeoutS > 0) pending.timeoutMs = Math.round(timeoutS * 1000)
 
     return toolOk(
       `Proposed command (awaits your approval):\n\n  ${trimmed}\n\n` +

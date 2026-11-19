@@ -46,6 +46,7 @@ import {
 } from './ui/tool-providers.ts'
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import { makeCommandGate } from './ui/run-command.ts'
+import { BackgroundProcesses } from './tools/process-runner.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
 import { approvalInfo, callWithApproval } from './nest/approval.ts'
 import { makeNestApprovalDeps } from './ui/nest-approval.ts'
@@ -103,9 +104,15 @@ function taskFor(conversationId: string): TaskState {
 /** Resolved once — the binary does not move while the window is open, and
  *  probing the filesystem on every search would be wasteful. */
 let ripgrepPath: string | null = null
+/** Live output of approved commands, and the background processes they started. */
+let commandChannel: vscode.OutputChannel | undefined
+let backgroundProcesses: BackgroundProcesses | undefined
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
+  commandChannel = vscode.window.createOutputChannel('Yellowscript Commands')
+  backgroundProcesses = new BackgroundProcesses((id, chunk) => commandChannel?.append(`[${id}] ${chunk}`))
+  context.subscriptions.push(commandChannel, { dispose: () => void backgroundProcesses?.stopAll() })
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
   workspaceMemento = context.workspaceState
@@ -149,6 +156,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ripgrepPath,
     diagnostics: diagnosticsProvider,
     editorState: editorStateProvider,
+    processes: backgroundProcesses,
   })
   const roots = workspaceRoots()
   output.info(
@@ -384,6 +392,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  // A dev server the model started must not outlive the window.
+  backgroundProcesses?.stopAll()
   mcpHost?.stop()
   statusBar?.dispose()
   statusBar = undefined
@@ -553,7 +563,10 @@ function getSession(id: string): ChatSession {
         })
         return gate(pending)
       },
-      approveCommand: (pending) => makeCommandGate()(pending),
+      approveCommand: (pending) =>
+        backgroundProcesses && commandChannel
+          ? makeCommandGate({ channel: commandChannel, processes: backgroundProcesses })(pending)
+          : Promise.resolve(null),
       conversationId: id,
       projectId: () => linkedProject()?.id ?? null,
       onPersist: () => persistConversation(id),

@@ -111,6 +111,10 @@ export interface PendingCommand {
   cwd: string
   /** Human label for the UI card. */
   label: string
+  /** One-shot time limit; the runner's default when absent. */
+  timeoutMs?: number
+  /** Start it as a background process (ys_process_start) instead of waiting. */
+  background?: boolean
 }
 
 /** A file the model wants written, decoded to absolute paths and final content.

@@ -103,3 +103,60 @@ export interface TaskTrust {
   trusted(): boolean
   trust(): void
 }
+
+// ---------------------------------------------------------------------------
+// Commands the person allowed to run without asking (per workspace).
+// ---------------------------------------------------------------------------
+
+/**
+ * Shell syntax that makes one line do more than its first command: chaining,
+ * pipes, redirection, substitution, a second line. A line with any of it never
+ * matches an allowed prefix, so "npm test && rm -rf ~" is not "npm test".
+ */
+const SHELL_COMPOSITION = /&&|\|\||[;|&<>`\n\r]|\$\(|\$\{/
+
+/** True when `command` may run without a prompt under `allowed` prefixes. */
+export function isCommandAllowed(command: string, allowed: readonly string[]): boolean {
+  // Checked on the raw line: collapsing whitespace first would turn a second
+  // line into a space and let "npm test" + newline + "rm -rf ~" through.
+  if (SHELL_COMPOSITION.test(command)) return false
+  const line = command.trim().replace(/\s+/g, ' ')
+  if (line === '') return false
+  return allowed.some((raw) => {
+    const prefix = raw.trim().replace(/\s+/g, ' ')
+    return prefix !== '' && (line === prefix || line.startsWith(`${prefix} `))
+  })
+}
+
+/** Programs whose first argument is code to run: only the exact line is safe. */
+const INTERPRETERS = new Set(['node', 'deno', 'bun', 'python', 'python3', 'py', 'ruby', 'perl', 'bash', 'sh', 'zsh', 'pwsh', 'powershell', 'cmd', 'php'])
+/** Package runners whose "run"/"exec" names the script that matters. */
+const RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun'])
+const RUNNER_VERBS = new Set(['run', 'run-script', 'exec', 'x', 'dlx'])
+
+/**
+ * The prefix to offer for "always allow": as narrow as still useful.
+ * - "npm test", "npx tsc", "git status": the program and its subcommand.
+ * - "npm run build": the script is part of it ("npm run" would allow any).
+ * - "node scripts/x.mjs": an interpreter runs whatever it is given, so only
+ *   the exact line.
+ * - A flag or a path where a subcommand would be: the exact line.
+ * Null when the line composes commands, so there is nothing safe to offer.
+ */
+export function allowPrefixFor(command: string): string | null {
+  if (SHELL_COMPOSITION.test(command)) return null
+  const line = command.trim().replace(/\s+/g, ' ')
+  if (line === '') return null
+  const words = line.split(' ')
+  const program = words[0]!.toLowerCase().replace(/\.(exe|cmd|bat)$/, '')
+  const sub = words[1]
+  if (sub === undefined) return line
+  if (INTERPRETERS.has(program)) return line
+  const looksLikeArgument = (w: string) => w.startsWith('-') || /[/\\.:=]/.test(w)
+  if (looksLikeArgument(sub)) return line
+  if (RUNNERS.has(program) && RUNNER_VERBS.has(sub)) {
+    const script = words[2]
+    return script && !looksLikeArgument(script) ? words.slice(0, 3).join(' ') : line
+  }
+  return `${words[0]} ${sub}`
+}

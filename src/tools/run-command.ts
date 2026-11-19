@@ -101,6 +101,18 @@ export const runCommandTool: Tool = {
 
     const label = describeWorkspacePath(context.workspaceRoots, cwd)
     const trimmed = command.trim()
+
+    // A command that only says something back is not work. A model with no way
+    // to end its turn (or to ask) has been seen spinning through dozens of
+    // them; refusing with what to do instead breaks that, and saves a prompt.
+    if (isNoOpCommand(trimmed)) {
+      return toolError(
+        `Not run: \`${trimmed}\` does nothing but print text you wrote, so it cannot tell you anything. ` +
+          'If you are finished, reply to the user without calling a tool. To ask the user something, call ask_user. ' +
+          'To inspect the environment, run a command that reads it.',
+        'ys_run_command — refused: does nothing',
+      )
+    }
     const pending: PendingCommand = { command: trimmed, cwd, label }
     const timeoutS = Number((args as { timeout_s?: unknown })?.timeout_s)
     if (Number.isFinite(timeoutS) && timeoutS > 0) pending.timeoutMs = Math.round(timeoutS * 1000)
@@ -114,4 +126,19 @@ export const runCommandTool: Tool = {
       pending,
     )
   },
+}
+
+/**
+ * A line that does nothing a model could learn from: `echo` of literal text
+ * (no variable to expand, no redirect or pipe), `exit`, `true`/`false`, `:`,
+ * `rem`, `cls`/`clear`. `echo $PATH` and `echo hi > file` are real work.
+ */
+export function isNoOpCommand(command: string): boolean {
+  const line = command.trim()
+  if (/^(exit|true|false|:|rem|cls|clear|pause)(\s+\S*)?$/i.test(line)) return true
+  const echo = /^(echo|printf|write-host|write-output)(\s|$)(.*)$/i.exec(line)
+  if (!echo) return false
+  const rest = echo[3] ?? ''
+  // Expands something, or sends the text somewhere: not a no-op.
+  return !/[$%`|<>&;]|\$\(/.test(rest)
 }

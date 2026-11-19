@@ -759,3 +759,35 @@ describe('ChatSession — projects and workflows', () => {
     assert.match(h.lastRequest.messages[0]?.content ?? '', /weekly report/)
   })
 })
+
+describe('ChatSession — approvals', () => {
+  const request = {
+    kind: 'command' as const,
+    title: 'Run a command',
+    subject: 'npm test',
+    options: [
+      { id: 'run', label: 'Run', kind: 'allow' as const },
+      { id: 'deny', label: 'Deny', kind: 'deny' as const },
+    ],
+  }
+
+  test('shows the request in the conversation state and resolves with the choice', async () => {
+    const h = new Harness()
+    const pending = h.session.askApproval(request)
+    const approval = h.session.state().approval
+    assert.equal(approval?.subject, 'npm test')
+    const pushed = h.ofType('conversationState').at(-1)
+    assert.equal(pushed?.state.approval?.id, approval?.id)
+    assert.equal(h.session.approve('stale', 'run'), false)
+    assert.equal(h.session.approve(approval!.id, 'run'), true)
+    assert.equal(await pending, 'run')
+    assert.equal(h.session.state().approval, null)
+  })
+
+  test('Stop denies a waiting approval', async () => {
+    const h = new Harness()
+    const pending = h.session.askApproval(request)
+    h.session.abort()
+    assert.equal(await pending, 'deny')
+  })
+})

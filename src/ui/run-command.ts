@@ -3,7 +3,7 @@
 // =============================================================================
 // Implements the `CommandApprovalGate` port. The model only ever proposes a
 // command; this is where it runs, and only after the person has seen it
-// verbatim and said yes, or it matches a prefix they allowed for this
+// verbatim on the chat's approval card and said yes, or it matches a prefix they allowed for this
 // workspace (`redstartYellowscript.allowedCommands`, see isCommandAllowed:
 // a line that chains, pipes or redirects never matches).
 //
@@ -22,6 +22,7 @@ import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
 import { formatCommandRun, runCommandLine, runFailed, type BackgroundProcesses } from '../tools/process-runner.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
+import type { AskApproval } from '../chat/approvals.ts'
 
 const ALLOWED_KEY = 'allowedCommands'
 
@@ -41,6 +42,8 @@ export interface CommandGateDeps {
   /** Where command output is shown live. */
   channel: vscode.OutputChannel
   processes: BackgroundProcesses
+  /** Ask on the conversation's approval card. */
+  ask: AskApproval
 }
 
 /**
@@ -52,16 +55,19 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
     const allowedAlready = isCommandAllowed(pending.command, allowedCommands())
     if (!allowedAlready) {
       const prefix = allowPrefixFor(pending.command)
-      const always = prefix ? `Always allow "${prefix}"` : undefined
-      const what = pending.background ? 'start in the background' : 'run'
-      const choice = await vscode.window.showInformationMessage(
-        `Yellowscript wants to ${what}:\n\n  ${pending.command}\n\nin ${pending.label}. It will only run if you approve.`,
-        { modal: true },
-        'Run',
-        ...(always ? [always] : []),
-      )
-      if (choice === undefined) return null
-      if (always && choice === always && prefix) await allowCommand(prefix)
+      const choice = await deps.ask({
+        kind: 'command',
+        title: pending.background ? 'Start a command in the background' : 'Run a command',
+        subject: pending.command,
+        detail: `in ${pending.label}`,
+        options: [
+          { id: 'run', label: pending.background ? 'Start' : 'Run', kind: 'allow' },
+          ...(prefix ? [{ id: 'always', label: `Always allow "${prefix}"`, kind: 'always' as const }] : []),
+          { id: 'deny', label: 'Deny', kind: 'deny' },
+        ],
+      })
+      if (choice === 'deny') return null
+      if (choice === 'always' && prefix) await allowCommand(prefix)
     }
 
     const channel = deps.channel

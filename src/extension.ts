@@ -56,12 +56,11 @@ import { makeCommandGate } from './ui/run-command.ts'
 import { BackgroundProcesses } from './tools/process-runner.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
 import { approvalInfo, callWithApproval } from './nest/approval.ts'
-import { makeNestApprovalDeps } from './ui/nest-approval.ts'
+import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
-import { openMcpSseStream } from './ui/mcp-stream.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
-import { conversationStore, type Conversation } from './ui/conversation-store.ts'
+import { conversationStore, isBlank, type Conversation } from './ui/conversation-store.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -128,6 +127,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (pruned > 0) {
     output.info(`history: pruned ${pruned} conversation(s) older than 14 days`)
   }
+  // Closed chats that never had anything in them, left over from before
+  // closing a blank chat deleted it.
+  const blank = conversations.pruneBlank()
+  if (blank > 0) output.info(`history: removed ${blank} empty conversation(s)`)
 
   // The panel always has a conversation open, so the first chat is a real tab
   // from the start — not an untracked transcript that vanishes on the first
@@ -237,7 +240,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onDeleteConversation: (id) => {
       sessions.get(id)?.abort()
       sessions.delete(id)
-      conversations.archive(id)
+      // A chat with no messages and nothing typed is not worth a history
+      // entry; one with an unsent draft is kept so the text can come back.
+      const closing = conversations.get(id)
+      if (closing && isBlank(closing)) conversations.delete(id)
+      else conversations.archive(id)
       if (activeConversationId === id) {
         const remaining = conversations.list(currentAccountId ?? undefined)
         activeConversationId = remaining[0]?.id ?? null
@@ -252,6 +259,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       pushConversations()
       pushHistoryPanel()
+    },
+    onSaveDraft: (id, text) => {
+      conversations.setDraft(id, text)
     },
     onRunCommand: (command) => {
       void vscode.commands.executeCommand(`redstartYellowscript.${command}`)
@@ -314,6 +324,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     onAnswer: (id, answer) => {
       if (activeConversationId) getSession(activeConversationId).answer(id, answer)
+    },
+    onApprove: (id, choice) => {
+      if (activeConversationId) getSession(activeConversationId).approve(id, choice)
+    },
+    onOpenApprovalDiff: (id, index) => {
+      if (activeConversationId) getSession(activeConversationId).openApprovalFile(id, index)
     },
     onClearPlan: () => {
       if (activeConversationId) getSession(activeConversationId).clearPlan()
@@ -568,6 +584,7 @@ function getSession(id: string): ChatSession {
           return Promise.resolve(false)
         }
         const gate = makeApprovalGate({
+          ask: (request) => getSession(id).askApproval(request),
           checkpoints: checkpointForWorkspace(roots[0]!),
           store: approvalStore(),
           recordCheckpoint: (checkpoint, files) => {
@@ -586,7 +603,11 @@ function getSession(id: string): ChatSession {
       },
       approveCommand: (pending) =>
         backgroundProcesses && commandChannel
-          ? makeCommandGate({ channel: commandChannel, processes: backgroundProcesses })(pending)
+          ? makeCommandGate({
+              channel: commandChannel,
+              processes: backgroundProcesses,
+              ask: (request) => getSession(id).askApproval(request),
+            })(pending)
           : Promise.resolve(null),
       conversationId: id,
       projectId: () => linkedProject()?.id ?? null,
@@ -642,6 +663,9 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
     pushActiveConversation()
   }
   const conversationId = id
+  // Sent, so no longer a draft. Cleared here rather than trusting the
+  // webview's follow-up, which could land after a save below.
+  conversations.setDraft(conversationId, '')
   const conv = conversations.get(conversationId)
   if (conv && conv.title === 'New chat' && workflow) {
     conv.title = titleFor(workflow.title)
@@ -652,11 +676,14 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
   pushSession()
   // Title a still-untitled chat once its turn (or its queue) is underway.
   void finished.then(() => {
-    if (conv && conv.title === 'New chat') {
+    // Re-read: `conv` is from before the turn, and saving it back would put
+    // its stale transcript and draft over what has been stored since.
+    const current = conversations.get(conversationId)
+    if (current && current.title === 'New chat') {
       const firstUser = getSession(conversationId).transcript.find((m) => m.role === 'user')
       if (firstUser) {
-        conv.title = titleFor(firstUser.content)
-        conversations.save(conv)
+        current.title = titleFor(firstUser.content)
+        conversations.save(current)
         pushConversations()
       }
     }
@@ -878,7 +905,7 @@ function switchConversation(id: string): void {
 function toViews(list: Conversation[]): ConversationView[] {
   return list.map((c) => {
     const session = sessions.get(c.id)
-    return { id: c.id, title: c.title, busy: session?.busy === true, queued: session?.queued ?? 0 }
+    return { id: c.id, title: c.title, busy: session?.busy === true, queued: session?.queued ?? 0, draft: c.draft ?? '' }
   })
 }
 
@@ -1382,7 +1409,6 @@ function connectMcpHost(): void {
       getCredential: () => client.getCredential(),
     },
     {
-      openStream: (url: string) => openMcpSseStream((input, init) => fetch(input, init), url),
       onTools: (mcpTools: readonly McpTool[]) => {
         const refs: NestToolRef[] = mcpTools
           .filter((t) => !currentDisabled.has(t.name))
@@ -1391,13 +1417,17 @@ function connectMcpHost(): void {
               name: t.name,
               description: t.description,
               inputSchema: t.inputSchema,
-              execute: async (args: unknown) =>
-                (
+              execute: async (args: unknown, context) => {
+                // Ask on the card of the conversation that made the call.
+                const asker = context.conversationId ? sessions.get(context.conversationId) : undefined
+                return (
                   await callWithApproval(t.name, args, approvalInfo(t.meta), {
                     ...approvals,
+                    ...(asker ? { prompt: (request) => promptInChat(request, asker.askApproval) } : {}),
                     call: (meta) => host.callToolResult(t.name, args, meta),
                   })
-                ).text,
+                ).text
+              },
             }
             if (t.meta) ref.meta = t.meta
             return ref

@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { SessionSnapshot, WorkflowView } from '../../chat/protocol.ts'
+  import { untrack } from 'svelte'
   import { post } from '../host.ts'
+  import { draftFor, flushDraft, hasLocalDraft, setDraft } from '../drafts.ts'
   import { view } from '../store.svelte.ts'
   import { composerPlaceholder, matchWorkflows, slashQuery, type ViewState } from '../view-model.ts'
   import Icon from './Icon.svelte'
@@ -13,6 +15,34 @@
   let dismissed = $state(false)
 
   const placeholder = $derived(composerPlaceholder(viewState))
+
+  // Each tab keeps its own unsent text (see drafts.ts). Load it when the
+  // active conversation changes, or when the host's copy arrives after the
+  // composer mounted with nothing.
+  let draftId: string | null = null
+  $effect(() => {
+    const id = viewState.conversationId
+    const fromHost = viewState.tabs.find((t) => t.id === id)?.draft
+    if (!id) return
+    untrack(() => {
+      if (id !== draftId) {
+        draftId = id
+        text = draftFor(id, fromHost)
+        void Promise.resolve().then(resize)
+      } else if (!text && fromHost && !hasLocalDraft(id)) {
+        text = fromHost
+        void Promise.resolve().then(resize)
+      }
+    })
+  })
+  $effect(() => {
+    const value = text
+    untrack(() => {
+      if (draftId) setDraft(draftId, value)
+    })
+  })
+  // Leaving for a page unmounts the composer: send the draft now.
+  $effect(() => () => flushDraft())
 
   // `/` at the start of an empty message lists workflows (Nest's, as MCP
   // prompts). Loaded on first use; the list stays until the next load.

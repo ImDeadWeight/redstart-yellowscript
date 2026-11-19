@@ -95,3 +95,12 @@ export const compactionBudget: (
 /** The tool a call_tool call names, and its arguments, or null (Nest's catalog dispatcher). */
 export const callToolTarget: (name: string, args: unknown) => { name: string; args: Record<string, unknown> } | null =
   approval.callToolTarget
+
+/** The tool definitions for the two host-answered tools (name, description, inputSchema). */
+export interface HostToolDefinition {
+  name: string
+  description: string
+  inputSchema: unknown
+}
+export const ASK_USER_DEFINITION: HostToolDefinition = askUser.ASK_USER_DEFINITION
+export const UPDATE_PLAN_DEFINITION: HostToolDefinition = updatePlan.UPDATE_PLAN_DEFINITION

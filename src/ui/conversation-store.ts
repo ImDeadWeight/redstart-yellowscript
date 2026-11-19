@@ -44,6 +44,14 @@ export interface Conversation {
   /** The update_plan checklist, kept until the model finishes it or the
    *  person clears it. */
   plan?: PlanStepView[]
+  /** Text typed into the composer and not sent yet. */
+  draft?: string
+}
+
+/** Nothing worth keeping: no transcript and nothing typed. Closing one of
+ *  these deletes it outright instead of filling history with empty chats. */
+export function isBlank(conversation: Pick<Conversation, 'messages' | 'draft'>): boolean {
+  return conversation.messages.length === 0 && !(conversation.draft ?? '').trim()
 }
 
 export interface HistoryEntry {
@@ -51,6 +59,8 @@ export interface HistoryEntry {
   title: string
   lastAccessedAt: number
   messageCount: number
+  /** True when the conversation holds only an unsent draft. */
+  draft: boolean
 }
 
 export interface ConversationStore {
@@ -66,6 +76,10 @@ export interface ConversationStore {
   archive(id: string): void
   /** Bring an archived conversation back to the active tab strip. */
   unarchive(id: string): void
+  /** Store the composer's unsent text. Does not count as an access. */
+  setDraft(id: string, text: string): void
+  /** Delete archived conversations with no messages and no draft. */
+  pruneBlank(): number
   clear(): void
   prune(olderThanDays: number): number
   search(accountId: string, query: string): Conversation[]
@@ -109,6 +123,7 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
           title: c.title,
           lastAccessedAt: c.lastAccessedAt,
           messageCount: c.messages.length,
+          draft: c.messages.length === 0 && !!(c.draft ?? '').trim(),
         }))
     },
 
@@ -167,6 +182,22 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
         all[idx] = { ...conv, archived: false, lastAccessedAt: Date.now() }
         writeAll(all)
       }
+    },
+
+    setDraft(id: string, text: string) {
+      const all = readAll()
+      const idx = all.findIndex((c) => c.id === id)
+      if (idx < 0 || (all[idx]!.draft ?? '') === text) return
+      const { draft: _old, ...rest } = all[idx]!
+      all[idx] = text ? { ...rest, draft: text } : rest
+      writeAll(all)
+    },
+
+    pruneBlank() {
+      const before = readAll()
+      const after = before.filter((c) => !(c.archived && isBlank(c)))
+      if (after.length !== before.length) writeAll(after)
+      return before.length - after.length
     },
 
     clear() {

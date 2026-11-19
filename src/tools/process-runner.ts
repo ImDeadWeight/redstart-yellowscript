@@ -286,3 +286,20 @@ export class BackgroundProcesses {
     return { id: e.id, command: e.command, cwd: e.cwd, startedAt: e.startedAt, exitCode: e.exitCode, running: e.running }
   }
 }
+
+/**
+ * Which shell runs the approved lines, said the way a model needs it. Node's
+ * `shell: true` is %ComSpec% (cmd.exe) on Windows and /bin/sh elsewhere, and
+ * a model that assumes bash on Windows wastes turns on `ls`, `pwd`, `true`.
+ */
+export function shellNote(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string {
+  if (platform === 'win32') {
+    const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
+    return (
+      `Commands (ys_run_command, ys_process_start) run in Windows ${shell}, not bash: use dir, type, ` +
+      'copy, move, del, mkdir, findstr, cd (no ls, cat, rm, pwd, grep, true). Chain with &&. ' +
+      'Node, npm and npx work as usual.'
+    )
+  }
+  return 'Commands (ys_run_command, ys_process_start) run in /bin/sh (POSIX shell).'
+}

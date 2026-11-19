@@ -20,12 +20,12 @@ const local = createToolRegistry({
   editorState: () => ({ openFiles: [], activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null }),
 })
 
-function nestTool(name: string, execute?: (args: unknown) => Promise<string>): NestToolRef {
+function nestTool(name: string, execute?: NestToolRef['execute']): NestToolRef {
   return {
     name,
     description: `Nest tool ${name}`,
     inputSchema: { type: 'object', properties: {}, required: [] },
-    execute: execute ?? ((() => Promise.resolve(`result of ${name}`)) as (args: unknown) => Promise<string>),
+    execute: execute ?? (() => Promise.resolve(`result of ${name}`)),
   }
 }
 
@@ -85,5 +85,17 @@ describe('mergeNestTools', () => {
   it('preserves local tools untouched when merging zero Nest tools', () => {
     const merged = mergeNestTools(local, [])
     assert.deepEqual(merged.names, local.names)
+  })
+
+  it('hands the caller context through, to Nest tools and local ones alike', async () => {
+    let seen: unknown = null
+    const merged = mergeNestTools(local, [
+      nestTool('postgres_query', (_args, context) => {
+        seen = context.conversationId
+        return Promise.resolve('ok')
+      }),
+    ])
+    await merged.execute('postgres_query', '{}', { workspaceRoots: [], conversationId: 'conv_1' })
+    assert.equal(seen, 'conv_1')
   })
 })

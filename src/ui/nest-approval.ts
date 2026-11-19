@@ -2,7 +2,8 @@
 // Host-side approval for Nest's own tools — the prompt and the HTTP calls.
 // =============================================================================
 // The decision logic lives in nest/approval.ts (testable, no vscode). This file
-// supplies its ports: a modal that asks the person, and the gateway routes
+// supplies its ports: the chat's approval card that asks the person (a modal
+// only for a call outside any conversation), and the gateway routes
 // that carry the decision to Nest (/approvals/*).
 //
 // Standing grants ("Always allow") are kept on the server per account, so they
@@ -17,6 +18,7 @@ import * as vscode from 'vscode'
 
 import type { NestClient } from '../nest/client.ts'
 import type { ApprovalDecision, ApprovalDeps, ApprovalPromptRequest } from '../nest/approval.ts'
+import type { AskApproval } from '../chat/approvals.ts'
 
 const ARGS_PREVIEW_CHARS = 600
 
@@ -37,6 +39,38 @@ export function argsPreview(args: unknown): string {
   return text.length > ARGS_PREVIEW_CHARS ? `${text.slice(0, ARGS_PREVIEW_CHARS)}\n…` : text
 }
 
+/**
+ * Ask on a conversation's approval card. The ports below are per connection,
+ * so the asking conversation's card is passed in per call (extension.ts).
+ */
+export async function promptInChat(request: ApprovalPromptRequest, ask: AskApproval): Promise<ApprovalDecision> {
+  const preview = argsPreview(request.args)
+  const detail = [
+    request.summary ? request.summary : null,
+    preview ? `Arguments:\n${preview}` : null,
+    request.rule === 'always'
+      ? 'Nest asks for every call to this tool. It cannot be always allowed.'
+      : 'Always allow is saved on Nest for your account, and applies in every Redstart app.',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const choice = await ask({
+    kind: 'tool',
+    title: request.rule === 'always' ? 'Run a destructive Nest tool' : 'Run a Nest tool that changes things',
+    subject: request.tool,
+    detail,
+    options: [
+      { id: 'once', label: 'Allow once', kind: 'allow' },
+      ...(request.canAlwaysAllow ? [{ id: 'always', label: 'Always allow', kind: 'always' as const }] : []),
+      { id: 'deny', label: 'Deny', kind: 'deny' },
+    ],
+  })
+  if (choice === 'once') return 'once'
+  if (choice === 'always' && request.canAlwaysAllow) return 'always'
+  return 'deny'
+}
+
+/** The modal, for a call made outside any conversation (none today). */
 async function promptPerson(request: ApprovalPromptRequest): Promise<ApprovalDecision> {
   const ONCE = 'Allow once'
   const ALWAYS = 'Always allow'

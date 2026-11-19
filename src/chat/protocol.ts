@@ -109,6 +109,42 @@ export interface QuestionItemView {
   multiSelect: boolean
 }
 
+/**
+ * A tool call waiting for the person to allow or deny it: a command, a file
+ * write, or one of Nest's own tools. Shown as a card above the composer, like
+ * a question. The host holds the decision; the card only names a choice.
+ */
+export interface ApprovalView {
+  /** Names this request, so a late click cannot decide the next one. */
+  id: string
+  kind: 'command' | 'write' | 'tool'
+  /** What is being asked, e.g. "Run a command". */
+  title: string
+  /** The thing itself: the command line, the tool name, the write's label. */
+  subject: string
+  /** Where it runs, the arguments, a note on what "always" means. */
+  detail?: string
+  /** For a write: each file and its unified diff. */
+  files?: ApprovalFileView[]
+  /** In display order. Deny is always among them. */
+  options: ApprovalOptionView[]
+  /** More waiting behind this one (parallel tool calls). */
+  queued: number
+}
+
+export interface ApprovalFileView {
+  path: string
+  change: 'create' | 'edit' | 'delete'
+  diff: string
+}
+
+export interface ApprovalOptionView {
+  id: string
+  label: string
+  /** allow: this once; always: and remember it; deny: do not run. */
+  kind: 'allow' | 'always' | 'deny'
+}
+
 export interface PlanStepView {
   text: string
   status: 'pending' | 'in_progress' | 'done' | 'skipped'
@@ -124,6 +160,8 @@ export interface ConversationState {
   plan: PlanStepView[] | null
   /** True while the flow waits at the turn limit for "keep going?". */
   atTurnLimit: boolean
+  /** The tool call waiting to be allowed or denied, or null. */
+  approval: ApprovalView | null
 }
 
 /** A Nest project, as the Projects page lists it. */
@@ -146,7 +184,7 @@ export interface WorkflowView {
 /** The pages that take over the panel. */
 export type PageName = 'projects' | 'workflows'
 
-export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false }
+export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false, approval: null }
 
 /** The person's answer to a question; null is Skip. */
 export interface AnswerView {
@@ -172,6 +210,8 @@ export interface ConversationView {
   title: string
   busy: boolean
   queued: number
+  /** Unsent composer text, restored when the tab is opened. */
+  draft: string
 }
 
 /**
@@ -216,6 +256,8 @@ export type WebviewMessage =
   | { type: 'switchConversation'; id: string }
   | { type: 'createConversation' }
   | { type: 'deleteConversation'; id: string }
+  /** The composer's unsent text for a conversation ('' when cleared). */
+  | { type: 'saveDraft'; id: string; text: string }
   /** Delegate to an extension command — the webview never drives connection or
    *  auth logic itself, it only asks for the command the user clicked. */
   | { type: 'runCommand'; command: 'connect' | 'signIn' | 'showStatus' }
@@ -238,6 +280,11 @@ export type WebviewMessage =
   | { type: 'runWorkflow'; name: string; args: Record<string, string> }
   /** Answer the open question (`id` is its QuestionView id); null skips it. */
   | { type: 'answer'; id: string; answer: AnswerView | null }
+  /** Decide the open approval (`id` is its ApprovalView id); `choice` is one
+   *  of its option ids. */
+  | { type: 'approve'; id: string; choice: string }
+  /** Open one of a write approval's files as a diff in the editor. */
+  | { type: 'openApprovalDiff'; id: string; index: number }
   /** Clear the active conversation's plan (the × on the checklist). */
   | { type: 'clearPlan' }
   /** At the turn limit: keep going, or stop. */
@@ -315,6 +362,7 @@ export type HostMessage =
           title: string
           lastAccessedAt: number
           messageCount: number
+          draft?: boolean
         }[]
       }
     /** Tells the webview to open (and populate) the history panel. Sent by the
@@ -326,6 +374,7 @@ export type HostMessage =
           title: string
           lastAccessedAt: number
           messageCount: number
+          draft?: boolean
         }[]
       }
 
@@ -363,6 +412,10 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return { type: 'createConversation' }
     case 'deleteConversation':
       return typeof msg.id === 'string' ? { type: 'deleteConversation', id: msg.id } : null
+    case 'saveDraft':
+      return typeof msg.id === 'string' && typeof msg.text === 'string'
+        ? { type: 'saveDraft', id: msg.id, text: msg.text.slice(0, 100_000) }
+        : null
     case 'runCommand':
       return msg.command === 'connect' || msg.command === 'signIn' || msg.command === 'showStatus'
         ? { type: 'runCommand', command: msg.command }
@@ -397,6 +450,14 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       const answer = parseAnswer(msg.answer)
       return answer ? { type: 'answer', id: msg.id, answer } : null
     }
+    case 'approve':
+      return typeof msg.id === 'string' && typeof msg.choice === 'string'
+        ? { type: 'approve', id: msg.id, choice: msg.choice }
+        : null
+    case 'openApprovalDiff':
+      return typeof msg.id === 'string' && Number.isInteger(msg.index) && (msg.index as number) >= 0
+        ? { type: 'openApprovalDiff', id: msg.id, index: msg.index as number }
+        : null
     case 'clearPlan':
       return { type: 'clearPlan' }
     case 'loadPage':

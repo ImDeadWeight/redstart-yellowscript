@@ -12,9 +12,10 @@
 //      git repo. If the apply step then corrupts something, `revert` restores
 //      exactly these bytes. This happens BEFORE any write — a checkpoint taken
 //      after the write would snapshot the corrupted state.
-//   2. OPEN a native diff tab per file (before on disk vs. the proposed after),
-//      so the user reviews the real change, not a description of it.
-//   3. ASK: Apply / Reject / Always-allow. Apply writes via the injected
+//   2. SHOW each file's diff on the approval card in the chat, so the user
+//      reviews the real change, not a description of it; any file opens as a
+//      native diff tab (before on disk vs. the proposed after) from the card.
+//   3. ASK on that card: Apply / Reject / Always-allow. Apply writes via the injected
 //      `WriteBackend`. "Always allow" remembers the tool per workspace and then
 //      applies. Reject writes nothing.
 //
@@ -45,6 +46,7 @@ import {
 import { applyPendingWrite, type WriteBackend } from '../tools/apply.ts'
 import { type ApprovalStore, type TaskTrust, autoApplyReason, rememberApproval } from '../tools/approval.ts'
 import type { PendingWrite } from '../tools/types.ts'
+import type { AskApproval } from '../chat/approvals.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -118,6 +120,8 @@ interface ReviewDeps {
   recordCheckpoint?: (checkpoint: Checkpoint, files: readonly StagedFile[]) => void
   /** "Apply all in this task": offered when present, and honoured until the run ends. */
   task?: TaskTrust
+  /** Ask on the conversation's approval card. */
+  ask: AskApproval
 }
 
 /**
@@ -183,7 +187,15 @@ async function showDiff(change: PendingWrite['changes'][number]): Promise<void> 
     beforeUri,
     vscode.Uri.file(afterTmp),
     `Yellowscript: ${change.isNew ? 'create' : change.isDeleted ? 'delete' : 'edit'} ${change.path}`,
+    // Beside the chat when the chat is the active editor tab, so the card
+    // with Apply / Reject stays on screen.
+    { viewColumn: chatIsActiveEditor() ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active, preview: true },
   )
+}
+
+function chatIsActiveEditor(): boolean {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input
+  return input instanceof vscode.TabInputWebview && input.viewType.includes('redstartYellowscript')
 }
 
 /**
@@ -205,21 +217,31 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
       return true
     }
 
-    for (const change of pending.changes) {
-      await showDiff(change)
-    }
+    // Asked on the chat's card, with each file's diff inline; a file opens as
+    // a full diff in the editor from there.
+    const decision = await deps.ask({
+      kind: 'write',
+      title: pending.changes.length > 1 ? `Change ${pending.changes.length} files` : 'Change a file',
+      subject: pending.label,
+      files: pending.changes.map((c) => ({
+        path: c.path,
+        change: c.isNew ? 'create' : c.isDeleted ? 'delete' : 'edit',
+        diff: c.diff,
+      })),
+      options: [
+        { id: 'apply', label: 'Apply', kind: 'allow' },
+        // Offered only when the host scopes a task; deletions still always ask.
+        ...(deps.task ? [{ id: 'task', label: 'Apply all in this task', kind: 'always' as const }] : []),
+        ...(deletes ? [] : [{ id: 'always', label: 'Always allow edits', kind: 'always' as const }]),
+        { id: 'reject', label: 'Reject', kind: 'deny' },
+      ],
+      openFile: (index) => {
+        const change = pending.changes[index]
+        if (change) void showDiff(change)
+      },
+    })
 
-    const decision = await vscode.window.showInformationMessage(
-      `Yellowscript wants to ${pending.label}. Review the diff${pending.changes.length > 1 ? 's' : ''} and choose.`,
-      { modal: true },
-      'Apply',
-      // Offered only when the host scopes a task; deletions still always ask.
-      ...(deps.task ? ['Apply all in this task'] : []),
-      'Apply & always allow',
-      'Reject',
-    )
-
-    if (decision === 'Reject' || decision === undefined) {
+    if (decision === 'reject') {
       return false
     }
 
@@ -227,9 +249,9 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
     await snapshot(deps, pending)
     const outcome = await applyPendingWrite(pending, backend)
 
-    if (decision === 'Apply all in this task') deps.task?.trust()
+    if (decision === 'task') deps.task?.trust()
 
-    if (decision === 'Apply & always allow') {
+    if (decision === 'always') {
       const tool = autoToolFor(pending)
       if (tool) rememberApproval(deps.store, tool)
     }

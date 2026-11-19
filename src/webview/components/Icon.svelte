@@ -6,6 +6,7 @@
     | 'plus' | 'history' | 'stop' | 'send' | 'check' | 'x' | 'chevron-down' | 'chevron-up'
     | 'chevron-right' | 'list' | 'question' | 'tool' | 'alert' | 'circle' | 'circle-check'
     | 'circle-dot' | 'circle-minus' | 'spinner' | 'server' | 'refresh' | 'folder' | 'bolt'
+    | 'terminal' | 'file' | 'shield'
 
   let { name, size = 14, label }: { name: Name; size?: number; label?: string } = $props()
 
@@ -32,6 +33,9 @@
     refresh: 'M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3',
     folder: 'M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.6h5A1.5 1.5 0 0 1 14 6.1v5.4a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z',
     bolt: 'M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z',
+    terminal: 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5',
+    file: 'M4 1.5h5l3 3v10H4zM9 1.5v3h3',
+    shield: 'M8 1.5l5.5 2v4c0 3.2-2.4 5.8-5.5 7-3.1-1.2-5.5-3.8-5.5-7v-4z',
   }
 </script>
 

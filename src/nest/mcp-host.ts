@@ -1,32 +1,32 @@
 // =============================================================================
-// McpHost — speaks the Redstart Nest's built-in MCP server over SSE.
+// McpHost — speaks the Redstart Nest's built-in MCP server (Streamable HTTP).
 // =============================================================================
 // Phase 4.2. This is NOT the @modelcontextprotocol SDK — that bundle is ~3MB and
-// the Nest's MCP surface is a single SSE server with a fixed contract (HANDOFF
-// section 10). Speaking the protocol directly keeps the extension host bundle at
-// ~77 kB and gives us a seam to test without a server.
+// the Nest's MCP surface is one server with a fixed contract. Speaking the
+// protocol directly keeps the extension bundle small and leaves a seam to test
+// without a server.
 //
-// The protocol, as served by redstart-nest:
+// The protocol, as served by redstart-nest (daemon/mcp-server.mjs):
 //
-//   1. GET /sse          — an SSE stream. First event is `endpoint`, whose data
-//                          is a BARE URI (no query-string ceremony). All JSON-RPC
-//                          calls thereafter POST to that URI as
-//                          `application/x-www-form-urlencoded`.
-//   2. POST /message     — the `initialize` exchange + every `tools/list`,
-//                          `tools/call`, etc. A successful call returns 200 and
-//                          optionally pushes result/error events back on the SSE
-//                          stream keyed by `id`.
+//   POST <url>  — the URL /redstart/mcp-servers gives, ending in /mcp. Every
+//                 JSON-RPC call is a POST with a JSON body; the reply is JSON
+//                 or a short SSE stream carrying the response. Both are read.
+//   initialize  — opens a session: its reply carries `mcp-session-id`, which
+//                 every later request sends, then `notifications/initialized`.
+//   404         — on a request with a session id: Nest restarted and forgot
+//                 it. Open a new session and repeat the call, once.
+//
+// Until 2026-11-19 this spoke the legacy SSE transport (GET /sse, POST
+// /message), which Nest removed in September: every Nest tool, ask_user and
+// update_plan included, was silently missing from Yellowscript.
 //
 // Authentication rides the same `Authorization: Bearer` header as every other
-// Nest call — the credential never crosses into the webview, and this host runs
-// in the extension process, not the webview.
+// Nest call; the credential never crosses into the webview.
 //
 // The set of tools is NOT static: it follows the Nest's active profile, so we
-// re-list on every (re)connect. `toolNames` is therefore a method, not a cached
-// field.
+// re-list on every (re)connect.
 //
-// No `vscode` import: the host is testable with a fake SSE client. The adapter
-// that turns a real `fetch` into `SseStream` live in ui/.
+// No `vscode` import: the host is testable with a fake fetch.
 // =============================================================================
 
 import type { McpServersResponse, Credential } from '../nest/types.ts'
@@ -82,22 +82,55 @@ export interface McpConnection {
   disabledTools: readonly string[]
 }
 
-/**
- * A handle on the SSE stream that abstracts the transport. In production this
- * wraps `fetch(...).body` decoded line-by-line; in tests it is a fake that
- * pushes parsed events. Decoupling lets the host logic be pure.
- */
-export interface McpSseStream {
-  /** Events in arrival order. `endpoint` carries a bare URI string as `data`;
-   *  JSON-RPC results/error events carry a serialised `McpMessage`. */
-  events: AsyncIterable<SseEvent>
-  close(): void
+/** The MCP revision this client speaks (the first with Streamable HTTP). */
+export const MCP_PROTOCOL_VERSION = '2025-03-26'
+/** tools/call can run a web fetch or Python; everything else is quick. */
+const CALL_TIMEOUT_MS = 300_000
+const RPC_TIMEOUT_MS = 30_000
+
+/** The server no longer knows our session (it restarted): start a new one. */
+class SessionExpiredError extends Error {
+  constructor() {
+    super('MCP session expired')
+    this.name = 'SessionExpiredError'
+  }
 }
 
-export interface SseEvent {
-  /** The SSE `event:` field, or `'message'` when absent. */
-  type: string
-  data: string
+/**
+ * The JSON-RPC response with `id` in a Streamable HTTP reply. The server
+ * answers a POST either as JSON or as a short SSE stream whose `message`
+ * events carry JSON-RPC; both are read here. Null when the reply holds none.
+ */
+export function parseMcpResponse(contentType: string | null, body: string, id: string): McpMessage | null {
+  const pick = (value: unknown): McpMessage | null => {
+    const list = Array.isArray(value) ? value : [value]
+    for (const item of list) {
+      if (item && typeof item === 'object' && (item as McpMessage).id === id) return item as McpMessage
+    }
+    return null
+  }
+  if ((contentType ?? '').includes('text/event-stream')) {
+    for (const block of body.split(/\r?\n\r?\n/)) {
+      const data = block
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).replace(/^ /, ''))
+        .join('\n')
+      if (!data) continue
+      try {
+        const found = pick(JSON.parse(data))
+        if (found) return found
+      } catch {
+        // not JSON: a comment or keep-alive
+      }
+    }
+    return null
+  }
+  try {
+    return pick(JSON.parse(body))
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -107,15 +140,12 @@ export interface SseEvent {
 export interface McpNestClient {
   baseUrl: string
   listMcpServers(signal?: AbortSignal): Promise<McpServersResponse>
-  /** A fetch bound to the gateway, carrying the bearer header when we have a
-   *  credential. Used both for the SSE stream and POST /message. */
+  /** A fetch bound to the gateway. The host adds the bearer header itself. */
   fetch: (input: string, init?: RequestInit) => Promise<Response>
   getCredential(): Credential | null
 }
 
 export interface McpHostOptions {
-  /** Where the SSE stream comes from. */
-  openStream: (url: string) => Promise<McpSseStream>
   /** Re-fetch the tool list when the connection is (re)established. */
   onTools: (tools: readonly McpTool[]) => void
   /** The full merged set — ys_ tools plus Nest tools — after a re-list. */
@@ -126,9 +156,10 @@ export interface McpHostOptions {
 export class McpHost {
   private readonly client: McpNestClient
   private readonly options: McpHostOptions
-  private stream: McpSseStream | null = null
-  private endpoint: string | null = null
-  private pending = new Map<string, { resolve: (v: McpMessage) => void; reject: (e: Error) => void }>()
+  /** The server's /mcp URL, from /redstart/mcp-servers. */
+  private serverUrl: string | null = null
+  private sessionId: string | null = null
+  private protocolVersion = MCP_PROTOCOL_VERSION
   private messageId = 0
   private readonly capabilities: Map<string, McpTool> = new Map()
   private currentConnection: McpConnection | null = null
@@ -150,9 +181,9 @@ export class McpHost {
   }
 
   /**
-   * Bring up the SSE link and negotiate the session. Resolves the
-   * McpConnection on success (fire-and-forget for events); rejects with an Error
-   * on a hard failure (missing server, endpoint never sent).
+   * Find the built-in server, open a session, and list its tools. Resolves the
+   * McpConnection on success; null (after onError) when there is no server or
+   * the session cannot be opened.
    */
   async connect(): Promise<McpConnection | null> {
     const servers = await this.discoverServers()
@@ -164,92 +195,26 @@ export class McpHost {
       return null
     }
 
-    const baseUrl = this.resolveServerUrl(server.url, servers.serverUrl)
-    this.endpoint = null
+    this.serverUrl = this.resolveServerUrl(server.url, servers.serverUrl)
+    this.sessionId = null
     this.capabilities.clear()
     this.currentConnection = { ...servers, servers: [...servers.servers] }
 
     try {
-      const stream = await this.options.openStream(`${baseUrl}/sse`)
-      this.stream = stream
-      void this.runStream(stream).catch((err) => {
-        this.options.onError(err instanceof Error ? err : new Error(String(err)))
-      })
+      await this.initialize()
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err))
       this.stop()
       this.options.onError(e)
       return null
     }
-
     return this.currentConnection
   }
 
-  /**
-   * Drive the SSE event loop until the stream ends or is closed. The first
-   * `endpoint` event sets the JSON-RPC POST target; the first `message` event
-   * carrying a JSON-RPC response resolves a pending call.
-   */
-  private async runStream(stream: McpSseStream): Promise<void> {
-    let initialized = false
-    for await (const event of stream.events) {
-      if (event.type === 'endpoint') {
-        this.endpoint = event.data.trim()
-        if (this.endpoint && !initialized) {
-          initialized = true
-          void this.initialize().catch((err) => {
-            this.options.onError(err instanceof Error ? err : new Error(String(err)))
-          })
-        }
-        continue
-      }
-
-      // A `message` event (or default) carrying JSON-RPC — resolve the pending
-      // request this response belongs to, if any.
-      if (event.type === 'message' || event.type === 'sse') {
-        let msg: McpMessage
-        try {
-          msg = JSON.parse(event.data) as McpMessage
-        } catch {
-          continue
-        }
-        const pending = this.pending.get(msg.id)
-        if (pending) {
-          pending.resolve(msg)
-          this.pending.delete(msg.id)
-        }
-      }
-    }
-  }
-
-  /**
-   * Send `initialize`, then `tools/list`, populating capabilities and firing
-   * `onTools` + `onConnection`.
-   */
+  /** `initialize`, then `tools/list`, firing `onTools` + `onConnection`. */
   private async initialize(): Promise<void> {
-    if (!this.endpoint) throw new Error('Cannot initialize: endpoint URI not set')
-
-    const initRes = await this.postJsonRpc('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {
-        tools: {},
-        sampling: {},
-        prompts: {},
-        completion: {},
-        // The tools Nest defines but only the client's own loop can answer
-        // (Nest daemon/interaction-tools.mjs). Nest offers them only to a
-        // client that declares them here, and Yellowscript's loop (agent-core,
-        // with ChatSession's ask and plan ports) answers both.
-        experimental: { [HOST_TOOLS_CAPABILITY]: { names: [...HOST_RESOLVED_TOOLS] } },
-      },
-      clientInfo: { name: 'yellowscript', version: '0.0.1' },
-    })
-
-    if (initRes.error) {
-      throw new Error(`MCP initialize failed: ${initRes.error.message}`)
-    }
-
-    const toolsRes = await this.postJsonRpc('tools/list')
+    await this.startSession()
+    const toolsRes = await this.rpc('tools/list')
     if (toolsRes.error) {
       throw new Error(`MCP tools/list failed: ${toolsRes.error.message}`)
     }
@@ -262,82 +227,98 @@ export class McpHost {
     if (this.currentConnection) this.options.onConnection(this.currentConnection)
   }
 
-  /**
-   * POST a JSON-RPC call to the endpoint URI and resolve when the matching
-   * response event arrives on the SSE stream. Falls back to the immediate HTTP
-   * response if the server echoes synchronously.
-   */
-    private postJsonRpc(method: string, params?: unknown): Promise<McpMessage> {
-    if (!this.endpoint) return Promise.reject(new Error('No MCP endpoint set'))
-    const id = `ys_${this.messageId++}`
-    const body = new URLSearchParams()
-    body.set('message', JSON.stringify({ jsonrpc: '2.0', id, method, params }))
-    const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' }
+  /** Open a session: initialize (which returns its id), then `initialized`. */
+  private async startSession(): Promise<void> {
+    this.sessionId = null
+    const initRes = await this.send('initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {
+        tools: {},
+        sampling: {},
+        prompts: {},
+        completion: {},
+        // The tools Nest defines but only the client's own loop can answer
+        // (Nest daemon/interaction-tools.mjs). Nest offers them only to a
+        // client that declares them here, and Yellowscript's loop (agent-core,
+        // with ChatSession's ask and plan ports) answers both.
+        experimental: { [HOST_TOOLS_CAPABILITY]: { names: [...HOST_RESOLVED_TOOLS] } },
+      },
+      clientInfo: { name: 'yellowscript', version: '0.0.1' },
+    }, RPC_TIMEOUT_MS, true)
+    if (initRes.error) throw new Error(`MCP initialize failed: ${initRes.error.message}`)
+    const version = (initRes.result as { protocolVersion?: unknown } | undefined)?.protocolVersion
+    if (typeof version === 'string' && version) this.protocolVersion = version
+    await this.notify('notifications/initialized')
+  }
+
+  /** One call; a session the server forgot (it restarted) is reopened once. */
+  private async rpc(method: string, params?: unknown, timeoutMs = RPC_TIMEOUT_MS): Promise<McpMessage> {
+    try {
+      return await this.send(method, params, timeoutMs)
+    } catch (err) {
+      if (!(err instanceof SessionExpiredError)) throw err
+      await this.startSession()
+      return this.send(method, params, timeoutMs)
+    }
+  }
+
+  private headers(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      // Streamable HTTP: the server may answer with either.
+      Accept: 'application/json, text/event-stream',
+    }
     const credential = this.client.getCredential?.()
-    if (credential) {
-      headers['Authorization'] = `Bearer ${credentialValue(credential)}`
+    if (credential) headers['Authorization'] = `Bearer ${credentialValue(credential)}`
+    if (this.sessionId) {
+      headers['mcp-session-id'] = this.sessionId
+      headers['mcp-protocol-version'] = this.protocolVersion
     }
+    return headers
+  }
 
-    let resolveFn: (v: McpMessage) => void = () => {}
-    let rejectFn: (e: Error) => void = () => {}
-    const p = new Promise<McpMessage>((resolve, reject) => {
-      resolveFn = resolve
-      rejectFn = reject
-      this.pending.set(id, { resolve, reject })
+  /** POST one JSON-RPC request to /mcp and read its response. */
+  private async send(method: string, params: unknown, timeoutMs: number, opening = false): Promise<McpMessage> {
+    if (!this.serverUrl) throw new Error('Not connected to an MCP server')
+    const id = `ys_${this.messageId++}`
+    const res = await this.client.fetch(this.serverUrl, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }),
+      signal: AbortSignal.timeout(timeoutMs),
     })
-
-    const clear = () => {
-      clearTimeout(timeout)
-      this.pending.delete(id)
+    if (res.status === 404 && this.sessionId && !opening) throw new SessionExpiredError()
+    if (!res.ok) throw new Error(`MCP ${method}: ${res.status} ${res.statusText}`)
+    if (opening) {
+      const sid = res.headers.get('mcp-session-id')
+      if (sid) this.sessionId = sid
     }
+    const msg = parseMcpResponse(res.headers.get('content-type'), await res.text(), id)
+    if (!msg) throw new Error(`MCP ${method}: the server sent no response for this call`)
+    return msg
+  }
 
-    const timeout = setTimeout(() => {
-      clear()
-      rejectFn(new Error(`MCP ${method} timed out`))
-    }, 15_000)
-
-    this.client
-      .fetch(this.endpoint, { method: 'POST', headers, body })
-      .then(async (res) => {
-        if (!res.ok) {
-          clear()
-          throw new Error(`MCP ${method}: ${res.status} ${res.statusText}`)
-        }
-        // If the server returns JSON directly (some do), resolve from that.
-        const text = await res.text().catch(() => '')
-        if (text) {
-          try {
-            const msg = JSON.parse(text) as McpMessage
-            if (msg.id === id && msg.jsonrpc === '2.0') {
-              clear()
-              resolveFn(msg)
-              return
-            }
-          } catch {
-            // Not JSON-RPC — let the SSE stream event resolve it.
-          }
-        }
-        // Otherwise wait for the SSE-driven resolution in runStream.
-      })
-      .catch((err) => {
-        if (!this.pending.has(id)) return
-        clear()
-        rejectFn(err instanceof Error ? err : new Error(String(err)))
-      })
-
-    return p
+  /** A notification: no id, no response body (202). */
+  private async notify(method: string): Promise<void> {
+    if (!this.serverUrl) return
+    const res = await this.client.fetch(this.serverUrl, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ jsonrpc: '2.0', method }),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    })
+    await res.text().catch(() => '')
   }
 
   stop(): void {
-    if (this.stream) {
-      this.stream.close()
-      this.stream = null
+    // End the session on the server too; best effort, nothing waits on it.
+    if (this.serverUrl && this.sessionId) {
+      void this.client
+        .fetch(this.serverUrl, { method: 'DELETE', headers: this.headers(), signal: AbortSignal.timeout(5_000) })
+        .catch(() => undefined)
     }
-    this.endpoint = null
+    this.sessionId = null
     this.currentConnection = null
-    // Reject any pending calls so a closed session doesn't hang the loop.
-    for (const [, entry] of this.pending) entry.reject(new Error('MCP connection closed'))
-    this.pending.clear()
   }
 
   /**
@@ -357,7 +338,7 @@ export class McpHost {
   async callToolResult(name: string, args: unknown, meta?: Record<string, unknown>): Promise<NestCallResult> {
     const params: Record<string, unknown> = { name, arguments: args }
     if (meta && Object.keys(meta).length > 0) params._meta = meta
-    const res = await this.postJsonRpc('tools/call', params)
+    const res = await this.rpc('tools/call', params, CALL_TIMEOUT_MS)
     if (res.error) return { text: `[Tool ${name} failed: ${res.error.message}]`, isError: true, approval: null }
     const result = res.result as Record<string, unknown> | undefined
     const approval = approvalRequired(result)
@@ -382,7 +363,7 @@ export class McpHost {
    * personal ones, then the organization's (named `org-…`).
    */
   async listPrompts(): Promise<McpPrompt[]> {
-    const res = await this.postJsonRpc('prompts/list')
+    const res = await this.rpc('prompts/list')
     if (res.error) throw new Error(res.error.message)
     const prompts = (res.result as { prompts?: unknown[] } | undefined)?.prompts ?? []
     return prompts.flatMap((raw) => {
@@ -412,7 +393,7 @@ export class McpHost {
    * inject the instructions themselves.
    */
   async getPrompt(name: string, args: Record<string, string>): Promise<string> {
-    const res = await this.postJsonRpc('prompts/get', { name, arguments: args })
+    const res = await this.rpc('prompts/get', { name, arguments: args })
     if (res.error) throw new Error(res.error.message)
     const messages = (res.result as { messages?: Array<{ content?: { type?: string; text?: string } }> } | undefined)?.messages ?? []
     const text = messages
@@ -426,9 +407,8 @@ export class McpHost {
   // --- private plumbing -------------------------------------------------------
 
   /**
-   * Resolve the SSE URL for the built-in server. The server advertises a URL
-   * that may be relative (`/sse`), a bare path, or a host:port. We anchor bare
-   * paths and relative URLs against the gateway.
+   * The built-in server's URL. Nest advertises a full URL ending in /mcp; a
+   * relative one (a bare path) is anchored against the gateway.
    */
   private resolveServerUrl(serverUrl: string, gatewayUrl: string): string {
     const trimmed = serverUrl.trim()

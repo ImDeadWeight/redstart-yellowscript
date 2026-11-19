@@ -8,6 +8,8 @@ import {
   assembleToolCalls,
   runAgentLoop,
   DEFAULT_MAX_ITERATIONS,
+  callSignature,
+  withHostTools,
   type CompletionStreamer,
 } from './loop.ts'
 import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
@@ -739,5 +741,37 @@ describe('runAgentLoop — images in tool results', () => {
 
   test('a text-only model gets the text alone', async () => {
     assert.equal(await run(false), 'page loaded')
+  })
+})
+
+describe('runAgentLoop — a model that cannot stop (2026-11-19)', () => {
+  test('numbered variants of one command count as a repeat', async () => {
+    // Real commands (not no-ops), numbered to dodge an exact check.
+    const variant = (n: number) => streamResult({ toolCalls: [callDelta('ys_run_command', `{"command":"node -e \\"console.log(${n})\\""}`)] })
+    const client = scriptedStreamer([variant(1), variant(2), variant(3), variant(4), variant(5), streamResult({ content: 'ok' })])
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: async () => ({ text: 'Exit code 0', isError: false }) })
+    assert.equal(result.toolRuns.filter((r) => r.result.summary === 'Not run: repeated call').length, 2)
+  })
+
+  test('reads of different files are never a repeat', () => {
+    assert.notEqual(callSignature('ys_read_file', '{"path":"data/level-01.txt"}'), callSignature('ys_read_file', '{"path":"data/level-02.txt"}'))
+    assert.equal(callSignature('ys_run_command', '{"command":"echo break2"}'), callSignature('ys_run_command', '{"command":"echo break3"}'))
+  })
+
+  test('ask_user and update_plan are offered even when Nest offers nothing', async () => {
+    const client = scriptedStreamer([streamResult({ content: 'hi' })])
+    await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, ask: { user: async () => null }, plan: { get: () => null, save: () => {} } })
+    const names = (client.requests[0]!.tools as Array<{ function: { name: string } }>).map((t) => t.function.name)
+    assert.ok(names.includes('ask_user'))
+    assert.ok(names.includes('update_plan'))
+  })
+
+  test('without the ports they are not offered, and Nest\'s own copy is not duplicated', () => {
+    const base = registry().payload()
+    assert.equal(withHostTools(base, {}), base)
+    const nestHasIt = [...base, { type: 'function' as const, function: { name: 'ask_user', description: 'nest', parameters: {} } }]
+    const merged = withHostTools(nestHasIt, { ask: { user: async () => null } })
+    assert.equal(merged.filter((t) => t.function.name === 'ask_user').length, 1)
+    assert.equal(merged.find((t) => t.function.name === 'ask_user')!.function.description, 'nest')
   })
 })

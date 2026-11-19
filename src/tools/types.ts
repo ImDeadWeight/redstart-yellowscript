@@ -72,6 +72,9 @@ export interface ToolContext {
   workspaceRoots: readonly string[]
   /** Cancels a long read or walk when the user aborts the turn. */
   signal?: AbortSignal
+  /** The conversation whose run made the call, so a tool that needs the
+   *  person (a Nest tool's approval) asks in the right tab. */
+  conversationId?: string
 }
 
 export interface ToolResult {

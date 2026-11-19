@@ -29,6 +29,8 @@ export interface HistoryItem {
   title: string
   lastAccessedAt: number
   messageCount: number
+  /** Only an unsent draft, no messages. */
+  draft?: boolean
 }
 
 export interface Notice {

@@ -7,6 +7,7 @@ import * as path from 'node:path'
 import { describe, test } from 'node:test'
 
 import { MAX_INSTRUCTION_CHARS, buildWorkspaceContext, workspaceTree, type ContextFs } from './workspace-context.ts'
+import { shellNote } from './process-runner.ts'
 
 const root = path.resolve('/game')
 
@@ -64,5 +65,19 @@ describe('workspaceTree', () => {
     const lines = workspaceTree(root, tree(entries), 10)
     assert.equal(lines.length, 11)
     assert.match(lines.at(-1)!, /and 20 more \(use ys_list_directory or ys_glob\)/)
+  })
+})
+
+describe('shellNote', () => {
+  test('on Windows it names cmd.exe and the commands to use instead of bash', () => {
+    const note = shellNote('win32', { ComSpec: 'C:\\WINDOWS\\system32\\cmd.exe' })
+    assert.match(note, /Windows cmd\.exe, not bash/)
+    assert.match(note, /no ls, cat, rm, pwd/)
+  })
+  test('elsewhere it is /bin/sh', () => {
+    assert.match(shellNote('linux', {}), /\/bin\/sh/)
+  })
+  test('the workspace note includes it', () => {
+    assert.match(buildWorkspaceContext(root, tree({ 'a.txt': '' }))!, /Commands \(ys_run_command/)
   })
 })

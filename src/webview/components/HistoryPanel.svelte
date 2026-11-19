@@ -36,7 +36,7 @@
       <div class="row">
         <button type="button" class="open" onclick={() => post({ type: 'restoreHistory', id: item.id })}>
           <span class="title">{item.title || 'Untitled'}</span>
-          <span class="meta">{when(item.lastAccessedAt)} · {item.messageCount} messages</span>
+          <span class="meta">{when(item.lastAccessedAt)} · {item.draft ? 'Draft' : `${item.messageCount} messages`}</span>
         </button>
         <button
           type="button"

@@ -44,7 +44,11 @@ import {
   type AgentMessage,
   type AgentPorts,
   type AgentToolCall,
+  ASK_USER_DEFINITION,
+  UPDATE_PLAN_DEFINITION,
+  type HostToolDefinition,
 } from './agent-core.ts'
+import type { ToolPayloadEntry } from '../tools/registry.ts'
 import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
 
 /**
@@ -244,7 +248,7 @@ export function assembleToolCalls(deltas: readonly ToolCallDelta[]): ToolCall[] 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResult> {
   const maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS
   const handlers = options.handlers ?? {}
-  const toolPayload = options.tools.payload()
+  const toolPayload = withHostTools(options.tools.payload(), options)
   const signal = options.signal
 
   // Worked on a copy: the caller's transcript is its own business, and the
@@ -344,7 +348,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         const recovered = call.id.startsWith(FALLBACK_ID_PREFIX)
         const toolCall = call as ToolCall
         handlers.onToolCall?.(toolCall, recovered)
-        const signature = `${call.function.name}\u0000${call.function.arguments.trim()}`
+        const signature = callSignature(call.function.name, call.function.arguments)
         const times = (callCounts.get(signature) ?? 0) + 1
         callCounts.set(signature, times)
         const resultForModel = times > MAX_IDENTICAL_CALLS
@@ -554,4 +558,36 @@ function withCommandNote(result: ToolResult, outcome: CommandOutcome | string | 
   }
   delete next.pendingCommand
   return next
+}
+
+/**
+ * ask_user and update_plan, offered whenever this loop can answer them.
+ *
+ * Nest offers both over MCP to a client that declares them, but this loop is
+ * what answers them, so it must not depend on that: with Nest's tools missing
+ * (MCP down, an older Nest) the model was left without a way to ask, and,
+ * told elsewhere that a question in its reply ends the turn unanswered, it
+ * spun through throwaway commands instead (2026-11-19). Nest's copy, when
+ * present, wins; it is the same definition from the same agent-core.
+ */
+export function withHostTools(payload: ToolPayloadEntry[], options: Pick<AgentLoopOptions, 'ask' | 'plan'>): ToolPayloadEntry[] {
+  const have = new Set(payload.map((t) => t.function.name))
+  const extra: ToolPayloadEntry[] = []
+  const add = (def: HostToolDefinition) => {
+    if (!have.has(def.name)) extra.push({ type: 'function', function: { name: def.name, description: def.description, parameters: def.inputSchema } })
+  }
+  if (options.ask) add(ASK_USER_DEFINITION)
+  if (options.plan) add(UPDATE_PLAN_DEFINITION)
+  return extra.length ? [...payload, ...extra] : payload
+}
+
+/**
+ * What makes two calls "the same call" for the repeat check. Exact, except
+ * for commands: there digits are ignored, so `echo break2`, `echo break3`…
+ * count as one repeated call (seen 2026-11-19, a model evading the exact
+ * check). Reads keep exact arguments: level-01 … level-30 are different work.
+ */
+export function callSignature(name: string, args: string): string {
+  const loose = name === 'ys_run_command' || name === 'ys_process_start'
+  return `${name}\u0000${(loose ? args.replace(/\d+/g, '#') : args).trim()}`
 }

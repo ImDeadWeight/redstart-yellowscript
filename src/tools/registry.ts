@@ -152,7 +152,7 @@ export interface NestToolRef {
   inputSchema: unknown
   meta?: Record<string, unknown>
   /** The host calls this to execute the tool on the Nest via McpHost.callTool. */
-  execute: (args: unknown) => Promise<string>
+  execute: (args: unknown, context: ToolContext) => Promise<string>
 }
 
 /**
@@ -200,9 +200,8 @@ export function mergeNestTools(
     }
     // Wire the real execution delegate: calls back into McpHost.callTool.
     const ref = nest
-    wrapped.execute = (_args: unknown) => {
-      void _args
-      return ref.execute(_args).then((content) => ({
+    wrapped.execute = (args: unknown, context: ToolContext) => {
+      return ref.execute(args, context).then((content) => ({
         content,
         isError: false,
         summary: `${ref.name} (ran on Nest)`,
@@ -247,8 +246,9 @@ export function mergeNestTools(
         )
       }
 
-      void context
-      return tool.execute(parsed.value, { workspaceRoots: [] })
+      // The caller's context, roots and all: a local ys_* tool handed empty
+      // roots would refuse every path once Nest's tools were merged in.
+      return tool.execute(parsed.value, context)
     },
   }
 }

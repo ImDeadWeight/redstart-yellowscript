@@ -12,7 +12,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 
-import { runCommandTool } from './run-command.ts'
+import { isNoOpCommand, runCommandTool } from './run-command.ts'
 
 let work: string
 let ctx: { workspaceRoots: string[] }
@@ -62,5 +62,22 @@ describe('ys_run_command', () => {
 
   it('declares the ys_ prefix', () => {
     assert.equal(runCommandTool.definition.name, 'ys_run_command')
+  })
+})
+
+describe('ys_run_command refuses commands that do nothing (2026-11-19)', () => {
+  it('refuses the no-ops a stuck model ran, and says what to do instead', async () => {
+    for (const line of ['echo "placeholder"', 'echo hi', 'echo break7', 'exit', 'exit 0', 'true', 'printf done', 'Write-Host bye']) {
+      const result = await runCommandTool.execute({ command: line }, ctx)
+      assert.equal(result.isError, true, line)
+      assert.equal(result.pendingCommand, undefined, `${line} must not reach the approval prompt`)
+      assert.match(result.content, /reply to the user without calling a tool.*ask_user/s)
+    }
+  })
+
+  it('still runs commands that do something', () => {
+    for (const line of ['echo $PATH', 'echo %PATH%', 'echo hi > out.txt', 'echo a | sort', 'npm test', 'echoserver --port 1', 'git status']) {
+      assert.equal(isNoOpCommand(line), false, line)
+    }
   })
 })

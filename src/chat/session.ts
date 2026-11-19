@@ -28,6 +28,7 @@ import type {
   ToolCardView,
   TurnStats,
 } from './protocol.ts'
+import { ApprovalQueue, type ApprovalRequest } from './approvals.ts'
 import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
 import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
@@ -120,9 +121,31 @@ export class ChatSession {
   private question: { view: QuestionView; resolve: (answer: AskAnswer | null) => void } | null = null
   /** The running flow is waiting at its turn limit for "keep going?". */
   private limitWait: ((go: boolean) => void) | null = null
+  /** Tool calls waiting for allow / deny, shown one at a time. */
+  private readonly approvals: ApprovalQueue
 
   constructor(deps: SessionDeps) {
     this.deps = deps
+    this.approvals = new ApprovalQueue(() => this.emitState(), () => this.nextId())
+  }
+
+  /**
+   * Ask the person to allow a tool call, on the card in this conversation.
+   * Resolves with the chosen option id; the request's deny option when the
+   * turn is stopped first. The gates the host builds for this session call
+   * this, so an approval always shows in the tab whose run asked for it.
+   */
+  readonly askApproval = (request: ApprovalRequest): Promise<string> =>
+    this.approvals.ask(request, this.controller?.signal)
+
+  /** Decide the open approval. False for a stale id or an unknown choice. */
+  approve(id: string, choice: string): boolean {
+    return this.approvals.decide(id, choice)
+  }
+
+  /** Show one of the open write approval's files as a diff. */
+  openApprovalFile(id: string, index: number): void {
+    this.approvals.openFile(id, index)
   }
 
   /** Prompts queued behind the running turn, for the tab strip / composer. */
@@ -154,6 +177,7 @@ export class ChatSession {
       question: this.question ? { ...this.question.view } : null,
       plan: this.plan ? this.plan.map((step) => ({ ...step })) : null,
       atTurnLimit: this.limitWait !== null,
+      approval: this.approvals.view(),
     }
   }
 
@@ -236,6 +260,7 @@ export class ChatSession {
     this.controller = null
     // A flow waiting on the person ends with the abort: nobody will answer.
     if (this.question) this.answer(this.question.view.id, null)
+    this.approvals.denyAll()
     this.continueAtLimit(false)
   }
 
@@ -343,7 +368,10 @@ export class ChatSession {
             client,
             request: this.buildRequest(registry),
             tools: registry,
-            toolContext: this.deps.toolContext?.() ?? { workspaceRoots: [] },
+            toolContext: {
+              ...(this.deps.toolContext?.() ?? { workspaceRoots: [] }),
+              conversationId: this.deps.conversationId,
+            },
             signal: controller.signal,
             approveChange: this.deps.approveChange,
             approveCommand: this.deps.approveCommand,

@@ -17,6 +17,7 @@ import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
 
 import { SKIPPED_DIRECTORIES } from './fallback-search.ts'
+import { shellNote } from './process-runner.ts'
 
 /** Instruction files, first found wins. */
 export const INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'] as const
@@ -76,7 +77,9 @@ export function workspaceTree(root: string, fs: ContextFs, maxEntries = MAX_TREE
 
 /** The system message for a run in `root`, or null with nothing to say. */
 export function buildWorkspaceContext(root: string, fs: ContextFs = nodeContextFs): string | null {
-  const parts: string[] = [`The workspace is ${nodePath.basename(root)} (${root}). Paths you pass to the ys_ tools are relative to it.`]
+  const parts: string[] = [
+    `The workspace is ${nodePath.basename(root)} (${root}). Paths you pass to the ys_ tools are relative to it. ${shellNote()}`,
+  ]
 
   for (const name of INSTRUCTION_FILES) {
     const text = fs.readFile(nodePath.join(root, name))

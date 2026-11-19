@@ -33,6 +33,7 @@ export interface ChatViewHandlers {
   onSwitchConversation: (id: string) => void
   onCreateConversation: () => void
   onDeleteConversation: (id: string) => void
+  onSaveDraft: (id: string, text: string) => void
   onRunCommand: (command: 'connect' | 'signIn' | 'showStatus') => void
   onSignIn: (message: { method: 'password'; username: string; password: string } | { method: 'apiKey'; key: string } | { method: 'clientKey' }) => void
   /** Called when the webview announces itself, so the host can reply with a
@@ -48,6 +49,8 @@ export interface ChatViewHandlers {
   onCreateProject: (name: string) => void
   onRunWorkflow: (name: string, args: Record<string, string>) => void
   onAnswer: (id: string, answer: AnswerView | null) => void
+  onApprove: (id: string, choice: string) => void
+  onOpenApprovalDiff: (id: string, index: number) => void
   onClearPlan: () => void
   onContinueAtLimit: (go: boolean) => void
 }
@@ -72,9 +75,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view
-    this.attach(view.webview)
+    // Held here, not read back in onDidDispose: `view.webview` throws
+    // "Webview is disposed" once the view is gone.
+    const webview = view.webview
+    this.attach(webview)
     view.onDidDispose(() => {
-      this.webviews.delete(view.webview)
+      this.webviews.delete(webview)
       if (this.view === view) this.view = undefined
     })
   }
@@ -85,8 +91,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
    */
   openInEditor(): void {
     if (this.panel) {
-      this.panel.reveal()
-      return
+      try {
+        this.panel.reveal()
+        return
+      } catch {
+        // Disposed without our handler hearing about it: open a new one.
+        this.panel = undefined
+      }
     }
     const panel = vscode.window.createWebviewPanel(
       ChatViewProvider.panelType,
@@ -105,12 +116,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
   }
 
   private adoptPanel(panel: vscode.WebviewPanel): void {
-    this.panel?.dispose()
+    const previous = this.panel
     this.panel = panel
+    if (previous) {
+      try {
+        previous.dispose()
+      } catch {
+        // Already gone; its own onDidDispose has tidied up.
+      }
+    }
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'yellowscript.svg')
-    this.attach(panel.webview)
+    // Held here, not read back in onDidDispose: `panel.webview` throws
+    // "Webview is disposed" once the panel is closed, which used to abort this
+    // handler before `this.panel` was cleared — so the next open revealed a
+    // dead panel and failed with the same error.
+    const webview = panel.webview
+    this.attach(webview)
     panel.onDidDispose(() => {
-      this.webviews.delete(panel.webview)
+      this.webviews.delete(webview)
       if (this.panel === panel) this.panel = undefined
     })
   }
@@ -156,6 +179,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       case 'deleteConversation':
         this.handlers.onDeleteConversation(message.id)
         break
+      case 'saveDraft':
+        this.handlers.onSaveDraft(message.id, message.text)
+        break
       case 'runCommand':
         this.handlers.onRunCommand(message.command)
         break
@@ -189,6 +215,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       case 'answer':
         this.handlers.onAnswer(message.id, message.answer)
         break
+      case 'approve':
+        this.handlers.onApprove(message.id, message.choice)
+        break
+      case 'openApprovalDiff':
+        this.handlers.onOpenApprovalDiff(message.id, message.index)
+        break
       case 'clearPlan':
         this.handlers.onClearPlan()
         break
@@ -201,14 +233,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
   /** Post to every open webview. A no-op when none is open, which is the
    *  common case: the extension activates long before anyone looks at it. */
   post(message: HostMessage): void {
-    for (const webview of this.webviews) void webview.postMessage(message)
+    for (const webview of this.webviews) {
+      // A webview disposed between its close and our onDidDispose handler
+      // rejects (or throws); drop it rather than surface the error.
+      try {
+        void Promise.resolve(webview.postMessage(message)).catch(() => this.webviews.delete(webview))
+      } catch {
+        this.webviews.delete(webview)
+      }
+    }
   }
 
   /** Bring the chat into view: the editor tab when one is open, else the sidebar. */
   async reveal(): Promise<void> {
     if (this.panel) {
-      this.panel.reveal(undefined, false)
-      return
+      try {
+        this.panel.reveal(undefined, false)
+        return
+      } catch {
+        this.panel = undefined
+      }
     }
     if (this.view) {
       this.view.show(true)

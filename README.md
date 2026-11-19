@@ -218,6 +218,7 @@ npm run check      # typecheck + unit tests
 npm run watch      # esbuild in watch mode (used by F5)
 npm run build      # esbuild production bundle
 npm run smoke      # live Nest smoke test
+npm run icons      # regenerate media/ icons from assets/mascot/
 npm run package    # check + build + vsce package
 ```
 

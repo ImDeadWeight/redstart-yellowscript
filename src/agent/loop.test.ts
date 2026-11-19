@@ -681,3 +681,32 @@ describe('runAgentLoop — long runs', () => {
     assert.equal(calls, 2)
   })
 })
+
+describe('runAgentLoop — diagnostics after a write', () => {
+  test('an applied write carries the problems now in that file; a rejected one does not ask', async () => {
+    const asked: string[][] = []
+    const run = (approve: boolean) =>
+      runAgentLoop({
+        client: scriptedStreamer([
+          streamResult({ toolCalls: [callDelta('ys_replace', '{"path":"a.txt","old_string":"contents","new_string":"text"}')] }),
+          streamResult({ content: 'done' }),
+        ]),
+        request: baseRequest,
+        tools: registry(),
+        toolContext,
+        approveChange: async () => approve,
+        diagnosticsAfterWrite: async (files) => {
+          asked.push(files)
+          return 'Diagnostics after this write: 1 error, 0 warnings.\n- error a.txt:1:1: broken'
+        },
+      })
+
+    const applied = await run(true)
+    assert.match(applied.toolRuns[0]!.result.content, /Applied[\s\S]*1 error[\s\S]*broken/)
+    assert.deepEqual(asked, [[path.join(base, 'a.txt')]])
+
+    const rejected = await run(false)
+    assert.doesNotMatch(rejected.toolRuns[0]!.result.content, /Diagnostics/)
+    assert.equal(asked.length, 1)
+  })
+})

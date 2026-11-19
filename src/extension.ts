@@ -38,6 +38,7 @@ import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider } from './ui/chat-view.ts'
 import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
 import {
+  diagnosticsAfterWrite,
   diagnosticsProvider,
   editorStateProvider,
   resolveRipgrep,
@@ -529,6 +530,7 @@ function getSession(id: string): ChatSession {
     session = new ChatSession({
       getClient: () => manager?.activeClient ?? null,
       context: () => contextFor(manager?.activeClient ?? null),
+      diagnosticsAfterWrite,
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
       onContextTrimmed: (report) => {
         output?.info(

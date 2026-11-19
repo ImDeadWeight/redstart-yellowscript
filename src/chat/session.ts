@@ -81,6 +81,8 @@ export interface SessionDeps {
   context?: () => ContextTracker | null
   /** Round trips before the person is asked whether to keep going. */
   maxTurns?: () => number
+  /** After an applied write: the problems now in those files, for the model. */
+  diagnosticsAfterWrite?: (files: string[]) => Promise<string | null>
   /** Older messages of a run were trimmed to fit the window (for the log). */
   onContextTrimmed?: (report: FitReport) => void
   /**
@@ -353,6 +355,7 @@ export class ChatSession {
             },
             askContinue: (signal) => this.waitAtLimit(signal),
             context: this.deps.context?.() ?? undefined,
+            diagnosticsAfterWrite: this.deps.diagnosticsAfterWrite,
             ...(this.deps.maxTurns ? { maxIterations: this.deps.maxTurns() } : {}),
             handlers: {
               ...handlers,

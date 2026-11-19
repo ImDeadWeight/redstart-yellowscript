@@ -12,7 +12,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { createDiagnosticsTool, MAX_DIAGNOSTICS, type DiagnosticRecord } from './diagnostics.ts'
+import { createDiagnosticsTool, formatWriteDiagnostics, MAX_DIAGNOSTICS, type DiagnosticRecord } from './diagnostics.ts'
 import { createEditorContextTool, MAX_SELECTION_CHARS, type EditorState } from './editor-context.ts'
 import type { ToolContext } from './types.ts'
 
@@ -248,5 +248,34 @@ describe('ys_editor_context', () => {
     const result = await editorTool(editorState()).execute({}, { workspaceRoots: [] })
     assert.equal(result.isError, true)
     assert.match(result.content, /No workspace folder is open/)
+  })
+})
+
+describe('formatWriteDiagnostics', () => {
+  const root = path.resolve(os.tmpdir(), 'ws-diag')
+  const file = path.join(root, 'src', 'game.ts')
+  const other = path.join(root, 'src', 'other.ts')
+  const rec = (over: Partial<DiagnosticRecord>): DiagnosticRecord => ({ file, line: 1, column: 1, severity: 'error', message: 'm', ...over })
+
+  test('lists only errors and warnings in the written files, errors first', () => {
+    const text = formatWriteDiagnostics(
+      [
+        rec({ severity: 'warning', line: 2, message: 'unused x' }),
+        rec({ severity: 'error', line: 9, message: "Cannot find name 'y'.", source: 'ts', code: '2304' }),
+        rec({ severity: 'hint', message: 'hint' }),
+        rec({ file: other, message: 'not written' }),
+      ],
+      [file],
+      [root],
+    )
+    assert.match(text, /1 error, 1 warning/)
+    const lines = text.split('\n').slice(1)
+    assert.match(lines[0]!, /^- error .*game\.ts:9:1 \(ts 2304\): Cannot find name 'y'\.$/)
+    assert.match(lines[1]!, /^- warning .*game\.ts:2:1: unused x$/)
+    assert.doesNotMatch(text, /hint|not written/)
+  })
+
+  test('says so when the written files are clean', () => {
+    assert.match(formatWriteDiagnostics([rec({ file: other })], [file], [root]), /no errors or warnings/)
   })
 })

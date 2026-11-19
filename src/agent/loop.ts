@@ -181,6 +181,9 @@ export interface AgentLoopOptions {
   /** The connection's context window. Absent: no trimming, and a request
    *  that overflows fails as it always did. */
   context?: ContextTracker | undefined
+  /** After a write is applied: the problems now reported in those files
+   *  (absolute paths), appended to the result. Absent: nothing appended. */
+  diagnosticsAfterWrite?: ((files: string[]) => Promise<string | null>) | undefined
 }
 
 /**
@@ -462,10 +465,19 @@ function answerSummary(answer: AskAnswerShape | null): string {
  */
 async function review(toolResult: ToolResult, options: AgentLoopOptions): Promise<ToolResult> {
   if (toolResult.pendingWrite && options.approveChange) {
-    const applied = await options.approveChange(toolResult.pendingWrite)
+    const pending = toolResult.pendingWrite
+    const applied = await options.approveChange(pending)
     // Honest accounting: the model is told whether the write actually
     // happened, never that a pending plan succeeded on its own.
-    return applied ? withAppliedNote(toolResult) : withRejectedNote(toolResult)
+    if (!applied) return withRejectedNote(toolResult)
+    const done = withAppliedNote(toolResult)
+    // What the write broke, without another call. Deleted files have none.
+    const written = pending.changes.filter((c) => !c.isDeleted).map((c) => c.absolutePath)
+    if (options.diagnosticsAfterWrite && written.length > 0) {
+      const report = await options.diagnosticsAfterWrite(written).catch(() => null)
+      if (report) done.content = `${done.content}\n\n${report}`
+    }
+    return done
   }
   if (toolResult.pendingCommand && options.approveCommand) {
     // Always-ask: show verbatim → run on approval → capture output. The gate

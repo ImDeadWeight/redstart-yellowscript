@@ -194,3 +194,36 @@ function isUnder(file: string, directoryOrFile: string): boolean {
   return target.startsWith(scope.endsWith('/') || scope.endsWith('\\') ? scope : `${scope}/`) ||
     target.startsWith(`${scope}\\`)
 }
+
+// ---------------------------------------------------------------------------
+// After a write: the problems in the files just written.
+// ---------------------------------------------------------------------------
+
+/** At most this many problems are appended to a write's result. */
+export const MAX_WRITE_DIAGNOSTICS = 15
+
+/**
+ * The errors and warnings in `files` (absolute paths), for the result of the
+ * write that just changed them, so the model sees what it broke without
+ * another call. Hints and info are left out: they are noise at this point.
+ */
+export function formatWriteDiagnostics(
+  records: readonly DiagnosticRecord[],
+  files: readonly string[],
+  roots: readonly string[],
+): string {
+  const key = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p)
+  const wanted = new Set(files.map(key))
+  const found = records
+    .filter((r) => wanted.has(key(r.file)) && (r.severity === 'error' || r.severity === 'warning'))
+    .sort((a, b) => (a.severity === b.severity ? a.file.localeCompare(b.file) || a.line - b.line : a.severity === 'error' ? -1 : 1))
+  if (found.length === 0) return 'Diagnostics: no errors or warnings reported in the written files.'
+  const errors = found.filter((r) => r.severity === 'error').length
+  const lines = found.slice(0, MAX_WRITE_DIAGNOSTICS).map((r) => {
+    const where = `${describeWorkspacePath(roots, r.file)}:${r.line}:${r.column}`
+    const tag = [r.source, r.code].filter(Boolean).join(' ')
+    return `- ${r.severity} ${where}${tag ? ` (${tag})` : ''}: ${r.message.split('\n')[0]}`
+  })
+  const more = found.length > MAX_WRITE_DIAGNOSTICS ? `\n- …and ${found.length - MAX_WRITE_DIAGNOSTICS} more (ys_diagnostics lists them)` : ''
+  return `Diagnostics after this write: ${errors} error${errors === 1 ? '' : 's'}, ${found.length - errors} warning${found.length - errors === 1 ? '' : 's'}.\n${lines.join('\n')}${more}`
+}

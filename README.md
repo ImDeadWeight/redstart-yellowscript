@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="media/icon.png" alt="The Redstart bird perched on a yellow pencil" width="128" />
+</p>
+
 # Redstart Yellowscript
 
 A VSCode coding-agent extension that connects to a **local Redstart Nest** —

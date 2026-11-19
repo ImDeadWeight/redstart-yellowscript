@@ -319,6 +319,34 @@ npm run smoke
 Checks: beacon payload, `/auth/config`, `/auth/me`, `/redstart/mcp-servers`,
 `/v1/models`, and unauthenticated rejection. Run before every release.
 
+`npm run live` (same two variables) checks what needs the real model and
+machine: `/props` reports `n_ctx`, an oversized request comes back with
+llama-server's context numbers, one real tool round trip, and a background
+dev server that starts, is checked with `ys_check_page`, and stops with its
+whole process tree.
+
+### The coding benchmark
+
+```bash
+YELLOWSCRIPT_TEST_LIVE_NEST=... YELLOWSCRIPT_TEST_TOKEN=rst_... \
+npm run bench -- --label "qwen3.6-35b Q4_K_XL"   # the core tasks
+npm run bench -- --task long-context-reads       # one task
+npm run bench -- --tag milestone                 # the long ones
+npm run bench -- --list                          # no Nest needed
+```
+
+Each task in `bench/tasks/<id>/` is a workspace, a prompt (`task.json`) and a
+`check.mjs` that scores the result. The run uses Yellowscript's own loop and
+tools against the real Nest, in a temp copy of the workspace, with a headless
+host: writes apply, commands run (on this machine, inside the copy), and
+`ask_user` gets the task's scripted answers. Results go to
+`bench/results/<stamp>-<label>/` (`runs.jsonl`, and `summary.md`, ending with
+the row for [docs/bench-results.md](docs/bench-results.md)).
+
+Every task also has a `reference/` solution, and `npm test` proves each check
+fails on the untouched workspace and passes on the reference, so a task can
+neither be passed by doing nothing nor be impossible.
+
 ## Relationship to the rest of the ecosystem
 
 - **Nest owns**: auth, models, providers, discovery, MCP server, wire format

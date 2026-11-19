@@ -1,0 +1,157 @@
+{
+  "answer": "Total: 2012",
+  "stopReason": "complete",
+  "questions": 0,
+  "calls": [
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-01.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-02.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-03.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-04.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-05.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-06.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-07.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-08.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-09.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-10.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-11.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-12.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-13.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-14.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-15.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-16.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-17.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-18.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-19.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-20.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-21.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-22.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-23.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-24.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-25.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-26.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-27.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-28.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-29.txt\"}",
+      "isError": false
+    },
+    {
+      "name": "ys_read_file",
+      "args": "{\"path\":\"data/level-30.txt\"}",
+      "isError": false
+    }
+  ]
+}

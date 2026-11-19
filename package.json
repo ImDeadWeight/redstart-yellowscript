@@ -213,6 +213,8 @@
     "typecheck": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.webview.json --fail-on-warnings",
     "test": "node --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke.mjs",
+    "live": "node src/bench/live.ts",
+    "bench": "node src/bench/run.ts",
     "icons": "node scripts/make-icons.mjs",
     "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
     "sync:agent-core": "node scripts/sync-agent-core.mjs",

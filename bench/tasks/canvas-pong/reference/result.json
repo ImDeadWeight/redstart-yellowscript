@@ -1,0 +1,3 @@
+{ "answer": "Built index.html and checked it.", "stopReason": "complete", "questions": 0,
+  "calls": [ { "name": "ys_write_file", "args": "{\"path\":\"index.html\"}", "isError": false },
+             { "name": "ys_check_page", "args": "{\"target\":\"index.html\"}", "isError": false } ] }

@@ -1,0 +1,7 @@
+{
+  "title": "Make a crashing program run",
+  "prompt": "`node src/main.js` crashes. Make it run and print its report. Keep the report's format as it is.",
+  "maxTurns": 20,
+  "timeoutS": 600,
+  "tags": ["core"]
+}

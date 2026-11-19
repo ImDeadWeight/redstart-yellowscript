@@ -1,0 +1,7 @@
+{
+  "title": "Build a one-file canvas game and check it in a browser",
+  "prompt": "Build a two-player Pong game as a single file, index.html, using a <canvas> of 640×480 and plain JavaScript (no libraries). Left paddle: W/S keys. Right paddle: ArrowUp/ArrowDown. A ball that bounces off the top, bottom and paddles, a score for each side drawn on the canvas, and the ball served again after a point. Use requestAnimationFrame for the game loop. When it is written, check it with ys_check_page and fix anything it reports.",
+  "maxTurns": 30,
+  "timeoutS": 900,
+  "tags": ["core", "web"]
+}

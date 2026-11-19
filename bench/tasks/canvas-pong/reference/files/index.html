@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pong</title>
+  <style>body { margin: 0; background: #111; display: grid; place-items: center; height: 100vh; }</style>
+</head>
+<body>
+<canvas id="game" width="640" height="480"></canvas>
+<script>
+  const canvas = document.getElementById('game')
+  const ctx = canvas.getContext('2d')
+  const W = canvas.width, H = canvas.height
+  const PADDLE = { w: 10, h: 70, speed: 6 }
+  const left = { x: 20, y: H / 2 - 35, score: 0 }
+  const right = { x: W - 30, y: H / 2 - 35, score: 0 }
+  const ball = { x: W / 2, y: H / 2, vx: 4, vy: 3, r: 7 }
+  const keys = new Set()
+
+  addEventListener('keydown', (e) => keys.add(e.key))
+  addEventListener('keyup', (e) => keys.delete(e.key))
+
+  function serve(direction) {
+    ball.x = W / 2
+    ball.y = H / 2
+    ball.vx = 4 * direction
+    ball.vy = (Math.random() * 4 - 2) || 2
+  }
+
+  function move(paddle, up, down) {
+    if (keys.has(up)) paddle.y -= PADDLE.speed
+    if (keys.has(down)) paddle.y += PADDLE.speed
+    paddle.y = Math.max(0, Math.min(H - PADDLE.h, paddle.y))
+  }
+
+  function hits(paddle) {
+    return ball.x + ball.r > paddle.x && ball.x - ball.r < paddle.x + PADDLE.w &&
+      ball.y + ball.r > paddle.y && ball.y - ball.r < paddle.y + PADDLE.h
+  }
+
+  function update() {
+    move(left, 'w', 's')
+    move(right, 'ArrowUp', 'ArrowDown')
+    ball.x += ball.vx
+    ball.y += ball.vy
+    if (ball.y - ball.r < 0 || ball.y + ball.r > H) ball.vy *= -1
+    if ((ball.vx < 0 && hits(left)) || (ball.vx > 0 && hits(right))) ball.vx *= -1.05
+    if (ball.x < 0) { right.score++; serve(1) }
+    if (ball.x > W) { left.score++; serve(-1) }
+  }
+
+  function draw() {
+    ctx.fillStyle = '#111'
+    ctx.fillRect(0, 0, W, H)
+    ctx.fillStyle = '#eee'
+    ctx.fillRect(left.x, left.y, PADDLE.w, PADDLE.h)
+    ctx.fillRect(right.x, right.y, PADDLE.w, PADDLE.h)
+    ctx.beginPath()
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.font = '32px monospace'
+    ctx.textAlign = 'center'
+    ctx.fillText(`${left.score}   ${right.score}`, W / 2, 40)
+  }
+
+  function loop() {
+    update()
+    draw()
+    requestAnimationFrame(loop)
+  }
+  serve(1)
+  requestAnimationFrame(loop)
+</script>
+</body>
+</html>

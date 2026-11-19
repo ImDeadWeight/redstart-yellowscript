@@ -1,0 +1,7 @@
+{
+  "title": "Run a dev server, find the page error, fix it, stop the server",
+  "prompt": "This site is served by `node server.js` (it listens on http://localhost:4317). Start the server in the background, check the page with ys_check_page, fix the error it reports, check the page again to confirm it is gone, then stop the server.",
+  "maxTurns": 25,
+  "timeoutS": 900,
+  "tags": ["core", "web"]
+}

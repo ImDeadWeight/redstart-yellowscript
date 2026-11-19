@@ -13,3 +13,4 @@ docs/STATUS.md
 
 sample-workspace/.yellowscript/
 sample-workspace/create hello.html
+bench/results/

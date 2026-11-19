@@ -32,7 +32,7 @@ budget below is sized for that; a larger window relaxes them but changes none.
 | 12 | Shared agent-core loop | Done (PR #1, #2) |
 | 13 | `ys_` tool prefix | Done (PR #2) |
 | T2 | `call_tool` in the approval gate | Done |
-| 14 | Testing suite / coding benchmark | **Next.** Gate for merging this branch |
+| 14 | Testing suite / coding benchmark | **Built** (`npm run live`, `npm run bench`); first live run is the gate for merging |
 | 15 | Milestone ladder | After 14 |
 
 Every item has unit tests; `npm run check` passes 568/568. None of it has run
@@ -105,7 +105,12 @@ second command.
 
 ---
 
-## 14 — The testing suite (next)
+## 14 — The testing suite (built; not yet run live)
+
+What exists: `npm run live` (layer 1) and `npm run bench` (layer 2), with 8
+tasks in `bench/tasks/` (7 core, 1 milestone), each with a reference solution
+that `npm test` uses to prove the check is honest. Results are logged in
+[docs/bench-results.md](bench-results.md). The design it was built to:
 
 Two layers, both runnable from `npm`:
 

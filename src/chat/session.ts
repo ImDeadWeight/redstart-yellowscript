@@ -81,6 +81,9 @@ export interface SessionDeps {
   context?: () => ContextTracker | null
   /** Round trips before the person is asked whether to keep going. */
   maxTurns?: () => number
+  /** A system message about the workspace (its instructions, its files),
+   *  sent first on every request that carries tools. */
+  workspaceContext?: () => string | null
   /** The plan changed (null: cleared), so the host can keep it on disk. */
   onPlanChanged?: (steps: PlanStep[] | null) => void
   /** After an applied write: the problems now in those files, for the model. */
@@ -536,6 +539,11 @@ export class ChatSession {
    */
   private buildRequest(registry: ToolRegistry | null): ChatCompletionRequest {
     const messages: ChatCompletionRequest['messages'] = []
+
+    // What the model knows about the workspace before its first call. Only
+    // with tools: without them there is nothing it could do with it.
+    const workspace = registry ? (this.deps.workspaceContext?.() ?? null) : null
+    if (workspace) messages.push({ role: 'system', content: workspace })
 
     for (const message of this.messages) {
       if (message.role === 'assistant') {

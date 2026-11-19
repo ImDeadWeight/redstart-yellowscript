@@ -21,6 +21,7 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
+import { buildWorkspaceContext } from './tools/workspace-context.ts'
 import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
 import { PLAN_DIR, PLAN_FILE, formatPlanFile, hasOpenSteps, parsePlanFile } from './chat/plan-file.ts'
@@ -536,6 +537,10 @@ function getSession(id: string): ChatSession {
       context: () => contextFor(manager?.activeClient ?? null),
       diagnosticsAfterWrite,
       onPlanChanged: (steps) => writeWorkspacePlan(steps),
+      workspaceContext: () => {
+        const root = workspaceRoots()[0]
+        return root ? buildWorkspaceContext(root) : null
+      },
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
       onContextTrimmed: (report) => {
         output?.info(

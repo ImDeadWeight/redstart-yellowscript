@@ -1,7 +1,7 @@
 // =============================================================================
 // VSCode → tool-layer adapters.
 // =============================================================================
-// The only file that turns editor state into the plain data the ws_* tools
+// The only file that turns editor state into the plain data the ys_* tools
 // consume. Everything under src/tools/ stays free of `vscode` so its logic —
 // containment, ordering, truncation, where the bugs actually are — is testable
 // under `node --test` with no extension host.
@@ -13,13 +13,13 @@
 import * as vscode from 'vscode'
 
 import { locateRipgrep } from '../tools/ripgrep.ts'
-import type { ApprovalStore } from '../tools/approval.ts'
+import { migrateToolNames, type ApprovalStore } from '../tools/approval.ts'
 import type { DiagnosticRecord, DiagnosticSeverity } from '../tools/diagnostics.ts'
 import type { EditorState, EditorPosition } from '../tools/editor-context.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
-/** Absolute paths of the open workspace folders — the roots every ws_* path is
+/** Absolute paths of the open workspace folders — the roots every ys_* path is
  *  contained within. Empty when no folder is open, which the tools report as a
  *  configuration state rather than an escape attempt. */
 export function workspaceRoots(): string[] {
@@ -67,7 +67,7 @@ export function diagnosticsProvider(): DiagnosticRecord[] {
       const record: DiagnosticRecord = {
         file: uri.fsPath,
         // VSCode positions are 0-based; everything the model sees is 1-based,
-        // matching ws_read_file's gutter and what the editor displays.
+        // matching ys_read_file's gutter and what the editor displays.
         line: diagnostic.range.start.line + 1,
         column: diagnostic.range.start.character + 1,
         severity: SEVERITY[diagnostic.severity] ?? 'info',
@@ -176,7 +176,8 @@ export function approvalStore(): ApprovalStore {
   return {
     getAllowedTools() {
       const value = config.get<string[]>(APPROVED_TOOLS_KEY)
-      return Array.isArray(value) ? value : []
+      // Settings saved before the ws_ → ys_ rename still name the old tools.
+      return Array.isArray(value) ? migrateToolNames(value) : []
     },
     setAllowedTools(tools: readonly string[]) {
       void config.update(

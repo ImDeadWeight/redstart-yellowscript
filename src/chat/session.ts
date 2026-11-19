@@ -57,7 +57,7 @@ export interface SessionDeps {
   /** Injected so tests get deterministic ids. */
   newId?: () => string
   /**
-   * The ws_* tools, and the workspace they act on.
+   * The ys_* tools, and the workspace they act on.
    *
    * Optional, and absent means a plain conversation with no tools — which is
    * not a degraded mode but a legitimate one: with no folder open there is
@@ -103,6 +103,8 @@ export class ChatSession {
   private plan: PlanStepView[] | null = null
   /** The ask_user question the running flow is waiting on. */
   private question: { view: QuestionView; resolve: (answer: AskAnswer | null) => void } | null = null
+  /** The open question was answered by a typed message, not the card. */
+  private answeredByMessage = false
   /** The running flow is waiting at its turn limit for "keep going?". */
   private limitWait: ((go: boolean) => void) | null = null
 
@@ -243,6 +245,9 @@ export class ChatSession {
     // A message typed while the assistant waits on a question IS the answer
     // (agent-core's contract): it goes to the question, not into the queue.
     if (this.question && !workflow) {
+      // Flagged so a several-question ask takes it as one reply to all of
+      // them, rather than an answer to the one on screen.
+      this.answeredByMessage = true
       this.answer(this.question.view.id, { text: prompt })
       return
     }
@@ -430,17 +435,50 @@ export class ChatSession {
     }
   }
 
-  /** The loop's ask port: show the question, wait for the person. */
-  private ask(request: AskRequest, callId: string | undefined, signal?: AbortSignal): Promise<AskAnswer | null> {
+  /**
+   * The loop's ask port: show the questions, wait for the person.
+   *
+   * agent-core sends 1 to 4 questions per call. The card shows one at a time,
+   * so several are asked in turn and returned as `answers`, one per question
+   * (null where skipped). A message typed instead of using the card is one
+   * reply to all of them, as the core expects, and ends the sequence.
+   */
+  private async ask(request: AskRequest, callId: string | undefined, signal?: AbortSignal): Promise<AskAnswer | null> {
+    const questions = request.questions
+    const baseId = callId ?? this.nextId()
+    if (questions.length === 1) return this.askOne(questions[0]!, baseId, signal)
+
+    const answers: Array<AskAnswer | null> = []
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i]!
+      const label = q.header ?? `Question ${i + 1}`
+      const reply = await this.askOne(
+        { ...q, question: `${label} (${i + 1} of ${questions.length}): ${q.question}` },
+        `${baseId}#${i + 1}`,
+        signal,
+      )
+      if (signal?.aborted) return null
+      if (this.answeredByMessage) {
+        this.answeredByMessage = false
+        return reply
+      }
+      answers.push(reply)
+    }
+    return answers.every((a) => a === null) ? null : { answers }
+  }
+
+  /** Show one question on the card and wait for its answer (null: skipped). */
+  private askOne(question: AskRequest['questions'][number], id: string, signal?: AbortSignal): Promise<AskAnswer | null> {
     if (signal?.aborted) return Promise.resolve(null)
-    // One question at a time: a second ask_user while one is open (a reply
-    // with two) skips the first rather than stacking cards.
+    // One card at a time: a second ask_user while one is open (a reply with
+    // two calls) skips the first rather than stacking cards.
     if (this.question) this.answer(this.question.view.id, null)
+    this.answeredByMessage = false
     const view: QuestionView = {
-      id: callId ?? this.nextId(),
-      question: request.question,
-      multiSelect: request.multiSelect,
-      ...(request.options && request.options.length > 0 ? { options: [...request.options] } : {}),
+      id,
+      question: question.question,
+      multiSelect: question.multiSelect,
+      ...(question.options && question.options.length > 0 ? { options: [...question.options] } : {}),
     }
     return new Promise((resolve) => {
       const onAbort = () => this.answer(view.id, null)

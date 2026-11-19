@@ -6,7 +6,7 @@
       "type": "extensionHost",
       "request": "launch",
       // Open sample-workspace/ as the test workspace. Without a folder argument
-      // the Extension Development Host starts with NO folder open, every ws_*
+      // the Extension Development Host starts with NO folder open, every ys_*
       // tool correctly refuses ("no workspace folder is open"), and the
       // extension looks broken when it is behaving exactly as designed.
       //

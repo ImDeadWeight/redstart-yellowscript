@@ -1,5 +1,5 @@
 // =============================================================================
-// Tests for the Phase 4.1 ws_run_command tool.
+// Tests for the Phase 4.1 ys_run_command tool.
 // =============================================================================
 // The tool must NEVER run a process — it only plans a command and returns it as a
 // `pendingCommand` for the always-ask gate. These tests prove that, plus that the
@@ -27,7 +27,7 @@ after(() => {
   fs.rmSync(work, { recursive: true, force: true })
 })
 
-describe('ws_run_command', () => {
+describe('ys_run_command', () => {
   it('returns a pending command, never spawns a process', async () => {
     const result = await runCommandTool.execute({ command: 'npm test' }, ctx)
     assert.equal(result.isError, false)
@@ -60,7 +60,7 @@ describe('ws_run_command', () => {
     assert.equal(result.pendingCommand, undefined)
   })
 
-  it('declares the ws_ prefix', () => {
-    assert.equal(runCommandTool.definition.name, 'ws_run_command')
+  it('declares the ys_ prefix', () => {
+    assert.equal(runCommandTool.definition.name, 'ys_run_command')
   })
 })

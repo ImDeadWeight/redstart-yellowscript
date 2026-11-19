@@ -33,9 +33,9 @@ after(() => fs.rmSync(base, { recursive: true, force: true }))
 const ctx: ToolContext = { workspaceRoots: [work] }
 const run = (args: unknown, context: ToolContext = ctx) => readFileTool.execute(args, context)
 
-describe('ws_read_file — definition', () => {
-  test('is ws_-prefixed so it cannot collide with the Nest filesystem server', () => {
-    assert.equal(readFileTool.definition.name, 'ws_read_file')
+describe('ys_read_file — definition', () => {
+  test('is ys_-prefixed so it cannot collide with the Nest filesystem server', () => {
+    assert.equal(readFileTool.definition.name, 'ys_read_file')
   })
 
   test('declares path as its only required argument', () => {
@@ -43,7 +43,7 @@ describe('ws_read_file — definition', () => {
   })
 })
 
-describe('ws_read_file — reading', () => {
+describe('ys_read_file — reading', () => {
   test('returns the file with 1-based line numbers', async () => {
     const result = await run({ path: 'a.txt' })
     assert.equal(result.isError, false)
@@ -85,7 +85,7 @@ describe('ws_read_file — reading', () => {
   })
 })
 
-describe('ws_read_file — ranges', () => {
+describe('ys_read_file — ranges', () => {
   test('honours offset and limit', async () => {
     const result = await run({ path: 'many.txt', offset: 10, limit: 3 })
     assert.match(result.content, /10\tline 10/)
@@ -164,7 +164,7 @@ describe('ws_read_file — ranges', () => {
   })
 })
 
-describe('ws_read_file — refusals return results, never throw', () => {
+describe('ys_read_file — refusals return results, never throw', () => {
   test('a missing path argument', async () => {
     const result = await run({})
     assert.equal(result.isError, true)
@@ -185,7 +185,7 @@ describe('ws_read_file — refusals return results, never throw', () => {
   test('a directory, pointing at the right tool instead', async () => {
     const result = await run({ path: 'sub' })
     assert.equal(result.isError, true)
-    assert.match(result.content, /ws_list_directory/)
+    assert.match(result.content, /ys_list_directory/)
   })
 
   test('a binary file', async () => {

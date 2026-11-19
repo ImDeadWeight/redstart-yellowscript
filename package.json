@@ -170,8 +170,8 @@
           "items": {
             "type": "string",
             "enum": [
-              "ws_write_file",
-              "ws_edit_file"
+              "ys_write_file",
+              "ys_edit_file"
             ]
           }
         },

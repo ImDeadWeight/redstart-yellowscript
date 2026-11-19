@@ -29,23 +29,23 @@ const registry = () =>
 describe('createToolRegistry', () => {
   test('registers the whole Phase 2 read-only set', () => {
     assert.deepEqual([...registry().names].sort(), [
-      'ws_diagnostics',
-      'ws_edit_file',
-      'ws_editor_context',
-      'ws_glob',
-      'ws_grep',
-      'ws_list_directory',
-      'ws_read_file',
-      'ws_run_command',
-      'ws_write_file',
+      'ys_diagnostics',
+      'ys_edit_file',
+      'ys_editor_context',
+      'ys_glob',
+      'ys_grep',
+      'ys_list_directory',
+      'ys_read_file',
+      'ys_run_command',
+      'ys_write_file',
     ])
   })
 
-  test('every tool is ws_-prefixed, so none can shadow a Nest filesystem tool', () => {
+  test('every tool is ys_-prefixed, so none can shadow a Nest filesystem tool', () => {
     // The collision is silent: one tools array cannot carry two functions with
     // the same name, and the model would get Nest's rootDir instead of the
     // workspace.
-    assert.ok(registry().names.every((name) => name.startsWith('ws_')))
+    assert.ok(registry().names.every((name) => name.startsWith('ys_')))
   })
 
   test('names are unique', () => {
@@ -58,7 +58,7 @@ describe('payload', () => {
   test('renders OpenAI-shaped function entries', () => {
     const entry = registry()
       .payload()
-      .find((item) => item.function.name === 'ws_read_file')
+      .find((item) => item.function.name === 'ys_read_file')
     assert.ok(entry)
     assert.equal(entry.type, 'function')
     assert.ok(entry.function.description.length > 0)
@@ -82,7 +82,7 @@ describe('payload', () => {
       diagnostics: () => [],
       editorState: emptyEditor,
     })
-    const grep = degraded.payload().find((item) => item.function.name === 'ws_grep')
+    const grep = degraded.payload().find((item) => item.function.name === 'ys_grep')
     assert.match(grep?.function.description ?? '', /LITERAL substring/)
 
     const full = createToolRegistry({
@@ -90,28 +90,35 @@ describe('payload', () => {
       diagnostics: () => [],
       editorState: emptyEditor,
     })
-    const fullGrep = full.payload().find((item) => item.function.name === 'ws_grep')
+    const fullGrep = full.payload().find((item) => item.function.name === 'ys_grep')
     assert.match(fullGrep?.function.description ?? '', /regular expression/)
   })
 })
 
 describe('execute', () => {
   test('runs a tool by name', async () => {
-    const result = await registry().execute('ws_read_file', '{"path":"a.txt"}', ctx)
+    const result = await registry().execute('ys_read_file', '{"path":"a.txt"}', ctx)
     assert.equal(result.isError, false)
     assert.match(result.content, /hello/)
   })
 
   test('an unknown tool names the alternatives so the model can correct itself', async () => {
-    // A model that invented `read_file` should be able to find `ws_read_file`.
+    // A model that invented `read_file` should be able to find `ys_read_file`.
     const result = await registry().execute('read_file', '{"path":"a.txt"}', ctx)
     assert.equal(result.isError, true)
     assert.match(result.content, /no tool called "read_file"/)
-    assert.match(result.content, /ws_read_file/)
+    assert.match(result.content, /ys_read_file/)
+  })
+
+  test('a pre-rename ws_ call from an old transcript runs the ys_ tool', async () => {
+    const legacy = await registry().execute('ws_read_file', '{"path":"a.txt"}', ctx)
+    const current = await registry().execute('ys_read_file', '{"path":"a.txt"}', ctx)
+    assert.equal(legacy.isError, current.isError)
+    assert.equal(legacy.content, current.content)
   })
 
   test('malformed JSON arguments become a correctable error, not a throw', async () => {
-    const result = await registry().execute('ws_read_file', '{path: a.txt}', ctx)
+    const result = await registry().execute('ys_read_file', '{path: a.txt}', ctx)
     assert.equal(result.isError, true)
     assert.match(result.content, /not valid JSON/)
     assert.match(result.content, /"path"/)
@@ -119,18 +126,18 @@ describe('execute', () => {
 
   test('empty arguments are treated as no arguments', async () => {
     // Tools with no required fields get called with "" constantly.
-    const result = await registry().execute('ws_editor_context', '', ctx)
+    const result = await registry().execute('ys_editor_context', '', ctx)
     assert.equal(result.isError, false)
   })
 
   test('a tool failure is a result, never an exception', async () => {
-    const result = await registry().execute('ws_read_file', '{"path":"missing.txt"}', ctx)
+    const result = await registry().execute('ys_read_file', '{"path":"missing.txt"}', ctx)
     assert.equal(result.isError, true)
     assert.match(result.content, /does not exist/)
   })
 
   test('containment still applies through the registry', async () => {
-    const result = await registry().execute('ws_read_file', '{"path":"../escape.txt"}', ctx)
+    const result = await registry().execute('ys_read_file', '{"path":"../escape.txt"}', ctx)
     assert.equal(result.isError, true)
     assert.match(result.content, /outside the workspace/)
   })

@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_diagnostics and ws_editor_context.
+// ys_diagnostics and ys_editor_context.
 // =============================================================================
 // Both take their VSCode state through an injected provider, which is what lets
 // these run under `node --test` with no extension host. The provider is a plain
@@ -38,10 +38,10 @@ function problem(over: Partial<DiagnosticRecord> = {}): DiagnosticRecord {
 
 const toolFor = (records: DiagnosticRecord[]) => createDiagnosticsTool(() => records)
 
-describe('ws_diagnostics', () => {
-  test('is ws_-prefixed and takes no required arguments', () => {
+describe('ys_diagnostics', () => {
+  test('is ys_-prefixed and takes no required arguments', () => {
     const tool = toolFor([])
-    assert.equal(tool.definition.name, 'ws_diagnostics')
+    assert.equal(tool.definition.name, 'ys_diagnostics')
     assert.deepEqual(tool.definition.inputSchema.required, [])
   })
 
@@ -150,7 +150,7 @@ describe('ws_diagnostics', () => {
   })
 })
 
-// --- ws_editor_context ------------------------------------------------------
+// --- ys_editor_context ------------------------------------------------------
 
 function editorState(over: Partial<EditorState> = {}): EditorState {
   return {
@@ -166,10 +166,10 @@ function editorState(over: Partial<EditorState> = {}): EditorState {
 
 const editorTool = (state: EditorState) => createEditorContextTool(() => state)
 
-describe('ws_editor_context', () => {
-  test('is ws_-prefixed and takes no arguments', () => {
+describe('ys_editor_context', () => {
+  test('is ys_-prefixed and takes no arguments', () => {
     const tool = editorTool(editorState())
-    assert.equal(tool.definition.name, 'ws_editor_context')
+    assert.equal(tool.definition.name, 'ys_editor_context')
     assert.deepEqual(tool.definition.inputSchema.properties, {})
   })
 

@@ -74,7 +74,7 @@ let workflowCache: WorkflowView[] = []
  *  own transcript and request lifecycle, so switching tabs is a pure view
  *  change and a running turn keeps streaming in its own tab. */
 let sessions = new Map<string, ChatSession>()
-/** The merged registry — local ws_* tools + live Nest tools. Rebuilt whenever the
+/** The merged registry — local ys_* tools + live Nest tools. Rebuilt whenever the
  *  Nest tool set changes (on connect and on re-list). Cached because the agent
  *  loop reads it per turn. */
 let mergedTools: ToolRegistry | null = null
@@ -121,7 +121,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     signOut: () => signOutCommand(),
   })
 
-  // The ws_* tools. Built at activation so a missing ripgrep is a known,
+  // The ys_* tools. Built at activation so a missing ripgrep is a known,
   // reportable state rather than a surprise on the first search — the search
   // tools drop to literal matching and say so in the description the model
   // plans against. Nothing sends these to the Nest yet; that is 2.3.
@@ -138,9 +138,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `workspace folders: ${roots.length}`,
   )
   if (roots.length === 0) {
-    // Worth stating plainly. With no folder open every ws_* tool refuses by
+    // Worth stating plainly. With no folder open every ys_* tool refuses by
     // design, and that reads as a broken extension unless it is spelled out.
-    output.warn('No workspace folder is open — every ws_* tool will refuse until one is.')
+    output.warn('No workspace folder is open — every ys_* tool will refuse until one is.')
   }
   if (ripgrepPath === null) {
     // Worth a log line with the appRoot: the layout has changed between VSCode
@@ -995,7 +995,7 @@ async function showStatusCommand(): Promise<void> {
 }
 
 /**
- * Run a ws_* tool by hand and show what the model would receive.
+ * Run a ys_* tool by hand and show what the model would receive.
  *
  * This is the only way to exercise the VSCode-backed providers — diagnostics
  * and editor context — outside an agent turn, since unit tests cannot reach the
@@ -1027,14 +1027,14 @@ async function inspectToolsCommand(): Promise<void> {
   }
 
   // Run the zero-argument tools and one filesystem probe. These are the checks
-  // that cannot be made from a unit test: ws_diagnostics and ws_editor_context
+  // that cannot be made from a unit test: ys_diagnostics and ys_editor_context
   // read live VSCode state through the providers, and this is the only place
   // that wiring gets exercised outside an agent turn.
   const probes: Array<{ name: string; args: string }> = [
-    { name: 'ws_editor_context', args: '{}' },
-    { name: 'ws_diagnostics', args: '{}' },
-    { name: 'ws_list_directory', args: '{"path":"."}' },
-    { name: 'ws_glob', args: '{"pattern":"**/*.ts"}' },
+    { name: 'ys_editor_context', args: '{}' },
+    { name: 'ys_diagnostics', args: '{}' },
+    { name: 'ys_list_directory', args: '{"path":"."}' },
+    { name: 'ys_glob', args: '{"pattern":"**/*.ts"}' },
   ]
 
   for (const probe of probes) {
@@ -1179,12 +1179,12 @@ function onStateChanged(state: ConnectionState): void {
 /**
  * Bring up the MCP host against the connected Nest. Phase 4.2/4.3: discovers the
  * built-in MCP server via /redstart/mcp-servers, opens the SSE stream, lists
- * tools, and merges them with the local ws_* set under a disjointness assertion.
+ * tools, and merges them with the local ys_* set under a disjointness assertion.
  *
  * Re-run on every (re)connect — the tool set follows the active profile, so a
  * cached list is stale the moment an operator switches profiles without the
  * connection dropping. On failure the extension still works with just the local
- * ws_* tools — the MCP host is a bonus, not a hard dependency.
+ * ys_* tools — the MCP host is a bonus, not a hard dependency.
  */
 function connectMcpHost(): void {
   const client = manager?.activeClient
@@ -1236,7 +1236,7 @@ function connectMcpHost(): void {
         try {
           mergedTools = mergeNestTools(base, refs)
           output?.info(
-            `mcp: merged ${refs.length} Nest tools with ${base.names.length} local ws_* tools`,
+            `mcp: merged ${refs.length} Nest tools with ${base.names.length} local ys_* tools`,
           )
           pushTools()
         } catch (err) {

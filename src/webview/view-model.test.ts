@@ -68,9 +68,9 @@ describe('applyHostMessage', () => {
     const s = run(
       init(),
       { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '' } },
-      { type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ws_read_file', arguments: '{"path":"a.ts"}', recovered: false },
-      { type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ws_read_file', arguments: '{}', recovered: false },
-      { type: 'tool/result', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ws_read_file', summary: 'a.ts, 10 lines', isError: false, truncated: false },
+      { type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_read_file', arguments: '{"path":"a.ts"}', recovered: false },
+      { type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_read_file', arguments: '{}', recovered: false },
+      { type: 'tool/result', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_read_file', summary: 'a.ts, 10 lines', isError: false, truncated: false },
     )
     assert.equal(s.messages[0]?.tools?.length, 1, 'a repeated call id is one card')
     assert.equal(s.messages[0]?.tools?.[0]?.status, 'done')

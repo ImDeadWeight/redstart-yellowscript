@@ -441,7 +441,7 @@ describe('ChatSession with tools', () => {
       if (call === 1) {
         return emptyResult({
           toolCalls: [
-            { index: 0, id: 'c1', function: { name: 'ws_read_file', arguments: '{"path":"note.txt"}' } },
+            { index: 0, id: 'c1', function: { name: 'ys_read_file', arguments: '{"path":"note.txt"}' } },
           ],
         })
       }
@@ -484,7 +484,7 @@ describe('ChatSession with tools', () => {
 
     const call = h.ofType('tool/call')[0]
     assert.ok(call && call.type === 'tool/call')
-    assert.equal(call.name, 'ws_read_file')
+    assert.equal(call.name, 'ys_read_file')
     assert.equal(call.recovered, false)
 
     const result = h.ofType('tool/result')[0]
@@ -505,7 +505,7 @@ describe('ChatSession with tools', () => {
     await h.session.send('hello')
 
     const tools = seen?.tools as Array<{ function: { name: string } }> | undefined
-    assert.ok(tools?.some((entry) => entry.function.name === 'ws_read_file'))
+    assert.ok(tools?.some((entry) => entry.function.name === 'ys_read_file'))
   })
 
   test('sends no client system message — the Nest owns the system context', async () => {
@@ -530,7 +530,7 @@ describe('ChatSession with tools', () => {
     // Tools still go out — that is what makes the gateway emit its capability
     // block, and what lets the model actually call them.
     const tools = seen?.tools as Array<{ function: { name: string } }> | undefined
-    assert.ok(tools?.some((entry) => entry.function.name === 'ws_read_file'))
+    assert.ok(tools?.some((entry) => entry.function.name === 'ys_read_file'))
   })
 
   test('withholding the registry keeps the Phase 1 single round trip', async () => {
@@ -643,6 +643,49 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     assert.match(String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content), /Sam/)
   })
 
+  test('several questions in one call are asked in turn and answered one each', async () => {
+    const h = scripted([
+      call('ask_user', {
+        questions: [
+          { header: 'Engine', question: 'Canvas or DOM?', options: ['Canvas', 'DOM'] },
+          { question: 'Name the hero?' },
+        ],
+      }),
+      { content: 'Building it.' },
+    ])
+    const done = h.session.send('make a game')
+
+    await until(() => h.session.state().question !== null)
+    const first = h.session.state().question!
+    assert.match(first.question, /^Engine \(1 of 2\): Canvas or DOM\?$/)
+    assert.equal(h.session.answer(first.id, { chosen: ['Canvas'] }), true)
+
+    await until(() => h.session.state().question?.id !== first.id && h.session.state().question !== null)
+    const second = h.session.state().question!
+    assert.match(second.question, /^Question 2 \(2 of 2\): Name the hero\?$/)
+    assert.equal(h.session.answer(second.id, null), true)
+    await done
+
+    const tool = String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content)
+    assert.match(tool, /Canvas/)
+    assert.match(tool, /did not answer/)
+  })
+
+  test('a message typed during several questions answers them all at once', async () => {
+    const h = scripted([
+      call('ask_user', { questions: [{ question: 'Colour?' }, { question: 'Size?' }] }),
+      { content: 'OK.' },
+    ])
+    const done = h.session.send('style it')
+    await until(() => h.session.state().question !== null)
+    await h.session.send('red and large')
+    await done
+
+    assert.equal(h.requests.length, 2)
+    assert.equal(h.session.state().question, null)
+    assert.match(String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content), /all your questions in one message/)
+  })
+
   test('stopping the flow skips the open question', async () => {
     const h = scripted([call('ask_user', { question: 'Sure?' })])
     const done = h.session.send('go')
@@ -676,7 +719,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
   })
 
   test('waits at the turn limit, and goes on when the person says so', async () => {
-    const reads = Array.from({ length: 12 }, () => call('ws_read_file', { path: 'note.txt' }))
+    const reads = Array.from({ length: 12 }, () => call('ys_read_file', { path: 'note.txt' }))
     const h = scripted([...reads, { content: 'Finished.' }])
     const done = h.session.send('read it a lot')
     await until(() => h.session.state().atTurnLimit)

@@ -1,7 +1,7 @@
 {
   "redstartYellowscript.serverUrl": "http://192.168.0.213:19080",
   "redstartYellowscript.approvedWriteTools": [
-    "ws_edit_file"
+    "ys_edit_file"
   ]
   // Deliberately empty.
   //

@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_write_file and ws_edit_file — the Phase 3 write tools.
+// ys_write_file and ys_edit_file — the Phase 3 write tools.
 // =============================================================================
 // These compute a proposed change and RETURN it for approval; they never write
 // to disk themselves. HANDOFF 3.1/3.2: "never applied directly — always
@@ -8,10 +8,10 @@
 //
 // DIVISION OF LABOUR:
 //
-//   ws_write_file   — full new content for a file. Used for new files and for
+//   ys_write_file   — full new content for a file. Used for new files and for
 //                     total rewrites. Token-heavy for a one-line fix, which is
-//                     exactly why ws_edit_file exists for the common case.
-//   ws_edit_file    — a unified diff (the git shape the model knows), applied
+//                     exactly why ys_edit_file exists for the common case.
+//   ys_edit_file    — a unified diff (the git shape the model knows), applied
 //                     against the current file. Chosen over search/replace blocks
 //                     because the model already emits valid unified diffs and a
 //                     diff reviews cleanly in VSCode's own diff editor.
@@ -108,13 +108,13 @@ function summariseChanges(changes: readonly FileChangePreview[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// ws_edit_file — a unified diff against the current file.
+// ys_edit_file — a unified diff against the current file.
 // ---------------------------------------------------------------------------
 
 export function createEditFileTool(fs: WriteFs): Tool {
   return {
     definition: {
-      name: assertWorkspaceToolName('ws_edit_file'),
+      name: assertWorkspaceToolName('ys_edit_file'),
       description:
         'Propose an edit to a workspace file as a unified diff (the same format `git diff` produces: ' +
         'lines starting with " " for context, "-" for removed, "+" for added, with "@@ -a,b +c,d @@" ' +
@@ -142,7 +142,7 @@ export function createEditFileTool(fs: WriteFs): Tool {
       }
       const diffText = stringArg(args, 'diff')
       if (diffText === null || diffText.trim() === '') {
-        return toolError('ws_edit_file requires a "diff" string argument (a unified diff).')
+        return toolError('ys_edit_file requires a "diff" string argument (a unified diff).')
       }
 
       const parsed = parseUnifiedDiff(diffText)
@@ -189,7 +189,7 @@ export function createEditFileTool(fs: WriteFs): Tool {
 
       return toolOk(
         body,
-        `ws_edit_file — ${summariseChanges(previews)} (pending approval)`,
+        `ys_edit_file — ${summariseChanges(previews)} (pending approval)`,
         false,
         pending,
       )
@@ -198,16 +198,16 @@ export function createEditFileTool(fs: WriteFs): Tool {
 }
 
 // ---------------------------------------------------------------------------
-// ws_write_file — full new content for a file.
+// ys_write_file — full new content for a file.
 // ---------------------------------------------------------------------------
 
 export function createWriteFileTool(fs: WriteFs): Tool {
   return {
     definition: {
-      name: assertWorkspaceToolName('ws_write_file'),
+      name: assertWorkspaceToolName('ys_write_file'),
       description:
         'Propose writing a complete file. Provide the full new content — for changing part of an existing ' +
-        'file, prefer ws_edit_file with a diff. The write is previewed and applied only after approval. ' +
+        'file, prefer ys_edit_file with a diff. The write is previewed and applied only after approval. ' +
         'New files are created; existing files are replaced entirely. Paths are workspace-relative.',
       inputSchema: {
         type: 'object',
@@ -225,9 +225,9 @@ export function createWriteFileTool(fs: WriteFs): Tool {
         return toolError('No workspace folder is open, so there is nothing to write.')
       }
       const requested = stringArg(args, 'path')
-      if (requested === null) return toolError('ws_write_file requires a "path" argument.')
+      if (requested === null) return toolError('ys_write_file requires a "path" argument.')
       const content = stringArg(args, 'content')
-      if (content === null) return toolError('ws_write_file requires a "content" argument.')
+      if (content === null) return toolError('ys_write_file requires a "content" argument.')
 
       let absolute: string
       try {
@@ -262,7 +262,7 @@ export function createWriteFileTool(fs: WriteFs): Tool {
 
       return toolOk(
         body,
-        `ws_write_file — ${isNew ? 'create' : 'replace'} (pending approval)`,
+        `ys_write_file — ${isNew ? 'create' : 'replace'} (pending approval)`,
         false,
         pending,
       )

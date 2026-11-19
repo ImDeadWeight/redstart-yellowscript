@@ -77,7 +77,7 @@ export const createApiToolCalls: (parsed: ParsedToolCall[]) => AgentToolCall[] =
 export const FALLBACK_ID_PREFIX: string = parser.FALLBACK_ID_PREFIX
 
 export const ASK_USER_TOOL: string = askUser.ASK_USER_TOOL
-export const formatAskAnswer: (answer: AskAnswer | null) => string = askUser.formatAskAnswer
+export const formatAskAnswer: (answer: AskAnswer | null, request?: AskRequest) => string = askUser.formatAskAnswer
 export type { AskRequest as AskUserRequest }
 
 export const UPDATE_PLAN_TOOL: string = updatePlan.UPDATE_PLAN_TOOL

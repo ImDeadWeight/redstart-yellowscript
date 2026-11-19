@@ -8,7 +8,7 @@
 // TWO DELIBERATE LIMITATIONS, both stated in the tool output when this is
 // active rather than hidden:
 //
-// 1. NO REGEX. Text search here is literal substring only. ws_grep's pattern
+// 1. NO REGEX. Text search here is literal substring only. ys_grep's pattern
 //    comes from the model, which can be influenced by content it just read, and
 //    JS RegExp backtracking is synchronous, unabortable, and would freeze the
 //    extension host. A regex fallback would reintroduce exactly the hazard that

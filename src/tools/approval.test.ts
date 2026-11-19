@@ -12,6 +12,8 @@ import {
   forgetApproval,
   isAutoApproved,
   isWritableTool,
+  migrateToolName,
+  migrateToolNames,
   rememberApproval,
   type ApprovalStore,
 } from './approval.ts'
@@ -32,37 +34,61 @@ function memory(initial: string[] = []): { store: ApprovalStore; saved: string[]
 
 describe('approval tiers', () => {
   it('writes are the writable tier; reads are not', () => {
-    assert.equal(isWritableTool('ws_edit_file'), true)
-    assert.equal(isWritableTool('ws_write_file'), true)
-    assert.equal(isWritableTool('ws_read_file'), false)
+    assert.equal(isWritableTool('ys_edit_file'), true)
+    assert.equal(isWritableTool('ys_write_file'), true)
+    assert.equal(isWritableTool('ys_read_file'), false)
     assert.equal(isWritableTool('rm -rf'), false)
   })
 
   it('a writable tool is not auto-approved until remembered', () => {
     const { store } = memory()
-    assert.equal(isAutoApproved(store, 'ws_edit_file'), false)
+    assert.equal(isAutoApproved(store, 'ys_edit_file'), false)
   })
 
   it('a remembered approval auto-approves and is idempotent', () => {
     const { store } = memory()
-    rememberApproval(store, 'ws_edit_file')
-    assert.equal(isAutoApproved(store, 'ws_edit_file'), true)
-    rememberApproval(store, 'ws_edit_file')
-    assert.deepEqual([...store.getAllowedTools()].sort(), ['ws_edit_file'])
+    rememberApproval(store, 'ys_edit_file')
+    assert.equal(isAutoApproved(store, 'ys_edit_file'), true)
+    rememberApproval(store, 'ys_edit_file')
+    assert.deepEqual([...store.getAllowedTools()].sort(), ['ys_edit_file'])
   })
 
   it('an unknown tool is never auto-approved even if passed through', () => {
-    const { store } = memory(['ws_edit_file'])
-    assert.equal(isAutoApproved(store, 'ws_read_file'), false)
+    const { store } = memory(['ys_edit_file'])
+    assert.equal(isAutoApproved(store, 'ys_read_file'), false)
     // Remembering a non-writable tool is a no-op.
-    rememberApproval(store, 'ws_read_file')
-    assert.deepEqual([...store.getAllowedTools()].sort(), ['ws_edit_file'])
+    rememberApproval(store, 'ys_read_file')
+    assert.deepEqual([...store.getAllowedTools()].sort(), ['ys_edit_file'])
   })
 
   it('forgetApproval removes the memory', () => {
-    const { store } = memory(['ws_edit_file', 'ws_write_file'])
-    forgetApproval(store, 'ws_edit_file')
-    assert.equal(isAutoApproved(store, 'ws_edit_file'), false)
-    assert.equal(isAutoApproved(store, 'ws_write_file'), true)
+    const { store } = memory(['ys_edit_file', 'ys_write_file'])
+    forgetApproval(store, 'ys_edit_file')
+    assert.equal(isAutoApproved(store, 'ys_edit_file'), false)
+    assert.equal(isAutoApproved(store, 'ys_write_file'), true)
+  })
+})
+
+describe('legacy ws_ tool names', () => {
+  it('maps a pre-rename name to its ys_ name and leaves others alone', () => {
+    assert.equal(migrateToolName('ws_edit_file'), 'ys_edit_file')
+    assert.equal(migrateToolName('ys_edit_file'), 'ys_edit_file')
+    assert.equal(migrateToolName('read_file'), 'read_file')
+  })
+
+  it('migrates a saved list and drops the duplicates the rename creates', () => {
+    assert.deepEqual(migrateToolNames(['ws_edit_file', 'ys_edit_file', 'ws_write_file']), [
+      'ys_edit_file',
+      'ys_write_file',
+    ])
+  })
+
+  it('a migrated saved approval still auto-approves', () => {
+    const { store } = memory()
+    const legacy: ApprovalStore = {
+      getAllowedTools: () => migrateToolNames(['ws_edit_file']),
+      setAllowedTools: store.setAllowedTools,
+    }
+    assert.equal(isAutoApproved(legacy, 'ys_edit_file'), true)
   })
 })

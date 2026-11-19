@@ -12,7 +12,7 @@
 //
 // Why per-WORKSPACE and not global: a user may trust writes in their own repo
 // but not in a throwaway scratch folder they opened to read a single file. A
-// remembered "always allow ws_edit_file" that followed them to an untrusted
+// remembered "always allow ys_edit_file" that followed them to an untrusted
 // workspace would defeat the review gate exactly where it matters most.
 //
 // No `vscode` import.
@@ -20,8 +20,25 @@
 
 /** Tools that write to the workspace. These are the ones a user can choose to
  *  "always allow" — reads never prompt, terminal is never auto-approved. */
-export const WRITABLE_TOOLS = ['ws_write_file', 'ws_edit_file'] as const
+export const WRITABLE_TOOLS = ['ys_write_file', 'ys_edit_file'] as const
 export type WritableTool = (typeof WRITABLE_TOOLS)[number]
+
+/**
+ * The prefix the local tools carried before they took Nest's reserved `ys_`
+ * namespace (redstart-project docs/tool-namespacing.md). Saved settings and old
+ * transcripts still hold names under it.
+ */
+export const LEGACY_TOOL_PREFIX = 'ws_'
+
+/** Map a pre-rename `ws_*` name to its `ys_*` name; anything else unchanged. */
+export function migrateToolName(name: string): string {
+  return name.startsWith(LEGACY_TOOL_PREFIX) ? `ys_${name.slice(LEGACY_TOOL_PREFIX.length)}` : name
+}
+
+/** A remembered tool list with legacy names migrated and duplicates removed. */
+export function migrateToolNames(names: readonly string[]): string[] {
+  return [...new Set(names.map(migrateToolName))]
+}
 
 /** True for a tool name that belongs to the write tier. */
 export function isWritableTool(name: string): name is WritableTool {

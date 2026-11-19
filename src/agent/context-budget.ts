@@ -83,7 +83,15 @@ export function messageTokens(message: BudgetMessage): number {
   let chars = contentText(message.content).length
   if (message.reasoning_content) chars += message.reasoning_content.length
   if (message.tool_calls) chars += JSON.stringify(message.tool_calls).length
-  return Math.ceil(chars / 3) + PER_MESSAGE_TOKENS
+  return Math.ceil(chars / 3) + PER_MESSAGE_TOKENS + imageParts(message.content) * IMAGE_TOKENS
+}
+
+/** A vision model's cost for one image, roughly (a 1280×800 screenshot). */
+export const IMAGE_TOKENS = 1_000
+
+function imageParts(content: unknown): number {
+  if (!Array.isArray(content)) return 0
+  return content.filter((p) => p && typeof p === 'object' && (p as { type?: unknown }).type === 'image_url').length
 }
 
 export function totalTokens(messages: readonly BudgetMessage[]): number {
@@ -249,7 +257,7 @@ export function fitMessages(messages: BudgetMessage[], limits: BudgetLimits, for
 /** What a NestClient can tell the tracker. */
 export interface ContextSource {
   /** n_ctx from llama-server's /props, or null when it cannot be read. */
-  props(signal?: AbortSignal): Promise<{ nCtx: number | null }>
+  props(signal?: AbortSignal): Promise<{ nCtx: number | null; vision?: boolean }>
 }
 
 /**
@@ -259,6 +267,7 @@ export interface ContextSource {
  */
 export class ContextTracker {
   private nCtx: number | null = null
+  private canSee = false
   private overhead = DEFAULT_OVERHEAD_TOKENS
   private loading: Promise<void> | null = null
   private readonly source: ContextSource
@@ -274,6 +283,7 @@ export class ContextTracker {
       .props(signal)
       .then((p) => {
         if (p.nCtx && p.nCtx > 0) this.nCtx = p.nCtx
+        this.canSee = p.vision === true
       })
       .catch(() => {})
       .finally(() => {
@@ -284,6 +294,11 @@ export class ContextTracker {
 
   get contextSize(): number | null {
     return this.nCtx
+  }
+
+  /** The model reads images (llama-server's modalities.vision). */
+  get vision(): boolean {
+    return this.canSee
   }
 
   get overheadTokens(): number {

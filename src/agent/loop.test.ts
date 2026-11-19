@@ -710,3 +710,34 @@ describe('runAgentLoop — diagnostics after a write', () => {
     assert.equal(asked.length, 1)
   })
 })
+
+describe('runAgentLoop — images in tool results', () => {
+  const withImage = () => {
+    const base = registry()
+    return {
+      ...base,
+      names: base.names,
+      payload: () => base.payload(),
+      execute: async () => ({ content: 'page loaded', isError: false, summary: 'checked', truncated: false, images: ['data:image/png;base64,AAAA'] }),
+    } as unknown as ReturnType<typeof registry>
+  }
+  const run = async (vision: boolean) => {
+    const client = scriptedStreamer([
+      streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ content: 'seen' }),
+    ])
+    const tracker = new ContextTracker({ props: async () => ({ nCtx: 32_768, vision }) })
+    await runAgentLoop({ client, request: baseRequest, tools: withImage(), toolContext, context: tracker })
+    return client.requests[1]!.messages.find((m) => m.role === 'tool')!.content
+  }
+
+  test('a model that reads images gets the screenshot as an image part', async () => {
+    const content = await run(true)
+    assert.ok(Array.isArray(content))
+    assert.deepEqual((content as Array<{ type: string }>).map((p) => p.type), ['text', 'image_url'])
+  })
+
+  test('a text-only model gets the text alone', async () => {
+    assert.equal(await run(false), 'page loaded')
+  })
+})

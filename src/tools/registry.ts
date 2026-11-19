@@ -32,6 +32,7 @@ import { runCommandTool } from './run-command.ts'
 import { createDeleteFileTool, createMoveFileTool, createReplaceTool } from './file-ops.ts'
 import { createProcessOutputTool, createProcessStopTool, processStartTool } from './process-tools.ts'
 import type { BackgroundProcesses } from './process-runner.ts'
+import { createCheckPageTool, type CheckPageDeps } from './browser-check.ts'
 
 /** One entry of the OpenAI-compatible `tools` array. */
 export interface ToolPayloadEntry {
@@ -52,6 +53,8 @@ export interface ToolRegistryOptions {
   writeFs?: WriteFs
   /** The window's background processes. Absent: no ys_process_* tools. */
   processes?: BackgroundProcesses
+  /** The headless browser for ys_check_page. Absent: no such tool. */
+  browser?: CheckPageDeps
 }
 
 export interface ToolRegistry {
@@ -85,6 +88,7 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     ...(options.processes
       ? [processStartTool, createProcessOutputTool(options.processes), createProcessStopTool(options.processes)]
       : []),
+    ...(options.browser ? [createCheckPageTool(options.browser)] : []),
   ]
 
   const byName = new Map<string, Tool>()

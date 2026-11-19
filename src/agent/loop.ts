@@ -257,6 +257,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   const toolRuns: ToolRun[] = []
 
   let iterations = 0
+  /** Images of the result being stored, handed to extraParts right after. */
+  let resultImages: string[] = []
   /** How often each exact call (name + arguments) has been asked for. */
   const callCounts = new Map<string, number>()
   let hitTurnCap = false
@@ -355,10 +357,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           : await review(await options.tools.execute(call.function.name, call.function.arguments, options.toolContext), options)
         handlers.onToolResult?.(toolCall, resultForModel)
         toolRuns.push({ call: toolCall, result: resultForModel, recovered })
+        resultImages = resultForModel.images ?? []
         // A failure goes back as content, not as an exception: the model needs
         // to read why and try something else.
         return { text: resultForModel.content, isError: resultForModel.isError }
       },
+      // A result's images (a page screenshot) go to the model as image parts,
+      // only when it reads images. The core calls these right after execute.
+      extractAttachments: (text: string) => {
+        const attachments = resultImages
+        resultImages = []
+        return { text, attachments }
+      },
+      extraParts: async (_text: string, attachments: unknown[]) =>
+        options.context?.vision
+          ? (attachments as string[]).map((url) => ({ type: 'image_url', image_url: { url } }))
+          : [],
     },
     gate: { approve: async () => true },
     limit: {

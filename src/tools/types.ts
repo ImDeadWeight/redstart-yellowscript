@@ -93,6 +93,9 @@ export interface ToolResult {
    * diff review, and the user is the only thing that turns it into bytes.
    */
   pendingWrite?: PendingWrite
+  /** Images (data URLs) that go with the text, e.g. a page screenshot. Sent to
+   *  the model only when it reads images; never shown on the card. */
+  images?: string[]
   /**
    * A shell command the model wants run, planned but NOT yet executed.
    * Phase 4.1's `ys_run_command` returns this for an always-ask confirmation:

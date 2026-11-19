@@ -21,6 +21,7 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
+import { findBrowser } from './tools/browser-check.ts'
 import { buildWorkspaceContext } from './tools/workspace-context.ts'
 import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
@@ -163,6 +164,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnostics: diagnosticsProvider,
     editorState: editorStateProvider,
     processes: backgroundProcesses,
+    browser: {
+      // Looked up on use, so a browser installed later is found.
+      browser: () => findBrowser(),
+      screenshotDir: () => {
+        const root = workspaceRoots()[0]
+        return root ? nodePath.join(root, PLAN_DIR, 'screenshots') : null
+      },
+    },
   })
   const roots = workspaceRoots()
   output.info(

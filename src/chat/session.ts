@@ -81,6 +81,8 @@ export interface SessionDeps {
   context?: () => ContextTracker | null
   /** Round trips before the person is asked whether to keep going. */
   maxTurns?: () => number
+  /** The plan changed (null: cleared), so the host can keep it on disk. */
+  onPlanChanged?: (steps: PlanStep[] | null) => void
   /** After an applied write: the problems now in those files, for the model. */
   diagnosticsAfterWrite?: (files: string[]) => Promise<string | null>
   /** Older messages of a run were trimmed to fit the window (for the log). */
@@ -182,6 +184,7 @@ export class ChatSession {
     this.plan = null
     this.emitState()
     this.deps.onPersist?.()
+    this.deps.onPlanChanged?.(null)
   }
 
   /** At the turn limit: keep going (true) or stop. */
@@ -351,6 +354,7 @@ export class ChatSession {
                 this.plan = steps.map((step) => ({ ...step }))
                 this.emitState()
                 this.deps.onPersist?.()
+                this.deps.onPlanChanged?.(this.plan)
               },
             },
             askContinue: (signal) => this.waitAtLimit(signal),

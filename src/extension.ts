@@ -21,6 +21,10 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
+import * as nodeFs from 'node:fs'
+import * as nodePath from 'node:path'
+import { PLAN_DIR, PLAN_FILE, formatPlanFile, hasOpenSteps, parsePlanFile } from './chat/plan-file.ts'
+import type { PlanStep } from './agent/agent-core.ts'
 import { ContextTracker } from './agent/context-budget.ts'
 import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
 import {
@@ -531,6 +535,7 @@ function getSession(id: string): ChatSession {
       getClient: () => manager?.activeClient ?? null,
       context: () => contextFor(manager?.activeClient ?? null),
       diagnosticsAfterWrite,
+      onPlanChanged: (steps) => writeWorkspacePlan(steps),
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
       onContextTrimmed: (report) => {
         output?.info(
@@ -596,6 +601,14 @@ function getSession(id: string): ChatSession {
     const conv = conversations.get(id)
     if (conv && (conv.messages.length > 0 || conv.plan)) {
       session.load(conv.messages, conv.plan ?? null)
+    } else {
+      // A fresh conversation carries on the workspace's plan while steps are
+      // open (.yellowscript/PLAN.md, kept by onPlanChanged).
+      const carried = readWorkspacePlan()
+      if (carried) {
+        session.load([], carried)
+        output?.info(`plan: carried ${carried.length} step(s) from ${PLAN_DIR}/${PLAN_FILE} into a new conversation`)
+      }
     }
   }
   return session
@@ -1174,6 +1187,40 @@ async function revertLastWriteCommand(): Promise<void> {
     const reason = err instanceof Error ? err.message : String(err)
     vscode.window.showErrorMessage(`Could not revert the last write: ${reason}`)
     output?.error('revert failed', err)
+  }
+}
+
+/** The workspace plan's path, or null with no folder open. */
+function workspacePlanPath(): string | null {
+  const root = workspaceRoots()[0]
+  return root ? nodePath.join(root, PLAN_DIR, PLAN_FILE) : null
+}
+
+/** The open plan in the workspace, or null (no file, or every step closed). */
+function readWorkspacePlan(): PlanStep[] | null {
+  const file = workspacePlanPath()
+  if (!file) return null
+  try {
+    const steps = parsePlanFile(nodeFs.readFileSync(file, 'utf8'))
+    return hasOpenSteps(steps) ? steps : null
+  } catch {
+    return null
+  }
+}
+
+/** Keep the plan on disk; a cleared plan removes the file. Never fails a turn. */
+function writeWorkspacePlan(steps: PlanStep[] | null): void {
+  const file = workspacePlanPath()
+  if (!file) return
+  try {
+    if (steps && steps.length > 0) {
+      nodeFs.mkdirSync(nodePath.dirname(file), { recursive: true })
+      nodeFs.writeFileSync(file, formatPlanFile(steps), 'utf8')
+    } else {
+      nodeFs.rmSync(file, { force: true })
+    }
+  } catch (err) {
+    output?.warn(`plan: could not write ${file}: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 

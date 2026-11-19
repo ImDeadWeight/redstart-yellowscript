@@ -8,10 +8,11 @@
 // Two responsibilities that look small and are not:
 //
 // 1. ARGUMENTS ARRIVE AS A STRING AND ARE OFTEN MALFORMED. A local model emits
-//    `arguments` as JSON text, and a 3B-active MoE gets that wrong regularly —
-//    trailing commas, single quotes, a bare value, an empty string. Parsing is
-//    centralised here so every tool gets the same forgiving treatment and the
-//    same correctable error message, rather than each one reinventing it.
+//    `arguments` as JSON text, and a 3B-active MoE gets that wrong regularly.
+//    Parsing is centralised here so every tool gets the same treatment: an
+//    empty string is "no arguments", and anything JSON.parse rejects gets one
+//    correctable error message. Nothing is repaired yet (trailing commas,
+//    single quotes, raw newlines in strings); see PLAN-long-tasks.md item 0.
 //
 // 2. DUPLICATE NAMES MUST BE LOUD. A tools array carrying two entries with one
 //    name silently drops one of them, and the symptom is a tool that "sometimes

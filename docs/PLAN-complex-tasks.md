@@ -1,7 +1,8 @@
 # Plan: complex coding tasks
 
-*As of 2026-11-19. Items 11–13 merged in PR #2. Items 1–10 and Tier 2 are on
-`feat/context-budget`, waiting for the testing suite (item 14) before merge.*
+*As of 2026-11-19. Items 11–13 merged in PR #2. Items 1–10, Tier 2 and the
+testing suite (item 14) are on `feat/context-budget`, ready to merge. The next
+round is [PLAN-long-tasks.md](PLAN-long-tasks.md).*
 
 **Goal.** Yellowscript, driving a local model on the Nest, can build a real
 multi-file project end to end: an original single-screen barrel-dodging
@@ -32,11 +33,12 @@ budget below is sized for that; a larger window relaxes them but changes none.
 | 12 | Shared agent-core loop | Done (PR #1, #2) |
 | 13 | `ys_` tool prefix | Done (PR #2) |
 | T2 | `call_tool` in the approval gate | Done |
-| 14 | Testing suite / coding benchmark | **Built** (`npm run live`, `npm run bench`); first live run is the gate for merging |
-| 15 | Milestone ladder | After 14 |
+| 14 | Testing suite / coding benchmark | Done (`npm run live`, `npm run bench`) |
+| 15 | Milestone ladder | Next; see [PLAN-long-tasks.md](PLAN-long-tasks.md) |
 
-Every item has unit tests; `npm run check` passes 568/568. None of it has run
-against a live Nest yet — that is what item 14 is for.
+Every item has unit tests; `npm run check` passes 615/615. The branch has been
+used against a live Nest; benchmark rows go in
+[bench-results.md](bench-results.md) from the next recorded run.
 
 ---
 
@@ -105,7 +107,7 @@ second command.
 
 ---
 
-## 14 — The testing suite (built; not yet run live)
+## 14 — The testing suite
 
 What exists: `npm run live` (layer 1) and `npm run bench` (layer 2), with 8
 tasks in `bench/tasks/` (7 core, 1 milestone), each with a reference solution
@@ -149,8 +151,6 @@ Each must pass before the next:
 
 ## Housekeeping
 
-- A stale stash holds the first rename attempt, made before PR #1:
-  `ys_ rename on pre-PR1 base (stale)`. Superseded; drop it.
 - redstart-project's `claude/yellowscript-ide-improvements-z2auqo` can be
   deleted: its mascot and icon script now live here (`npm run icons`).
 - redstart-project's notes still say `ws_run_command`

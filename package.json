@@ -163,6 +163,13 @@
           "default": true,
           "description": "Try to reconnect to the last known Nest when a window opens."
         },
+        "redstartYellowscript.agent.maxTurns": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 5,
+          "maximum": 500,
+          "markdownDescription": "Model round trips one message may run before Yellowscript asks whether to keep going. **Continue** grants as many again. A repeated identical tool call is stopped sooner, whatever this says."
+        },
         "redstartYellowscript.approvedWriteTools": {
           "type": "array",
           "default": [],

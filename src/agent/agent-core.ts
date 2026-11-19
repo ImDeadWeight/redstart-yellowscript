@@ -18,6 +18,7 @@ import * as toolCalls from '../vendor/agent-core/tool-calls.mjs'
 import * as parser from '../vendor/agent-core/tool-call-parser.mjs'
 import * as askUser from '../vendor/agent-core/ask-user.mjs'
 import * as updatePlan from '../vendor/agent-core/update-plan.mjs'
+import * as compaction from '../vendor/agent-core/compaction.mjs'
 
 import type {
   AgentLoopParams,
@@ -82,3 +83,10 @@ export type { AskRequest as AskUserRequest }
 
 export const UPDATE_PLAN_TOOL: string = updatePlan.UPDATE_PLAN_TOOL
 export const openSteps: (steps: readonly PlanStep[] | null) => PlanStep[] = updatePlan.openSteps
+
+/** n_ctx and the send budget for the messages: n_ctx minus reply headroom and overhead. */
+export const compactionBudget: (
+  nCtx: number | null | undefined,
+  maxTokens: unknown,
+  overheadTokens?: unknown,
+) => { nCtx: number; usable: number } | null = compaction.compactionBudget

@@ -4,7 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { ChatSession } from './session.ts'
+import { ChatSession, type SessionDeps } from './session.ts'
 import type { HostMessage } from './protocol.ts'
 import type { ChatCompletionRequest, NestClient, StreamHandlers, StreamResult } from '../nest/client.ts'
 import { NestHttpError } from '../nest/types.ts'
@@ -577,7 +577,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     })
 
   /** Scripted round trips; each entry is one model reply. */
-  function scripted(replies: Array<Partial<StreamResult>>) {
+  function scripted(replies: Array<Partial<StreamResult>>, extra: Partial<SessionDeps> = {}) {
     const requests: ChatCompletionRequest[] = []
     const emitted: HostMessage[] = []
     let persisted = 0
@@ -599,6 +599,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
       onPersist: () => {
         persisted++
       },
+      ...extra,
     })
     const states = () => emitted.filter((m) => m.type === 'conversationState').map((m) => (m as Extract<HostMessage, { type: 'conversationState' }>).state)
     return { session, requests, emitted, states, persisted: () => persisted }
@@ -720,7 +721,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
 
   test('waits at the turn limit, and goes on when the person says so', async () => {
     const reads = Array.from({ length: 12 }, () => call('ys_read_file', { path: 'note.txt' }))
-    const h = scripted([...reads, { content: 'Finished.' }])
+    const h = scripted([...reads, { content: 'Finished.' }], { maxTurns: () => 10 })
     const done = h.session.send('read it a lot')
     await until(() => h.session.state().atTurnLimit)
     assert.equal(h.session.state().atTurnLimit, true)

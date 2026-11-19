@@ -28,6 +28,7 @@ import type {
   TurnStats,
 } from './protocol.ts'
 import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
+import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext } from '../tools/types.ts'
@@ -76,6 +77,12 @@ export interface SessionDeps {
   /** The Nest project the workspace is linked to, sent with every request so
    *  Nest adds its instructions and memories. */
   projectId?: () => string | null
+  /** The connection's context window, so a long run is trimmed to fit. */
+  context?: () => ContextTracker | null
+  /** Round trips before the person is asked whether to keep going. */
+  maxTurns?: () => number
+  /** Older messages of a run were trimmed to fit the window (for the log). */
+  onContextTrimmed?: (report: FitReport) => void
   /**
    * The conversation this session owns. Every protocol message it emits is
    * tagged with this id so the webview can route a delta to the right tab even
@@ -345,8 +352,11 @@ export class ChatSession {
               },
             },
             askContinue: (signal) => this.waitAtLimit(signal),
+            context: this.deps.context?.() ?? undefined,
+            ...(this.deps.maxTurns ? { maxIterations: this.deps.maxTurns() } : {}),
             handlers: {
               ...handlers,
+              ...(this.deps.onContextTrimmed ? { onContextTrimmed: this.deps.onContextTrimmed } : {}),
               onToolCall: (call, recovered) => {
                 const card: ToolCardView = {
                   callId: call.id,

@@ -1,6 +1,6 @@
 # Plan: complex coding tasks
 
-*As of 2026-11-19. Branch `feat/ys-prefix-and-core-resync`.*
+*As of 2026-11-19. Items 12, 13 and 11 merged in PR #2; items 1 and 2 on `feat/context-budget`.*
 
 **Goal.** Yellowscript, driving a local model on the Nest, can build a real
 multi-file project end to end: an original single-screen barrel-dodging
@@ -18,10 +18,10 @@ budget below is sized for that; a larger window relaxes them but changes none.
 
 | # | Item | State |
 |---|---|---|
-| 12 | Run the shared agent-core loop | **Done.** PR #1 vendored it; this branch re-syncs to Nest `4a2b8b5` (alpha.16) |
-| 13 | `ys_` tool prefix | **Done** on this branch |
-| 1 | Context budget and compaction | Not started (module vendored, not called) |
-| 2 | Long runs: turn cap and loop detection | Partly: Continue at the limit exists; cap still 10 |
+| 12 | Run the shared agent-core loop | **Done.** PR #1 vendored it; PR #2 re-synced to Nest `4a2b8b5` (alpha.16) |
+| 13 | `ys_` tool prefix | **Done** (PR #2) |
+| 1 | Context budget and compaction | **Done** in a run (`feat/context-budget`); summarising long histories is open |
+| 2 | Long runs: turn cap and loop detection | **Done** (`feat/context-budget`) |
 | 3 | A plan that survives sessions | Partly: `update_plan` checklist exists, not on disk |
 | 4 | Approval friction | Not started |
 | 5 | Reliable command runner | Not started |
@@ -30,13 +30,13 @@ budget below is sized for that; a larger window relaxes them but changes none.
 | 8 | Diagnostics after each write | Not started |
 | 9 | Check the running page | Not started |
 | 10 | `AGENTS.md` and a workspace overview | Not started (a linked Nest project already adds its instructions) |
-| 11 | `ask_user` | **Done** (PR #1); several questions per call on this branch |
+| 11 | `ask_user` | **Done** (PR #1); several questions per call (PR #2) |
 | 14 | Coding benchmark | Not started |
 | 15 | Milestone ladder | Not started |
 
 ---
 
-## Done on this branch
+## Done in PR #2
 
 **Item 12 — finishing the agent-core move.**
 - Re-synced `src/vendor/agent-core` from Nest `main` (`4a2b8b5`). Upstream had
@@ -56,7 +56,39 @@ budget below is sized for that; a larger window relaxes them but changes none.
 - Saved "always allow" settings are migrated on read (`migrateToolNames`).
 - A `ws_*` call replayed from an old transcript runs the `ys_*` tool.
 
-`npm run check`: 497/497 pass. `npm run build`: clean.
+## Done on `feat/context-budget`
+
+**Item 1 — the context budget** (`src/agent/context-budget.ts`).
+- `n_ctx` comes from llama-server's `/props`, through the gateway passthrough
+  (`NestClient.props()`, which also reports vision). Unreadable, it is learned
+  from the first `exceed_context_size_error`, which carries `n_ctx`.
+- The gateway's overhead (system prompt + tools) is learned from every reply:
+  `prompt_n + cache_n` minus the estimate of the messages. 3,000 tokens until
+  the first reply.
+- Before each request of a run, past 85% of the usable window: old tool
+  results become a one-line stub naming the tool, and old calls' long string
+  arguments are elided (still valid JSON), oldest first, down to 50%. A single
+  message over 40% is cut to head and tail. User messages and the newest 4
+  messages are never stubbed. Edits are in place, so the prefix is stable
+  and the prompt cache stays warm; the run's record (cards, `toolRuns`) keeps
+  the full text.
+- A refusal anyway: trim harder (half the run) and retry once. A second
+  refusal is reported as before.
+- Each trim is logged to the output channel with before/after numbers.
+
+**Item 2 — long runs.**
+- `DEFAULT_MAX_ITERATIONS` is 40, and `redstartYellowscript.agent.maxTurns`
+  sets it (5–500). Continue still grants as many again.
+- A call with arguments identical to three earlier ones in the run is not
+  run; the model is told why and to change approach.
+
+`npm run check`: 520/520 pass. Not yet run against a live Nest.
+
+**Still open under item 1.** Across turns Yellowscript sends only user and
+assistant text, so history grows slowly, but a very long conversation is
+never summarised. Driving `compaction.mjs`'s summariser (one model call,
+`summaryPrompt`) belongs here once a real conversation hits it. The
+"done when" check — a 30-read run on a 32k model — needs a live Nest.
 
 ---
 
@@ -155,9 +187,10 @@ headless against a real Nest using `sample-workspace` copies:
 
 ## Open questions
 
-- Can the Nest's model read images? That decides whether item 9 returns
-  screenshots or only console and DOM text.
-- What is the real `n_ctx` on the Nest profile used for coding?
+- Can the Nest's model read images? No longer a blocker: `NestClient.props()`
+  reports `modalities.vision`, so item 9 returns screenshots only when it can.
+- What is the real `n_ctx` on the Nest profile used for coding? Logged on
+  connect now (`context: n_ctx …` in the output channel).
 - Where does the Redstart website live, and what stack does it use?
 
 ## Housekeeping

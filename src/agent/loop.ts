@@ -33,7 +33,7 @@
 // =============================================================================
 
 import type { ChatCompletionRequest, StreamHandlers, StreamResult } from '../nest/client.ts'
-import type { ToolCall } from '../nest/types.ts'
+import { NestHttpError, type ToolCall } from '../nest/types.ts'
 import type { ToolCallDelta, StreamTimings } from '../nest/streaming.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { PendingCommand, PendingWrite, ToolContext, ToolResult } from '../tools/types.ts'
@@ -45,16 +45,33 @@ import {
   type AgentPorts,
   type AgentToolCall,
 } from './agent-core.ts'
+import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
 
 /**
- * How many model round trips one user message may cost.
+ * How many model round trips one user message may cost before the person is
+ * asked whether to keep going (Continue grants as many again).
  *
  * Each iteration is a full generation, so on a local model this is also a
- * wall-clock budget. Ten is enough for read → think → read again → answer,
- * and short enough that a loop caused by a confused model is noticed rather
- * than endured.
+ * wall-clock budget. A multi-file task needs dozens; a confused model is
+ * caught sooner by the repeat check below than by this cap.
  */
-export const DEFAULT_MAX_ITERATIONS = 10
+export const DEFAULT_MAX_ITERATIONS = 40
+
+/**
+ * The same call (tool and arguments) this many times in one run is a loop:
+ * the result cannot change, so the call is not run again and the model is
+ * told why. A write that failed and is retried unchanged is the usual case.
+ */
+export const MAX_IDENTICAL_CALLS = 3
+
+/** What the model reads instead of a repeated call's result. */
+export function repeatedCallResult(name: string, times: number): string {
+  return (
+    `Not run: you have called ${name} with these exact arguments ${times} times in this task, ` +
+    'and the result will not change. Use what the earlier results said, try a different approach, ' +
+    'or tell the user what is blocking you.'
+  )
+}
 
 /** Just the part of NestClient the loop needs, so tests can supply a fake. */
 export interface CompletionStreamer {
@@ -102,6 +119,8 @@ export interface AgentLoopHandlers extends StreamHandlers {
   onToolResult?: (call: ToolCall, result: ToolResult) => void
   /** A new round trip is starting; `iteration` is 1-based. */
   onIteration?: (iteration: number) => void
+  /** Older messages were trimmed to fit the context window before a request. */
+  onContextTrimmed?: (report: FitReport) => void
 }
 
 /**
@@ -152,6 +171,9 @@ export interface AgentLoopOptions {
   plan?: AgentPorts['plan']
   /** The turn limit was reached: may the flow go on? Absent: no. */
   askContinue?: (signal?: AbortSignal) => Promise<boolean>
+  /** The connection's context window. Absent: no trimming, and a request
+   *  that overflows fails as it always did. */
+  context?: ContextTracker | undefined
 }
 
 /**
@@ -225,6 +247,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   const toolRuns: ToolRun[] = []
 
   let iterations = 0
+  /** How often each exact call (name + arguments) has been asked for. */
+  const callCounts = new Map<string, number>()
   let hitTurnCap = false
   let streamCut = false
   let last: StreamResult | undefined
@@ -234,7 +258,19 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
       streamTurn: async ({ acc, messages: turnMessages, signal: turnSignal }) => {
         iterations++
         handlers.onIteration?.(iterations)
-        const result = await options.client.streamChatCompletion(
+        const context = options.context
+        // Fit the run to the window, editing its messages in place (see
+        // context-budget.ts). `force` after the server refused: its numbers
+        // beat the estimate.
+        const fit = async (force: boolean) => {
+          if (!context) return
+          await context.ready(turnSignal)
+          const limits = context.limits()
+          if (!limits) return
+          const report = fitMessages(turnMessages as BudgetMessage[], limits, force)
+          if (report.stubbed || report.shrunk || report.capped) handlers.onContextTrimmed?.(report)
+        }
+        const send = () => options.client.streamChatCompletion(
           {
             ...options.request,
             messages: toWire(turnMessages),
@@ -257,6 +293,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           },
           turnSignal,
         )
+        await fit(false)
+        let estimate = totalTokens(turnMessages as BudgetMessage[])
+        let result: StreamResult
+        try {
+          result = await send()
+        } catch (err) {
+          // Too big after all: llama-server says how big the window is. Trim
+          // to that and try once more; a second refusal is reported as usual.
+          if (!context || !(err instanceof NestHttpError) || !err.contextExceeded) throw err
+          context.recordExceeded(err.contextExceeded.nCtx, err.contextExceeded.promptTokens, estimate)
+          await fit(true)
+          estimate = totalTokens(turnMessages as BudgetMessage[])
+          result = await send()
+        }
+        // The prompt the server really processed: what the overhead is.
+        if (context && typeof result.timings?.prompt_n === 'number') {
+          context.recordPrompt(result.timings.prompt_n + (result.timings.cache_n ?? 0), estimate)
+        }
         last = result
         // The client's assembled strings are the record; the deltas paint.
         acc.content = result.content
@@ -278,8 +332,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         const recovered = call.id.startsWith(FALLBACK_ID_PREFIX)
         const toolCall = call as ToolCall
         handlers.onToolCall?.(toolCall, recovered)
-        const toolResult = await options.tools.execute(call.function.name, call.function.arguments, options.toolContext)
-        const resultForModel = await review(toolResult, options)
+        const signature = `${call.function.name}\u0000${call.function.arguments.trim()}`
+        const times = (callCounts.get(signature) ?? 0) + 1
+        callCounts.set(signature, times)
+        const resultForModel = times > MAX_IDENTICAL_CALLS
+          ? {
+              content: repeatedCallResult(call.function.name, times - 1),
+              isError: true,
+              summary: 'Not run: repeated call',
+              truncated: false,
+            }
+          : await review(await options.tools.execute(call.function.name, call.function.arguments, options.toolContext), options)
         handlers.onToolResult?.(toolCall, resultForModel)
         toolRuns.push({ call: toolCall, result: resultForModel, recovered })
         // A failure goes back as content, not as an exception: the model needs

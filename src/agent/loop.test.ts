@@ -11,6 +11,8 @@ import {
   type CompletionStreamer,
 } from './loop.ts'
 import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
+import { ContextTracker } from './context-budget.ts'
+import { NestHttpError } from '../nest/types.ts'
 import { createToolRegistry } from '../tools/registry.ts'
 import type { PendingWrite, Tool, ToolContext } from '../tools/types.ts'
 import type { EditorState } from '../tools/editor-context.ts'
@@ -575,5 +577,107 @@ describe('runAgentLoop — agent-core behaviour', () => {
     assert.equal(asked, 1)
     assert.equal(result.stopReason, 'complete')
     assert.equal(result.content, 'done')
+  })
+})
+
+// --- Long runs: the repeat check and the context budget ----------------------
+
+describe('runAgentLoop — long runs', () => {
+  test('a call repeated with identical arguments is not run past the limit', async () => {
+    const same = () => streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] })
+    const client = scriptedStreamer([same(), same(), same(), same(), same(), streamResult({ content: 'Giving up.' })])
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
+
+    const notRun = result.toolRuns.filter((r) => r.result.summary === 'Not run: repeated call')
+    assert.equal(result.toolRuns.length, 5)
+    assert.equal(notRun.length, 2, 'calls 4 and 5 are refused')
+    assert.match(notRun[0]!.result.content, /3 times in this task/)
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('different arguments are not a repeat', async () => {
+    const client = scriptedStreamer([
+      ...Array.from({ length: 5 }, (_, i) =>
+        streamResult({ toolCalls: [callDelta('ys_read_file', `{"path":"a.txt","offset":${i + 1}}`)] }),
+      ),
+      streamResult({ content: 'done' }),
+    ])
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
+    assert.ok(result.toolRuns.every((r) => r.result.summary !== 'Not run: repeated call'))
+  })
+
+  test('the default cap allows a long task', () => {
+    assert.ok(DEFAULT_MAX_ITERATIONS >= 40)
+  })
+
+  /** A workspace file big enough that a few reads fill a small window. */
+  const bigFile = path.join(base, 'big.txt')
+  fs.writeFileSync(bigFile, Array.from({ length: 400 }, (_, i) => `line ${i} ${'x'.repeat(40)}`).join('\n'))
+  const readBig = (i: number) =>
+    streamResult({ toolCalls: [{ index: 0, id: `r${i}`, function: { name: 'ys_read_file', arguments: `{"path":"big.txt","offset":${i + 1}}` } }] })
+
+  test('trims old results before a request that would overflow', async () => {
+    const client = scriptedStreamer([...Array.from({ length: 6 }, (_, i) => readBig(i)), streamResult({ content: 'read them all' })])
+    const tracker = new ContextTracker({ props: async () => ({ nCtx: 16_384 }) })
+    const trims: number[] = []
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools: registry(),
+      toolContext,
+      context: tracker,
+      handlers: { onContextTrimmed: (r) => trims.push(r.stubbed) },
+    })
+
+    assert.equal(result.stopReason, 'complete')
+    assert.ok(trims.length > 0, 'a trim happened')
+    const lastRequest = client.requests.at(-1)!
+    const stubs = lastRequest.messages.filter((m) => m.role === 'tool' && String(m.content).startsWith('[Earlier result of ys_read_file'))
+    assert.ok(stubs.length > 0)
+    assert.equal(lastRequest.messages[0]!.content, 'read a.txt', 'the request is never trimmed')
+    // The run's record keeps the full results.
+    assert.ok(result.toolRuns.every((r) => !r.result.content.startsWith('[Earlier result')))
+  })
+
+  test('a context-exceeded refusal teaches n_ctx, trims, and retries once', async () => {
+    const script = [...Array.from({ length: 4 }, (_, i) => readBig(i)), streamResult({ content: 'done' })]
+    const requests: ChatCompletionRequest[] = []
+    let refused = false
+    const client = {
+      requests,
+      async streamChatCompletion(request: ChatCompletionRequest) {
+        requests.push(structuredClone(request))
+        const toolResults = request.messages.filter((m) => m.role === 'tool' && !String(m.content).startsWith('[Earlier'))
+        // The server's window holds two full results; the third overflows.
+        if (toolResults.length >= 3 && !refused) {
+          refused = true
+          throw new NestHttpError(400, 'request exceeds the available context size', undefined, { nCtx: 8_192, promptTokens: 9_500 })
+        }
+        const turn = requests.length - (refused ? 2 : 1)
+        return script[turn] ?? streamResult({ content: 'fallback' })
+      },
+    }
+    // /props unavailable: nothing is known until the server says.
+    const tracker = new ContextTracker({ props: async () => ({ nCtx: null }) })
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, context: tracker })
+
+    assert.equal(refused, true)
+    assert.equal(tracker.contextSize, 8_192)
+    const retried = requests[requests.findIndex((r) => r.messages.filter((m) => m.role === 'tool').length >= 3) + 1]!
+    assert.ok(retried.messages.some((m) => m.role === 'tool' && String(m.content).startsWith('[Earlier result')))
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('a second refusal is reported, not retried forever', async () => {
+    let calls = 0
+    const client = {
+      async streamChatCompletion(): Promise<StreamResult> {
+        calls++
+        throw new NestHttpError(400, 'too big', undefined, { nCtx: 4_096 })
+      },
+    }
+    const tracker = new ContextTracker({ props: async () => ({ nCtx: 4_096 }) })
+    await assert.rejects(runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, context: tracker }), /too big/)
+    assert.equal(calls, 2)
   })
 })

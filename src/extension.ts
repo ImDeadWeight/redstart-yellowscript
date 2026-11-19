@@ -21,6 +21,8 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
+import { ContextTracker } from './agent/context-budget.ts'
+import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
 import {
   EMPTY_CONVERSATION_STATE,
   type ConversationView,
@@ -387,6 +389,25 @@ export function deactivate(): void {
  * Arguments are logged trimmed: they are model-authored and can be a whole file
  * of content on a Phase 3 write call.
  */
+/**
+ * One context tracker per connected client: n_ctx is read from the Nest once
+ * (llama-server's /props), and the gateway's overhead is learned from replies.
+ * Keyed weakly, so a reconnect (a new client) starts fresh.
+ */
+const contextTrackers = new WeakMap<NestClient, ContextTracker>()
+function contextFor(client: NestClient | null): ContextTracker | null {
+  if (!client) return null
+  let tracker = contextTrackers.get(client)
+  if (!tracker) {
+    tracker = new ContextTracker(client)
+    contextTrackers.set(client, tracker)
+    void tracker.ready().then(() => {
+      output?.info(`context: n_ctx ${tracker!.contextSize ?? 'unknown (learned from the first refusal)'}`)
+    })
+  }
+  return tracker
+}
+
 function logToolActivity(message: HostMessage): void {
   if (message.type === 'tool/call') {
     const args = message.arguments.length > 300 ? `${message.arguments.slice(0, 300)}…` : message.arguments
@@ -479,6 +500,15 @@ function getSession(id: string): ChatSession {
   if (!session) {
     session = new ChatSession({
       getClient: () => manager?.activeClient ?? null,
+      context: () => contextFor(manager?.activeClient ?? null),
+      maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
+      onContextTrimmed: (report) => {
+        output?.info(
+          `context: trimmed to fit (~${report.before} → ~${report.after} of ${report.usable ?? '?'} usable tokens; ` +
+            `${report.stubbed} old results stubbed, ${report.shrunk} calls shrunk, ${report.capped} messages capped)` +
+            (report.overLimit ? '  [STILL OVER the window]' : ''),
+        )
+      },
       onUnauthorized: () => manager?.handleUnauthorized(),
       tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
       toolContext: () => ({ workspaceRoots: workspaceRoots() }),

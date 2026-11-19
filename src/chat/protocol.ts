@@ -95,6 +95,18 @@ export interface QuestionView {
   question: string
   options?: string[]
   multiSelect: boolean
+  /** Two to four questions asked together, shown as tabs. The fields above
+   *  mirror the first, for a view that shows only one. */
+  questions?: QuestionItemView[]
+}
+
+/** One question of a several-question card. */
+export interface QuestionItemView {
+  /** The tab label; absent: "Question N". */
+  header?: string
+  question: string
+  options?: string[]
+  multiSelect: boolean
 }
 
 export interface PlanStepView {
@@ -140,6 +152,8 @@ export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, pla
 export interface AnswerView {
   chosen?: string[]
   text?: string
+  /** A several-question card: one reply per question, in order (null: not answered). */
+  answers?: Array<{ chosen?: string[]; text?: string } | null>
 }
 
 export interface TurnStats {
@@ -411,7 +425,19 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
 function parseAnswer(value: unknown): AnswerView | null {
   if (typeof value !== 'object' || value === null) return null
   const a = value as Record<string, unknown>
-  const out: AnswerView = {}
+  if (Array.isArray(a.answers)) {
+    // At most four, each a reply or null; at least one answered.
+    const answers = a.answers.slice(0, 4).map((r) => (r === null ? null : parseReply(r)))
+    return answers.some((r) => r !== null) ? { answers } : null
+  }
+  return parseReply(a)
+}
+
+/** One reply: at least one pick or some text. */
+function parseReply(value: unknown): { chosen?: string[]; text?: string } | null {
+  if (typeof value !== 'object' || value === null) return null
+  const a = value as Record<string, unknown>
+  const out: { chosen?: string[]; text?: string } = {}
   if (Array.isArray(a.chosen)) {
     const chosen = a.chosen.filter((c): c is string => typeof c === 'string')
     if (chosen.length > 0) out.chosen = chosen

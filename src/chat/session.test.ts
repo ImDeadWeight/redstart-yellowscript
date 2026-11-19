@@ -644,7 +644,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     assert.match(String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content), /Sam/)
   })
 
-  test('several questions in one call are asked in turn and answered one each', async () => {
+  test('several questions in one call are one card, answered together', async () => {
     const h = scripted([
       call('ask_user', {
         questions: [
@@ -657,18 +657,15 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     const done = h.session.send('make a game')
 
     await until(() => h.session.state().question !== null)
-    const first = h.session.state().question!
-    assert.match(first.question, /^Engine \(1 of 2\): Canvas or DOM\?$/)
-    assert.equal(h.session.answer(first.id, { chosen: ['Canvas'] }), true)
-
-    await until(() => h.session.state().question?.id !== first.id && h.session.state().question !== null)
-    const second = h.session.state().question!
-    assert.match(second.question, /^Question 2 \(2 of 2\): Name the hero\?$/)
-    assert.equal(h.session.answer(second.id, null), true)
+    const card = h.session.state().question!
+    assert.equal(card.questions?.length, 2)
+    assert.deepEqual(card.questions?.[0], { header: 'Engine', question: 'Canvas or DOM?', multiSelect: false, options: ['Canvas', 'DOM'] })
+    assert.equal(card.question, 'Canvas or DOM?', 'the first question is mirrored for a one-question view')
+    assert.equal(h.session.answer(card.id, { answers: [{ chosen: ['Canvas'] }, null] }), true)
     await done
 
     const tool = String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content)
-    assert.match(tool, /Canvas/)
+    assert.match(tool, /1\. Canvas or DOM\?\n.*Canvas/)
     assert.match(tool, /did not answer/)
   })
 

@@ -116,6 +116,9 @@ pure view change — streaming continues in background tabs.
   sequentially.
 - **Auto-titled** from the first user prompt (truncated to 40 characters).
 - Transcripts are saved on every message, turn end, and conversation switch.
+- **Drafts**: what you have typed and not sent is kept per conversation,
+  across tab switches and reloads. Closing a chat that holds only a draft
+  sends it to history; closing an empty one deletes it.
 - **Tool cards** show each call on its turn: status, arguments, the one-line
   result, a **Nest** tag for tools that ran on the server, and **recovered**
   when the model wrote the call as text. A finished turn with four or more
@@ -218,12 +221,15 @@ this workspace. A line that chains, pipes or redirects always asks.
 ## Write approval & shadow checkpoints
 
 Before any write is applied, Yellowscript snapshots the pre-write state of
-every affected file into a shadow git repo (`<workspace>/.yellowscript/shadow`)
-and opens a native VSCode diff editor for review.
+every affected file into a shadow git repo (`<workspace>/.yellowscript/shadow`).
+It asks on a card in the chat, listing the files; each file's diff opens in
+VS Code's diff editor from the card. Commands and Nest's tools ask on the same
+card, one at a time.
 
 The user chooses **Apply**, **Apply all in this task** (later writes in the
-same run apply without asking), **Always allow** (remembered per tool per
-workspace), or **Reject**. A deletion always asks. The checkpoint is always
+same run apply without asking), **Always allow edits** (remembered per
+workspace; never offered for a deletion), or **Reject**. A deletion always
+asks. Stopping the run denies anything still waiting. The checkpoint is always
 taken even when auto-approval bypasses the prompt.
 
 **Revert Last Write** restores files from the most recent checkpoint.
@@ -233,7 +239,8 @@ removes the files it created.
 ## MCP tools (Nest integration)
 
 Yellowscript discovers the Nest's MCP tools via `/redstart/mcp-servers` on
-every (re)connect. Server-banned tools are greyed out in the UI and stripped
+every (re)connect, and speaks MCP's Streamable HTTP transport to the URL it
+gives (`…/mcp`): one session per connection, reopened if Nest restarts. Server-banned tools are greyed out in the UI and stripped
 from completions requests server-side — the extension never re-enables them
 client-side.
 
@@ -244,7 +251,7 @@ tagged `(ran on Nest)` in summaries.
 
 Each Nest tool carries an approval rule in its `_meta`: reads run, writes ask
 unless you have chosen **Always allow**, and destructive tools ask on every
-call. Yellowscript asks in a modal before the call reaches Nest.
+call. Yellowscript asks on the chat's approval card before the call reaches Nest.
 
 Nest itself refuses an unapproved destructive call, from any client. When it
 does, Yellowscript posts the decision you just made to `/approvals/:id` and

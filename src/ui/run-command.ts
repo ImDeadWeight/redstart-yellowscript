@@ -1,5 +1,5 @@
 // =============================================================================
-// Host-side command approval for ws_run_command (Phase 4.1).
+// Host-side command approval for ys_run_command (Phase 4.1).
 // =============================================================================
 // Implements the `CommandApprovalGate` port. The model only ever proposes a
 // command; this is where it actually runs — and only after the user has seen it

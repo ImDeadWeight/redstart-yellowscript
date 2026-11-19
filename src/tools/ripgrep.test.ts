@@ -72,7 +72,7 @@ describe('locateRipgrep', () => {
   })
 
   test('returns null when nothing is there, rather than a path that does not work', () => {
-    // The caller disables ws_grep on null. Returning a hopeful path would hand
+    // The caller disables ys_grep on null. Returning a hopeful path would hand
     // the model a tool that fails on every call instead.
     assert.equal(locateRipgrep('/app', { exists: () => false }), null)
   })

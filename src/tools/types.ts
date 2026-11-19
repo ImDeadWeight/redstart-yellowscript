@@ -1,5 +1,5 @@
 // =============================================================================
-// The ws_* tool contract.
+// The ys_* tool contract.
 // =============================================================================
 // Every IDE-local tool implements `Tool`. The agent loop (2.3) executes them,
 // the approval UI (2.4) renders them, and the Nest never sees any of this — it
@@ -7,13 +7,13 @@
 //
 // FOUR RULES, each one a mistake that is otherwise made later:
 //
-// 1. NAMES ARE `ws_`-PREFIXED, ALWAYS. Nest's File System capability is the
+// 1. NAMES ARE `ys_`-PREFIXED, ALWAYS. Nest's File System capability is the
 //    official MCP filesystem server and advertises `read_file`, `write_file`,
 //    `edit_file`, `list_directory`, `search_files` and more. One `tools` array
 //    cannot carry two functions with the same name, and the failure is silent
 //    and dangerous: the model asks for `write_file` meaning the workspace and
 //    gets Nest's configured rootDir instead. See HANDOFF.md correction 1.
-//    `ws_` also gives the recovery parser disjoint name sets to match against.
+//    `ys_` also gives the recovery parser disjoint name sets to match against.
 //
 // 2. A FAILED TOOL RETURNS A RESULT, IT DOES NOT THROW. "File not found" is
 //    information the model needs in order to try something else; an exception
@@ -22,7 +22,7 @@
 //    4 — the model must see the refusal reason or it will retry forever.
 //
 // 3. OUTPUT IS BUDGETED. The reference rig is a 32k-context local model, and a
-//    single unbounded `ws_read_file` on a bundled .js will consume the entire
+//    single unbounded `ys_read_file` on a bundled .js will consume the entire
 //    window and evict the conversation that motivated the call. Every tool
 //    truncates deterministically and SAYS SO in-band, so the model knows it is
 //    looking at a fragment rather than silently reasoning about a whole file it
@@ -57,7 +57,7 @@ export interface JsonSchema {
 }
 
 export interface ToolDefinition {
-  /** Must start with `ws_` — see rule 1. `assertWorkspaceToolName` enforces it. */
+  /** Must start with `ys_` — see rule 1. `assertWorkspaceToolName` enforces it. */
   name: string
   /** Written for the model, not for a human reader. State what the tool does,
    *  what it refuses to do, and what it costs — a model that knows a tool
@@ -95,7 +95,7 @@ export interface ToolResult {
   pendingWrite?: PendingWrite
   /**
    * A shell command the model wants run, planned but NOT yet executed.
-   * Phase 4.1's `ws_run_command` returns this for an always-ask confirmation:
+   * Phase 4.1's `ys_run_command` returns this for an always-ask confirmation:
    * the host shows the command verbatim and only runs it on the user's go-ahead.
    * Unlike `pendingWrite`, nothing is a "diff" — the value is the captured output
    * the model reads back, so the card shows the command exactly as it will run.
@@ -184,9 +184,9 @@ export function toolError(content: string, summary?: string): ToolResult {
  * complementary check against the live Nest tool list.
  */
 export function assertWorkspaceToolName(name: string): string {
-  if (!name.startsWith('ws_')) {
+  if (!name.startsWith('ys_')) {
     throw new Error(
-      `Tool name "${name}" must start with "ws_" — unprefixed names collide with the Nest's own filesystem tools`,
+      `Tool name "${name}" must start with "ys_" — unprefixed names collide with the Nest's own filesystem tools`,
     )
   }
   return name

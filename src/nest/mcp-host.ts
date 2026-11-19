@@ -118,7 +118,7 @@ export interface McpHostOptions {
   openStream: (url: string) => Promise<McpSseStream>
   /** Re-fetch the tool list when the connection is (re)established. */
   onTools: (tools: readonly McpTool[]) => void
-  /** The full merged set — ws_ tools plus Nest tools — after a re-list. */
+  /** The full merged set — ys_ tools plus Nest tools — after a re-list. */
   onConnection: (conn: McpConnection) => void
   onError: (err: Error) => void
 }

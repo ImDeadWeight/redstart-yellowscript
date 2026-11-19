@@ -1,5 +1,5 @@
 // =============================================================================
-// Workspace path containment — the guard every ws_* tool goes through.
+// Workspace path containment — the guard every ys_* tool goes through.
 // =============================================================================
 // Reimplemented from redstart-nest's electron/main/path-scope.mjs (@ dde78ce).
 // HANDOFF.md section 6 calls for exactly this: the *test cases* transplant, the
@@ -75,7 +75,7 @@ function comparable(p: string): string {
 /**
  * Resolve symlinks on the deepest ancestor of `p` that actually exists.
  *
- * The target itself may legitimately not exist — `ws_read_file` on a missing
+ * The target itself may legitimately not exist — `ys_read_file` on a missing
  * file must fail as "not found", not as "escape", and Phase 3's write tools
  * address files before creating them. Every escape still has to travel through
  * some directory that *does* exist, so realpath-ing the existing portion is

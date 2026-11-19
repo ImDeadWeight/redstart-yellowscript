@@ -25,7 +25,7 @@ describe('assembleToolCalls', () => {
   test('joins a name and arguments split across many chunks', () => {
     // The wire format: id and name up front, then arguments a slice at a time.
     const calls = assembleToolCalls([
-      delta({ index: 0, id: 'call_1', function: { name: 'ws_read_file', arguments: '{"pa' } }),
+      delta({ index: 0, id: 'call_1', function: { name: 'ys_read_file', arguments: '{"pa' } }),
       delta({ index: 0, function: { arguments: 'th":"a' } }),
       delta({ index: 0, function: { arguments: '.txt"}' } }),
     ])
@@ -33,30 +33,30 @@ describe('assembleToolCalls', () => {
     assert.deepEqual(calls[0], {
       id: 'call_1',
       type: 'function',
-      function: { name: 'ws_read_file', arguments: '{"path":"a.txt"}' },
+      function: { name: 'ys_read_file', arguments: '{"path":"a.txt"}' },
     })
   })
 
   test('keeps parallel calls separate by index', () => {
     const calls = assembleToolCalls([
-      delta({ index: 0, id: 'a', function: { name: 'ws_read_file', arguments: '{"path":"' } }),
-      delta({ index: 1, id: 'b', function: { name: 'ws_glob', arguments: '{"pattern":"' } }),
+      delta({ index: 0, id: 'a', function: { name: 'ys_read_file', arguments: '{"path":"' } }),
+      delta({ index: 1, id: 'b', function: { name: 'ys_glob', arguments: '{"pattern":"' } }),
       delta({ index: 0, function: { arguments: 'one.txt"}' } }),
       delta({ index: 1, function: { arguments: '*.ts"}' } }),
     ])
     assert.deepEqual(
       calls.map((c) => [c.function.name, c.function.arguments]),
       [
-        ['ws_read_file', '{"path":"one.txt"}'],
-        ['ws_glob', '{"pattern":"*.ts"}'],
+        ['ys_read_file', '{"path":"one.txt"}'],
+        ['ys_glob', '{"pattern":"*.ts"}'],
       ],
     )
   })
 
   test('returns calls in index order regardless of arrival order', () => {
     const calls = assembleToolCalls([
-      delta({ index: 2, id: 'c', function: { name: 'ws_grep', arguments: '{}' } }),
-      delta({ index: 0, id: 'a', function: { name: 'ws_read_file', arguments: '{}' } }),
+      delta({ index: 2, id: 'c', function: { name: 'ys_grep', arguments: '{}' } }),
+      delta({ index: 0, id: 'a', function: { name: 'ys_read_file', arguments: '{}' } }),
     ])
     assert.deepEqual(calls.map((c) => c.id), ['a', 'c'])
   })
@@ -64,7 +64,7 @@ describe('assembleToolCalls', () => {
   test('treats a missing index as the first call rather than dropping it', () => {
     // Some servers omit index when there is only ever one call.
     const calls = assembleToolCalls([
-      { function: { name: 'ws_read_file', arguments: '{}' } } as unknown as ToolCallDelta,
+      { function: { name: 'ys_read_file', arguments: '{}' } } as unknown as ToolCallDelta,
     ])
     assert.equal(calls.length, 1)
   })
@@ -72,7 +72,7 @@ describe('assembleToolCalls', () => {
   test('synthesises an id when the server sends none', () => {
     // The id is what matches a result back to its call; without one a
     // multi-call turn misattributes answers.
-    const calls = assembleToolCalls([delta({ index: 0, function: { name: 'ws_glob', arguments: '{}' } })])
+    const calls = assembleToolCalls([delta({ index: 0, function: { name: 'ys_glob', arguments: '{}' } })])
     assert.ok(calls[0]?.id)
   })
 
@@ -154,12 +154,12 @@ describe('runAgentLoop — basic flow', () => {
 
     const tools = client.requests[0]?.tools as Array<{ function: { name: string } }>
     assert.ok(tools)
-    assert.ok(tools.some((entry) => entry.function.name === 'ws_read_file'))
+    assert.ok(tools.some((entry) => entry.function.name === 'ys_read_file'))
   })
 
   test('executes a tool call and feeds the result back', async () => {
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
       streamResult({ content: 'The file says: file contents here' }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -173,7 +173,7 @@ describe('runAgentLoop — basic flow', () => {
 
   test('the second request carries the assistant call and the tool result', async () => {
     const client = scriptedStreamer([
-      streamResult({ content: 'Let me look.', toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ content: 'Let me look.', toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
       streamResult({ content: 'Done.' }),
     ])
     await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -196,8 +196,8 @@ describe('runAgentLoop — basic flow', () => {
     const client = scriptedStreamer([
       streamResult({
         toolCalls: [
-          callDelta('ws_read_file', '{"path":"a.txt"}', 0),
-          callDelta('ws_list_directory', '{"path":"."}', 1),
+          callDelta('ys_read_file', '{"path":"a.txt"}', 0),
+          callDelta('ys_list_directory', '{"path":"."}', 1),
         ],
       }),
       streamResult({ content: 'Both done.' }),
@@ -215,7 +215,7 @@ describe('runAgentLoop — basic flow', () => {
   test('a failing tool reports back as content rather than throwing', async () => {
     // The model needs to read why and try something else.
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"missing.txt"}')] }),
+      streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"missing.txt"}')] }),
       streamResult({ content: 'It does not exist.' }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -231,7 +231,7 @@ describe('runAgentLoop — basic flow', () => {
       streamResult({ content: 'Retrying.' }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
-    assert.match(result.toolRuns[0]?.result.content ?? '', /ws_read_file/)
+    assert.match(result.toolRuns[0]?.result.content ?? '', /ys_read_file/)
   })
 })
 
@@ -239,7 +239,7 @@ describe('runAgentLoop — recovery of malformed calls', () => {
   test('recovers a call the model wrote as text instead of tool_calls', async () => {
     // Without this the model narrates work it never did.
     const client = scriptedStreamer([
-      streamResult({ content: 'ws_read_file({"path": "a.txt"})' }),
+      streamResult({ content: 'ys_read_file({"path": "a.txt"})' }),
       streamResult({ content: 'Here it is.' }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -253,7 +253,7 @@ describe('runAgentLoop — recovery of malformed calls', () => {
     const client = scriptedStreamer([
       streamResult({
         content: 'I have read the file for you.',
-        reasoning: 'ws_read_file({"path": "a.txt"})',
+        reasoning: 'ys_read_file({"path": "a.txt"})',
       }),
       streamResult({ content: 'Done.' }),
     ])
@@ -267,15 +267,15 @@ describe('runAgentLoop — recovery of malformed calls', () => {
     // twice.
     const client = scriptedStreamer([
       streamResult({
-        content: 'I will also mention ws_glob({"pattern":"*.ts"}) in passing.',
-        toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')],
+        content: 'I will also mention ys_glob({"pattern":"*.ts"}) in passing.',
+        toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')],
       }),
       streamResult({ content: 'Done.' }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
 
     assert.equal(result.toolRuns.length, 1)
-    assert.equal(result.toolRuns[0]?.call.function.name, 'ws_read_file')
+    assert.equal(result.toolRuns[0]?.call.function.name, 'ys_read_file')
     assert.equal(result.toolRuns[0]?.recovered, false)
   })
 
@@ -293,7 +293,7 @@ describe('runAgentLoop — termination', () => {
     // forever.
     const forever: CompletionStreamer = {
       async streamChatCompletion() {
-        return streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] })
+        return streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] })
       },
     }
     const result = await runAgentLoop({
@@ -312,7 +312,7 @@ describe('runAgentLoop — termination', () => {
   test('defaults to a bounded number of iterations', async () => {
     const forever: CompletionStreamer = {
       async streamChatCompletion() {
-        return streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] })
+        return streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] })
       },
     }
     const result = await runAgentLoop({ client: forever, request: baseRequest, tools: registry(), toolContext })
@@ -358,7 +358,7 @@ describe('runAgentLoop — termination', () => {
 describe('runAgentLoop — reporting', () => {
   test('accumulates content across iterations', async () => {
     const client = scriptedStreamer([
-      streamResult({ content: 'Let me check.', toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ content: 'Let me check.', toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
       streamResult({ content: 'It contains text.' }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -369,7 +369,7 @@ describe('runAgentLoop — reporting', () => {
   test('notifies handlers for each call and result', async () => {
     const seen: string[] = []
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
       streamResult({ content: 'Done.' }),
     ])
     await runAgentLoop({
@@ -386,15 +386,15 @@ describe('runAgentLoop — reporting', () => {
 
     assert.deepEqual(seen, [
       'iteration:1',
-      'call:ws_read_file',
-      'result:ws_read_file:false',
+      'call:ys_read_file',
+      'result:ys_read_file:false',
       'iteration:2',
     ])
   })
 
   test('carries timings and model from the final round trip', async () => {
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
       streamResult({ content: 'Done.', model: 'qwen', timings: { predicted_n: 10, predicted_ms: 100 } }),
     ])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -405,7 +405,7 @@ describe('runAgentLoop — reporting', () => {
   test('does not mutate the caller’s message array', async () => {
     const request: ChatCompletionRequest = { messages: [{ role: 'user', content: 'hi' }] }
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] }),
+      streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] }),
       streamResult({ content: 'Done.' }),
     ])
     await runAgentLoop({ client, request, tools: registry(), toolContext })
@@ -430,15 +430,15 @@ describe('runAgentLoop — reporting', () => {
       ],
     }
     const writeTool: Tool = {
-      definition: { name: 'ws_edit_file', description: 'plan a write', inputSchema: { type: 'object', properties: {} } },
+      definition: { name: 'ys_edit_file', description: 'plan a write', inputSchema: { type: 'object', properties: {} } },
       async execute() {
         return { content: 'planned', isError: false, summary: 'planned', truncated: false, pendingWrite: planned }
       },
     }
     const customRegistry = {
       tools: [writeTool],
-      names: ['ws_edit_file'],
-      payload: () => [{ type: 'function', function: { name: 'ws_edit_file', description: '', parameters: {} } }],
+      names: ['ys_edit_file'],
+      payload: () => [{ type: 'function', function: { name: 'ys_edit_file', description: '', parameters: {} } }],
       get: () => writeTool,
       execute: (name: string, args: string, ctx: ToolContext) => writeTool.execute(args, ctx),
     } as unknown as ReturnType<typeof registry>
@@ -446,7 +446,7 @@ describe('runAgentLoop — reporting', () => {
     const gateCalls: PendingWrite[] = []
     let diskWritten = ''
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_edit_file', '{}')] }),
+      streamResult({ toolCalls: [callDelta('ys_edit_file', '{}')] }),
       streamResult({ content: 'Applied per your approval.' }),
     ])
 
@@ -488,7 +488,7 @@ describe('runAgentLoop — agent-core behaviour', () => {
       toolContext,
       ask: {
         user: async (request) => {
-          asked.push(request.question)
+          asked.push(request.questions[0]!.question)
           return { chosen: ['a.txt'] }
         },
       },
@@ -526,7 +526,7 @@ describe('runAgentLoop — agent-core behaviour', () => {
 
   test('runs at most the per-reply limit of calls and answers the rest', async () => {
     const many = Array.from({ length: MAX_TOOL_CALLS_PER_REPLY + 3 }, (_, i) =>
-      callDelta('ws_read_file', '{"path":"a.txt"}', i),
+      callDelta('ys_read_file', '{"path":"a.txt"}', i),
     )
     const client = scriptedStreamer([streamResult({ toolCalls: many }), streamResult({ content: 'ok' })])
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -540,7 +540,7 @@ describe('runAgentLoop — agent-core behaviour', () => {
     // llama-server fails the whole request when one call's arguments in the
     // history do not parse.
     const client = scriptedStreamer([
-      streamResult({ toolCalls: [callDelta('ws_read_file', '<parameter=path>a.txt')] }),
+      streamResult({ toolCalls: [callDelta('ys_read_file', '<parameter=path>a.txt')] }),
       streamResult({ content: 'sorry' }),
     ])
     await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext })
@@ -556,7 +556,7 @@ describe('runAgentLoop — agent-core behaviour', () => {
       async streamChatCompletion() {
         n++
         return n <= 3
-          ? streamResult({ toolCalls: [callDelta('ws_read_file', '{"path":"a.txt"}')] })
+          ? streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] })
           : streamResult({ content: 'done' })
       },
     }

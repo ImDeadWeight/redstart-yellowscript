@@ -28,9 +28,9 @@ after(() => fs.rmSync(base, { recursive: true, force: true }))
 const ctx: ToolContext = { workspaceRoots: [work] }
 const run = (args: unknown, context: ToolContext = ctx) => listDirectoryTool.execute(args, context)
 
-describe('ws_list_directory — definition', () => {
-  test('is ws_-prefixed so it cannot collide with the Nest filesystem server', () => {
-    assert.equal(listDirectoryTool.definition.name, 'ws_list_directory')
+describe('ys_list_directory — definition', () => {
+  test('is ys_-prefixed so it cannot collide with the Nest filesystem server', () => {
+    assert.equal(listDirectoryTool.definition.name, 'ys_list_directory')
   })
 
   test('requires no arguments — listing the root is the common case', () => {
@@ -38,7 +38,7 @@ describe('ws_list_directory — definition', () => {
   })
 })
 
-describe('ws_list_directory — listing', () => {
+describe('ys_list_directory — listing', () => {
   test('lists the workspace root when no path is given', async () => {
     const result = await run({})
     assert.equal(result.isError, false)
@@ -94,7 +94,7 @@ describe('ws_list_directory — listing', () => {
   })
 })
 
-describe('ws_list_directory — refusals return results, never throw', () => {
+describe('ys_list_directory — refusals return results, never throw', () => {
   test('a directory that does not exist', async () => {
     const result = await run({ path: 'nope' })
     assert.equal(result.isError, true)
@@ -104,7 +104,7 @@ describe('ws_list_directory — refusals return results, never throw', () => {
   test('a file, pointing at the right tool instead', async () => {
     const result = await run({ path: 'readme.md' })
     assert.equal(result.isError, true)
-    assert.match(result.content, /ws_read_file/)
+    assert.match(result.content, /ys_read_file/)
   })
 
   test('a path escaping the workspace', async () => {

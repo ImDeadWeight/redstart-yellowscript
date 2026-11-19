@@ -285,7 +285,7 @@ export type HostMessage =
     }
    /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
     | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
-    /** Phase 4: the current tool-set inventory (local ws_* + live Nest tools), sent
+    /** Phase 4: the current tool-set inventory (local ys_* + live Nest tools), sent
      *  so the webview can render the tool picker and grey out server-banned names.
      *  Each entry carries its origin so the card can show "runs on Nest" vs local. */
     | {

@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_list_directory — what is in a workspace folder.
+// ys_list_directory — what is in a workspace folder.
 // =============================================================================
 
 import * as fsp from 'node:fs/promises'
@@ -26,11 +26,11 @@ export const MAX_ENTRIES = 300
 
 export const listDirectoryTool: Tool = {
   definition: {
-    name: assertWorkspaceToolName('ws_list_directory'),
+    name: assertWorkspaceToolName('ys_list_directory'),
     description:
       'List the contents of a workspace directory, one entry per line, directories first. ' +
       'Directories are shown with a trailing slash and files with their size. ' +
-      'Does not recurse — use ws_glob to match files across a tree. ' +
+      'Does not recurse — use ys_glob to match files across a tree. ' +
       'Nothing outside the workspace can be listed.',
     inputSchema: {
       type: 'object',
@@ -75,7 +75,7 @@ export const listDirectoryTool: Tool = {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code
       if (code === 'ENOENT') return toolError(`${label} does not exist.`)
-      if (code === 'ENOTDIR') return toolError(`${label} is a file, not a directory. Use ws_read_file.`)
+      if (code === 'ENOTDIR') return toolError(`${label} is a file, not a directory. Use ys_read_file.`)
       if (code === 'EACCES' || code === 'EPERM') {
         return toolError(`${label} is not readable (permission denied).`)
       }

@@ -55,7 +55,7 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Sign In to Nest` | Username and password (swapped at once for a key Nest issues to this app), or paste an `rst_` API key |
 | `Yellowscript: Sign Out` | Forget the stored credential, keep the server connection |
 | `Yellowscript: Show Connection Status` | Details view plus the next useful action |
-| `Yellowscript: Inspect Workspace Tools` | Run all `ws_*` tools with probe args and dump results to the output channel |
+| `Yellowscript: Inspect Workspace Tools` | Run all `ys_*` tools with probe args and dump results to the output channel |
 | `Yellowscript: Revert Last Write` | Restore files from the most recent approved write via the shadow checkpoint |
 | `Yellowscript: Open Settings` | Open the Redstart Yellowscript settings page |
 
@@ -71,7 +71,7 @@ to open settings directly.
 | `redstartYellowscript.discovery.timeoutMs` | `400` | Per-host beacon timeout (50–5000 ms). Raise on a slow network. |
 | `redstartYellowscript.autoConnect` | `true` | Reconnect to the last-used Nest when a window opens. |
 | `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
-| `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ws_write_file`, `ws_edit_file`). |
+| `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ys_write_file`, `ys_edit_file`). |
 
 A password is used once: Yellowscript signs in, has Nest issue a key for this
 app (surface `yellowscript`, labelled with this machine's name), ends the
@@ -144,9 +144,9 @@ The webview is Svelte 5 (`src/webview/components/`). Its state is a plain
 reducer, `src/webview/view-model.ts`, tested under `node --test`; the
 components only read it and post what you did.
 
-## Workspace tools (`ws_*`)
+## Workspace tools (`ys_*`)
 
-All tools are `ws_`-prefixed to avoid collisions with Nest's MCP tools.
+All tools are `ys_`-prefixed to avoid collisions with Nest's MCP tools.
 Arguments arrive as raw strings; the registry parses them forgivingly (empty
 string → `{}`, malformed JSON → descriptive error).
 
@@ -154,25 +154,25 @@ string → `{}`, malformed JSON → descriptive error).
 
 | Tool | Description |
 |---|---|
-| `ws_read_file` | Read a file's content (workspace-relative). Truncated at 20k characters. |
-| `ws_list_directory` | List files in a workspace directory with sizes and types. |
-| `ws_glob` | Match files by glob pattern. Uses ripgrep when available; falls back to literal matching. |
-| `ws_grep` | Search file contents by regex. Uses ripgrep when available; falls back gracefully. |
-| `ws_diagnostics` | Return all VSCode diagnostics (errors, warnings, info, hints) with location and message. |
-| `ws_editor_context` | Return active editor state: open file, language, dirty status, cursor, selection, and open files. |
+| `ys_read_file` | Read a file's content (workspace-relative). Truncated at 20k characters. |
+| `ys_list_directory` | List files in a workspace directory with sizes and types. |
+| `ys_glob` | Match files by glob pattern. Uses ripgrep when available; falls back to literal matching. |
+| `ys_grep` | Search file contents by regex. Uses ripgrep when available; falls back gracefully. |
+| `ys_diagnostics` | Return all VSCode diagnostics (errors, warnings, info, hints) with location and message. |
+| `ys_editor_context` | Return active editor state: open file, language, dirty status, cursor, selection, and open files. |
 
 ### Write tools (with shadow-git checkpoint)
 
 | Tool | Description |
 |---|---|
-| `ws_write_file` | Propose writing a complete file (new or full replacement). Checkpointed for revert. |
-| `ws_edit_file` | Propose editing a file via unified diff. Diff must match current content; mismatches rejected. |
+| `ys_write_file` | Propose writing a complete file (new or full replacement). Checkpointed for revert. |
+| `ys_edit_file` | Propose editing a file via unified diff. Diff must match current content; mismatches rejected. |
 
 ### Command tool
 
 | Tool | Description |
 |---|---|
-| `ws_run_command` | Propose running a shell command in the workspace. Always-ask. Output captured from the integrated terminal. |
+| `ys_run_command` | Propose running a shell command in the workspace. Always-ask. Output captured from the integrated terminal. |
 
 ## Write approval & shadow checkpoints
 
@@ -193,7 +193,7 @@ every (re)connect. Server-banned tools are greyed out in the UI and stripped
 from completions requests server-side — the extension never re-enables them
 client-side.
 
-Nest tools are merged with the local `ws_*` set (disjointness asserted) and
+Nest tools are merged with the local `ys_*` set (disjointness asserted) and
 tagged `(ran on Nest)` in summaries.
 
 ### Approvals for Nest's tools
@@ -218,6 +218,7 @@ npm run check      # typecheck + unit tests
 npm run watch      # esbuild in watch mode (used by F5)
 npm run build      # esbuild production bundle
 npm run smoke      # live Nest smoke test
+npm run icons      # regenerate media/ icons from assets/mascot/
 npm run package    # check + build + vsce package
 ```
 

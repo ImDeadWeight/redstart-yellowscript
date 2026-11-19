@@ -1,7 +1,7 @@
 // =============================================================================
 // Locating and running VSCode's bundled ripgrep.
 // =============================================================================
-// Both ws_glob and ws_grep run through here, so the two agree about what is in
+// Both ys_glob and ys_grep run through here, so the two agree about what is in
 // the workspace. That matters more than it sounds: rg honours .gitignore and
 // `workspace.findFiles` does NOT (its own docs say `files.exclude` applies "but
 // not search.exclude", and ignore files are not mentioned). A glob that lists
@@ -10,7 +10,7 @@
 // WHY RIPGREP AND NOT A NODE REGEX WALK — this is a safety property, not a
 // performance preference:
 //
-//   ws_grep's pattern comes from the model, which can be influenced by file
+//   ys_grep's pattern comes from the model, which can be influenced by file
 //   content it just read. A pattern like (a+)+$ makes JS RegExp backtrack
 //   catastrophically, SYNCHRONOUSLY, on the extension host's event loop. There
 //   is no timeout that stops it and no way to abort it — VSCode simply freezes.
@@ -81,7 +81,7 @@ export function ripgrepCandidatePaths(
  * The first candidate that exists, or null.
  *
  * Call once at activation, not per search: a missing binary should disable
- * ws_grep with a stated reason rather than handing the model a tool that fails
+ * ys_grep with a stated reason rather than handing the model a tool that fails
  * on every call. HANDOFF.md applies the same rule to missing Nest endpoints —
  * degrade to a disabled feature, never a hard failure.
  */

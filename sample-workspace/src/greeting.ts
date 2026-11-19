@@ -1,4 +1,4 @@
-// The type error below is DELIBERATE. It gives ws_diagnostics something real to
+// The type error below is DELIBERATE. It gives ys_diagnostics something real to
 // report in the Extension Development Host. This file is outside the extension's
 // tsconfig include, so `npm run typecheck` never sees it.
 

@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_grep — search workspace file contents.
+// ys_grep — search workspace file contents.
 // =============================================================================
 // Ripgrep-backed, and that is a safety property rather than a speed one: the
 // pattern comes from the model, which can be influenced by file content it just
@@ -43,7 +43,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
 
   return {
     definition: {
-      name: assertWorkspaceToolName('ws_grep'),
+      name: assertWorkspaceToolName('ys_grep'),
       description: degraded
         ? 'Search the text of workspace files for a LITERAL substring. Regular expressions are ' +
           'not available in this workspace, so the pattern is matched exactly as written. ' +
@@ -91,7 +91,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
     async execute(args: unknown, context: ToolContext): Promise<ToolResult> {
       const pattern = stringArg(args, 'pattern')
       if (pattern === null || pattern === '') {
-        return toolError('ws_grep requires a non-empty "pattern" string argument.')
+        return toolError('ys_grep requires a non-empty "pattern" string argument.')
       }
 
       const scope = stringArg(args, 'path')
@@ -149,7 +149,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
         const hint = degraded ? '' : ' Files excluded by .gitignore are not searched.'
         return toolOk(
           `${banner}No matches for "${pattern}".${hint}`,
-          `ws_grep "${pattern}" — no matches`,
+          `ys_grep "${pattern}" — no matches`,
         )
       }
 
@@ -173,7 +173,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
         `${banner}${header}\n\n${blocks.join('\n\n')}${note}`,
       )
 
-      return toolOk(text, `ws_grep "${pattern}" — ${matches.length} match(es)`, truncated || cut)
+      return toolOk(text, `ys_grep "${pattern}" — ${matches.length} match(es)`, truncated || cut)
     },
   }
 }

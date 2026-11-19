@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_glob and ws_grep.
+// ys_glob and ys_grep.
 // =============================================================================
 // The degraded (no-ripgrep) path is pure Node, so it is exercised on every
 // machine and is where the behavioural assertions live.
@@ -45,7 +45,7 @@ const ctx: ToolContext = { workspaceRoots: [work] }
 
 // --- Degraded mode (no ripgrep) ---------------------------------------------
 
-describe('ws_glob — degraded mode', () => {
+describe('ys_glob — degraded mode', () => {
   const tool = createGlobTool(null)
 
   test('says in its description that .gitignore is not applied', () => {
@@ -112,7 +112,7 @@ describe('ws_glob — degraded mode', () => {
   })
 })
 
-describe('ws_grep — degraded mode', () => {
+describe('ys_grep — degraded mode', () => {
   const tool = createGrepTool(null)
 
   test('advertises literal-only search, not regex it cannot run', () => {
@@ -202,7 +202,7 @@ describe('parseRipgrepLine', () => {
 const RG = process.env.YELLOWSCRIPT_TEST_RIPGREP
 const skipRg = RG ? false : 'set YELLOWSCRIPT_TEST_RIPGREP to run these'
 
-describe('ws_glob — ripgrep', { skip: skipRg }, () => {
+describe('ys_glob — ripgrep', { skip: skipRg }, () => {
   test('honours .gitignore, which is the whole reason for using ripgrep', async () => {
     const result = await createGlobTool(RG as string).execute({ pattern: '**/*.ts' }, ctx)
     assert.equal(result.isError, false)
@@ -218,7 +218,7 @@ describe('ws_glob — ripgrep', { skip: skipRg }, () => {
   })
 })
 
-describe('ws_grep — ripgrep', { skip: skipRg }, () => {
+describe('ys_grep — ripgrep', { skip: skipRg }, () => {
   test('runs a real regex', async () => {
     const result = await createGrepTool(RG as string).execute({ pattern: 'SENT.NEL' }, ctx)
     assert.equal(result.isError, false)

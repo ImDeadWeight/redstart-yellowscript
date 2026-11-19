@@ -12,8 +12,8 @@ import {
 } from './types.ts'
 
 describe('assertWorkspaceToolName', () => {
-  test('accepts a ws_-prefixed name', () => {
-    assert.equal(assertWorkspaceToolName('ws_read_file'), 'ws_read_file')
+  test('accepts a ys_-prefixed name', () => {
+    assert.equal(assertWorkspaceToolName('ys_read_file'), 'ys_read_file')
   })
 
   test('rejects a name that would collide with the Nest filesystem server', () => {
@@ -21,7 +21,7 @@ describe('assertWorkspaceToolName', () => {
     // advertised by Nest's MCP filesystem capability. A duplicate name in one
     // tools array silently shadows one of the two.
     for (const name of ['read_file', 'write_file', 'list_directory', 'search_files']) {
-      assert.throws(() => assertWorkspaceToolName(name), /must start with "ws_"/)
+      assert.throws(() => assertWorkspaceToolName(name), /must start with "ys_"/)
     }
   })
 })

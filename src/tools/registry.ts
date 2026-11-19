@@ -1,5 +1,5 @@
 // =============================================================================
-// The tool registry — one place that knows the whole ws_* set.
+// The tool registry — one place that knows the whole ys_* set.
 // =============================================================================
 // Assembles the tools, renders the `tools` array for /v1/chat/completions, and
 // executes a call by name. The agent loop (2.3) talks to this and to nothing
@@ -20,6 +20,7 @@
 // =============================================================================
 
 import { toolError, toolOk, type JsonSchema, type Tool, type ToolContext, type ToolResult } from './types.ts'
+import { migrateToolName } from './approval.ts'
 import { readFileTool } from './read-file.ts'
 import { listDirectoryTool } from './list-directory.ts'
 import { createGlobTool } from './glob.ts'
@@ -104,10 +105,11 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     },
 
     async execute(name: string, rawArguments: string, context: ToolContext): Promise<ToolResult> {
-      const tool = byName.get(name)
+      // Old transcripts replay pre-rename ws_* calls; route them to ys_*.
+      const tool = byName.get(name) ?? byName.get(migrateToolName(name))
       if (!tool) {
         // Name the alternatives: a model that invented `read_file` can correct
-        // itself to `ws_read_file` if told what exists.
+        // itself to `ys_read_file` if told what exists.
         return toolError(
           `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,
         )
@@ -139,8 +141,8 @@ export interface NestToolRef {
 }
 
 /**
- * Merge local ws_* tools with live Nest MCP tools, enforcing the disjointness
- * invariant (HANDOFF 4.3 / correction 1): no Nest tool name may begin with `ws_`,
+ * Merge local ys_* tools with live Nest MCP tools, enforcing the disjointness
+ * invariant (HANDOFF 4.3 / correction 1): no Nest tool name may begin with `ys_`,
  * and the two sets must not overlap at all.
  *
  * Nest tools are wrapped as `Tool` implementations that delegate to the supplied
@@ -156,13 +158,13 @@ export function mergeNestTools(
   const byName = new Map(local.tools.map((t) => [t.definition.name, t] as const))
 
   for (const nest of nestTools) {
-    // The ws_ namespace is the local tool contract (HANDOFF correction 1). A
+    // The ys_ namespace is the local tool contract (HANDOFF correction 1). A
     // Nest tool leaking in here is the silent, dangerous failure this prevents:
     // the model calls `write_file` intending a workspace write and hits Nest's
     // configured rootDir instead.
-    if (nest.name.startsWith('ws_')) {
+    if (nest.name.startsWith('ys_')) {
       throw new Error(
-        `Nest tool "${nest.name}" collides with the ws_ prefix — refusing to merge`,
+        `Nest tool "${nest.name}" collides with the ys_ prefix — refusing to merge`,
       )
     }
     if (byName.has(nest.name)) {
@@ -214,7 +216,8 @@ export function mergeNestTools(
       return byName.get(name)
     },
     async execute(name: string, rawArguments: string, context: ToolContext): Promise<ToolResult> {
-      const tool = byName.get(name)
+      // Old transcripts replay pre-rename ws_* calls; route them to ys_*.
+      const tool = byName.get(name) ?? byName.get(migrateToolName(name))
       if (!tool) {
         return toolError(
           `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,

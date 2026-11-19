@@ -45,7 +45,7 @@ after(() => {
   fs.rmSync(work, { recursive: true, force: true })
 })
 
-describe('ws_edit_file', () => {
+describe('ys_edit_file', () => {
   it('returns a pending change, not a disk write', async () => {
     const file = path.join(work, 'foo.ts')
     fs.writeFileSync(file, 'a\nb\nc')
@@ -137,7 +137,7 @@ describe('ws_edit_file', () => {
   })
 })
 
-describe('ws_write_file', () => {
+describe('ys_write_file', () => {
   it('proposes a new file', async () => {
     const tool = createWriteFileTool(nodeWriteFs)
     const result = await tool.execute({ path: 'new.ts', content: 'hello' }, ctx)

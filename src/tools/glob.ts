@@ -1,7 +1,7 @@
 // =============================================================================
-// ws_glob — find workspace files by name pattern.
+// ys_glob — find workspace files by name pattern.
 // =============================================================================
-// Backed by ripgrep's --files so it agrees with ws_grep about what is in the
+// Backed by ripgrep's --files so it agrees with ys_grep about what is in the
 // workspace, and so .gitignore is honoured. `workspace.findFiles` was the
 // obvious alternative and is the wrong one: its own docs apply `files.exclude`
 // "but not search.exclude" and say nothing about ignore files, so it returns
@@ -36,7 +36,7 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
 
   return {
     definition: {
-      name: assertWorkspaceToolName('ws_glob'),
+      name: assertWorkspaceToolName('ys_glob'),
       description:
         'Find files in the workspace by glob pattern, e.g. "**/*.ts" or "src/**/test-*.js". ' +
         'Returns workspace-relative paths, not file contents. ' +
@@ -65,12 +65,12 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
     async execute(args: unknown, context: ToolContext): Promise<ToolResult> {
       const pattern = stringArg(args, 'pattern')
       if (pattern === null || pattern.trim() === '') {
-        return toolError('ws_glob requires a "pattern" string argument, e.g. "**/*.ts".')
+        return toolError('ys_glob requires a "pattern" string argument, e.g. "**/*.ts".')
       }
       // A leading "!" is ripgrep's negation. Passing it through would silently
       // return everything EXCEPT what the model asked for.
       if (pattern.startsWith('!')) {
-        return toolError('ws_glob patterns cannot start with "!" (negation is not supported).')
+        return toolError('ys_glob patterns cannot start with "!" (negation is not supported).')
       }
 
       const scope = stringArg(args, 'path')
@@ -116,7 +116,7 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
         // Say why a match might be missing: a model that does not know ignored
         // files are excluded will keep re-running the same search.
         const why = degraded ? '' : ' Files excluded by .gitignore are not searched.'
-        return toolOk(`No files match "${pattern}".${why}`, `ws_glob "${pattern}" — no matches`)
+        return toolOk(`No files match "${pattern}".${why}`, `ys_glob "${pattern}" — no matches`)
       }
 
       const note = truncated ? `\n\n[stopped at ${MAX_GLOB_RESULTS} results — narrow the pattern]` : ''
@@ -124,7 +124,7 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
       const body = `${banner}${found.length} file${found.length === 1 ? '' : 's'} matching "${pattern}":\n\n${found.join('\n')}${note}`
       const { text } = truncateForModel(body)
 
-      return toolOk(text, `ws_glob "${pattern}" — ${found.length} file(s)`, truncated)
+      return toolOk(text, `ys_glob "${pattern}" — ${found.length} file(s)`, truncated)
     },
   }
 }

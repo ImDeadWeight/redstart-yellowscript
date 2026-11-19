@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_read_file — read a workspace file, or a line range of one.
+// ys_read_file — read a workspace file, or a line range of one.
 // =============================================================================
 
 import * as fsp from 'node:fs/promises'
@@ -33,7 +33,7 @@ const BINARY_SNIFF_BYTES = 8_000
 
 export const readFileTool: Tool = {
   definition: {
-    name: assertWorkspaceToolName('ws_read_file'),
+    name: assertWorkspaceToolName('ys_read_file'),
     description:
       'Read a text file from the workspace. Returns the file with 1-based line numbers. ' +
       'Output is truncated if the file is large, so pass `offset` and `limit` to page through ' +
@@ -65,7 +65,7 @@ export const readFileTool: Tool = {
   async execute(args: unknown, context: ToolContext): Promise<ToolResult> {
     const requested = stringArg(args, 'path')
     if (requested === null) {
-      return toolError('ws_read_file requires a "path" string argument.')
+      return toolError('ys_read_file requires a "path" string argument.')
     }
 
     let absolute: string
@@ -85,7 +85,7 @@ export const readFileTool: Tool = {
     }
 
     if (stat.isDirectory()) {
-      return toolError(`${label} is a directory. Use ws_list_directory to see what is in it.`)
+      return toolError(`${label} is a directory. Use ys_list_directory to see what is in it.`)
     }
     if (stat.size > MAX_FILE_BYTES) {
       const mb = (stat.size / 1024 / 1024).toFixed(1)
@@ -192,7 +192,7 @@ function readFailure(err: unknown, label: string): ToolResult {
   const code = (err as NodeJS.ErrnoException)?.code
   if (code === 'ENOENT') return toolError(`${label} does not exist.`)
   if (code === 'EACCES' || code === 'EPERM') return toolError(`${label} is not readable (permission denied).`)
-  if (code === 'EISDIR') return toolError(`${label} is a directory. Use ws_list_directory instead.`)
+  if (code === 'EISDIR') return toolError(`${label} is a directory. Use ys_list_directory instead.`)
   const reason = err instanceof Error ? err.message : String(err)
   return toolError(`Could not read ${label}: ${reason}`)
 }

@@ -81,7 +81,7 @@ describe('parseStreamChunk', () => {
 
   test('carries tool_call deltas through unparsed', () => {
     const parsed = chunk({
-      choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'ws_read_file' } }] } }],
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'ys_read_file' } }] } }],
     })
     assert.equal(parsed?.toolCalls?.length, 1)
   })

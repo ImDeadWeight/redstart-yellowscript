@@ -5,7 +5,7 @@
 //  - the initialize + tools/list flow populates `toolNames`
 //  - re-list clears and repopulates (the active profile can change on reconnect)
 //  - callTool returns budgeted result text
-//  - ws_* names never collide with Nest tool names
+//  - ys_* names never collide with Nest tool names
 // =============================================================================
 
 import assert from 'node:assert/strict'
@@ -179,8 +179,8 @@ describe('McpHost', () => {
     assert.deepEqual(received, ['read_file', 'postgres_query'])
     assert.deepEqual(host.toolNames(), ['read_file', 'postgres_query'])
     assert.equal(host.getTool('read_file')?.name, 'read_file')
-    // ws_ names are never in the Nest set.
-    assert.equal(host.getTool('ws_read_file'), null)
+    // ys_ names are never in the Nest set.
+    assert.equal(host.getTool('ys_read_file'), null)
     host.stop()
   })
 
@@ -372,7 +372,7 @@ describe('McpHost', () => {
     host.stop()
   })
 
-  it('ws_* names never collide with Nest tool names (disjointness)', async () => {
+  it('ys_* names never collide with Nest tool names (disjointness)', async () => {
     const { client } = makeFakeClient()
     const stream = fakeStream()
     const host = new McpHost(client, {
@@ -390,9 +390,9 @@ describe('McpHost', () => {
 
     for (const name of host.toolNames()) {
       assert.equal(
-        name.startsWith('ws_'),
+        name.startsWith('ys_'),
         false,
-        `Nest tool "${name}" collides with the ws_ prefix`,
+        `Nest tool "${name}" collides with the ys_ prefix`,
       )
     }
     host.stop()

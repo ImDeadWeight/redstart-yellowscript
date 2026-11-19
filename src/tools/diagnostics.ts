@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_diagnostics — the Problems panel, as something the model can read.
+// ys_diagnostics — the Problems panel, as something the model can read.
 // =============================================================================
 // This is the highest-value read-only tool in the set. Everything else tells
 // the model what the code SAYS; this tells it what the language server THINKS,
@@ -65,7 +65,7 @@ const SEVERITY_ORDER: Record<DiagnosticSeverity, number> = {
 export function createDiagnosticsTool(provider: DiagnosticsProvider): Tool {
   return {
     definition: {
-      name: assertWorkspaceToolName('ws_diagnostics'),
+      name: assertWorkspaceToolName('ys_diagnostics'),
       description:
         'Read the current problems (errors, warnings) reported by the language servers — the ' +
         'same list shown in the Problems panel. Use this to check whether code compiles or ' +
@@ -124,7 +124,7 @@ export function createDiagnosticsTool(provider: DiagnosticsProvider): Tool {
       if (relevant.length === 0) {
         const where = scope === null ? 'the workspace' : `"${scope}"`
         const what = minimum === null ? 'problems' : `problems at or above "${minimum}"`
-        return toolOk(`No ${what} reported in ${where}.`, 'ws_diagnostics — clean')
+        return toolOk(`No ${what} reported in ${where}.`, 'ys_diagnostics — clean')
       }
 
       // Severity first so that truncation drops hints rather than errors, then
@@ -139,7 +139,7 @@ export function createDiagnosticsTool(provider: DiagnosticsProvider): Tool {
       const shown = sorted.slice(0, MAX_DIAGNOSTICS)
       const omitted = sorted.length - shown.length
 
-      // Grouped by file for the same token reason as ws_grep, but the counts in
+      // Grouped by file for the same token reason as ys_grep, but the counts in
       // the header describe the FULL set — a model told "3 problems" when there
       // are 300 will stop looking.
       const grouped = new Map<string, DiagnosticRecord[]>()
@@ -163,7 +163,7 @@ export function createDiagnosticsTool(provider: DiagnosticsProvider): Tool {
       const body = `${summarise(sorted)}\n\n${blocks.join('\n\n')}${note}`
       const { text, truncated } = truncateForModel(body)
 
-      return toolOk(text, `ws_diagnostics — ${summarise(sorted)}`, truncated || omitted > 0)
+      return toolOk(text, `ys_diagnostics — ${summarise(sorted)}`, truncated || omitted > 0)
     },
   }
 }

@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_run_command — run a shell command, always-ask.
+// ys_run_command — run a shell command, always-ask.
 // =============================================================================
 // Phase 4.1. The model proposes a command; the host shows it VERBATIM and runs
 // it only on the user's go-ahead. Terminal is the one tool that is never
@@ -40,7 +40,7 @@ import { PathScopeError, resolveWithinWorkspace, describeWorkspacePath } from '.
 
 export const runCommandTool: Tool = {
   definition: {
-    name: assertWorkspaceToolName('ws_run_command'),
+    name: assertWorkspaceToolName('ys_run_command'),
     description:
       'Propose running a shell command in the workspace. The command is shown to the user verbatim and ' +
       'runs only after they approve it — it is NEVER executed automatically. Use it for builds, tests, ' +
@@ -72,7 +72,7 @@ export const runCommandTool: Tool = {
 
     const command = stringArg(args, 'command')
     if (command === null || command.trim() === '') {
-      return toolError('ws_run_command requires a "command" string argument.')
+      return toolError('ys_run_command requires a "command" string argument.')
     }
 
     // Resolve and contain the working directory. Absent → first workspace root.
@@ -100,7 +100,7 @@ export const runCommandTool: Tool = {
     return toolOk(
       `Proposed command (awaits your approval):\n\n  ${trimmed}\n\n` +
         `in ${label}. It will NOT run until you approve it.`,
-      `ws_run_command — ${trimmed.split('\n')[0]?.slice(0, 60) ?? trimmed} (pending approval)`,
+      `ys_run_command — ${trimmed.split('\n')[0]?.slice(0, 60) ?? trimmed} (pending approval)`,
       false,
       undefined,
       pending,

@@ -6,8 +6,8 @@
   let { card }: { card: ToolCardView } = $props()
   let open = $state(false)
 
-  /** ws_read_file → read file; Nest tools keep their name. */
-  const label = $derived(card.name.startsWith('ws_') ? card.name.slice(3).replace(/_/g, ' ') : card.name.replace(/_/g, ' '))
+  /** ys_read_file → read file; Nest tools keep their name. */
+  const label = $derived(card.name.startsWith('ys_') ? card.name.slice(3).replace(/_/g, ' ') : card.name.replace(/_/g, ' '))
   const preview = $derived(argumentsPreview(card.arguments))
   const pretty = $derived.by(() => {
     try {
@@ -16,7 +16,7 @@
       return card.arguments
     }
   })
-  const onNest = $derived(!card.name.startsWith('ws_') && card.name !== 'ask_user' && card.name !== 'update_plan')
+  const onNest = $derived(!card.name.startsWith('ys_') && card.name !== 'ask_user' && card.name !== 'update_plan')
 </script>
 
 <div class="card {card.status}">

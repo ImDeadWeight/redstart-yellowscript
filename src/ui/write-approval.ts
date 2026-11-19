@@ -234,9 +234,9 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
 /** Best-effort recovery of the originating tool name for "always allow". */
 function autoToolFor(pending: PendingWrite): string {
   // The tool name is not carried on the change; this is a placeholder so the
-  // "always allow" memory keys on a stable id. ws_edit_file vs ws_write_file is
+  // "always allow" memory keys on a stable id. ys_edit_file vs ys_write_file is
   // indistinguishable from the planned change alone, so we key on the change
-  // shape: a full-file replacement of an existing file is ws_write_file, a
-  // context diff is ws_edit_file. Both being remembered together is acceptable.
-  return pending.changes.some((c) => !c.isNew && !c.isDeleted && c.before === '') ? 'ws_write_file' : 'ws_edit_file'
+  // shape: a full-file replacement of an existing file is ys_write_file, a
+  // context diff is ys_edit_file. Both being remembered together is acceptable.
+  return pending.changes.some((c) => !c.isNew && !c.isDeleted && c.before === '') ? 'ys_write_file' : 'ys_edit_file'
 }

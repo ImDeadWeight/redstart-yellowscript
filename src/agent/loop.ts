@@ -13,7 +13,7 @@
 //   model.streamTurn   NestClient.streamChatCompletion, with the tool payload
 //                      and wire-safe history. Tool-call fragments are
 //                      reassembled here (assembleToolCalls).
-//   tools.execute      the merged registry (ws_* plus Nest's tools). A write or
+//   tools.execute      the merged registry (ys_* plus Nest's tools). A write or
 //                      command tool returns a PLAN; its review (checkpoint →
 //                      diff → Apply/Reject, or the command prompt) runs here,
 //                      after the tool, because the change has to be computed
@@ -365,10 +365,21 @@ function wrapAsk(ask: NonNullable<AgentPorts['ask']>, handlers: AgentLoopHandler
   }
 }
 
+interface AskReplyShape {
+  chosen?: string[]
+  text?: string
+}
+interface AskAnswerShape extends AskReplyShape {
+  answers?: Array<AskReplyShape | null>
+}
+
 /** One line for the ask_user card: what the person answered. */
-function answerSummary(answer: { chosen?: string[]; text?: string } | null): string {
+function answerSummary(answer: AskAnswerShape | null): string {
   if (!answer) return 'Skipped'
-  const parts = [...(answer.chosen ?? []), ...(answer.text ? [answer.text] : [])]
+  // Several questions answered on the card come back one reply per question.
+  const replies = answer.answers ? answer.answers.filter((a) => a !== null) : [answer]
+  if (replies.length === 0) return 'Skipped'
+  const parts = replies.flatMap((r) => [...(r.chosen ?? []), ...(r.text ? [r.text] : [])])
   const line = parts.join(', ').replace(/\s+/g, ' ')
   return `Answered: ${line.length > 80 ? line.slice(0, 79) + '…' : line}`
 }

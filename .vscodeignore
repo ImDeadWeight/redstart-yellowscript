@@ -13,3 +13,4 @@ tsconfig.json
 sample-workspace/**
 scripts/**
 tsconfig.webview.json
+assets/**

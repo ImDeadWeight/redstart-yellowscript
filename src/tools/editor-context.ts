@@ -1,5 +1,5 @@
 // =============================================================================
-// ws_editor_context — what the user is actually looking at.
+// ys_editor_context — what the user is actually looking at.
 // =============================================================================
 // The tool that makes "fix this" and "explain this" mean something. Without it
 // the model has no referent for "this", and either asks or guesses.
@@ -61,7 +61,7 @@ export const MAX_OPEN_FILES = 20
 export function createEditorContextTool(provider: EditorStateProvider): Tool {
   return {
     definition: {
-      name: assertWorkspaceToolName('ws_editor_context'),
+      name: assertWorkspaceToolName('ys_editor_context'),
       description:
         'Find out what the user currently has open and selected in the editor: the active file, ' +
         'cursor position, selected text, and the list of open files. Call this when the user ' +
@@ -129,8 +129,8 @@ export function createEditorContextTool(provider: EditorStateProvider): Tool {
       const { text, truncated } = truncateForModel(lines.join('\n'))
       const summary =
         state.activeFile !== null && inWorkspace(state.activeFile)
-          ? `ws_editor_context — ${describeWorkspacePath(roots, state.activeFile)}`
-          : 'ws_editor_context — no active file'
+          ? `ys_editor_context — ${describeWorkspacePath(roots, state.activeFile)}`
+          : 'ys_editor_context — no active file'
 
       return toolOk(text, summary, truncated)
     },

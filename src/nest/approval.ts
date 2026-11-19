@@ -29,6 +29,8 @@
 // No `vscode` import: the prompt and the HTTP calls are injected.
 // =============================================================================
 
+import { callToolTarget } from '../agent/agent-core.ts'
+
 export const APPROVAL_RULE_META_KEY = 'redstart/approvalRule'
 export const APPROVAL_ENFORCED_META_KEY = 'redstart/approvalEnforced'
 export const APPROVAL_META_KEY = 'redstart/approval'
@@ -141,6 +143,14 @@ export async function callWithApproval(
   deps: ApprovalDeps,
 ): Promise<NestCallResult> {
   const log = deps.log ?? (() => {})
+  // call_tool runs a catalog tool by name. Nest enforces THAT tool's approval
+  // whatever the client decides; the person must be shown it too, not
+  // "call_tool", and a grant or a deny is about it.
+  const target = callToolTarget(tool, args)
+  if (target) {
+    tool = target.name
+    args = target.args
+  }
   const fireAndForget = (p: Promise<void>, what: string) => {
     p.catch((err: unknown) => log(`approvals: ${what} failed — ${err instanceof Error ? err.message : String(err)}`))
   }

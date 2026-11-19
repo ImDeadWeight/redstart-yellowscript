@@ -19,6 +19,7 @@ import * as parser from '../vendor/agent-core/tool-call-parser.mjs'
 import * as askUser from '../vendor/agent-core/ask-user.mjs'
 import * as updatePlan from '../vendor/agent-core/update-plan.mjs'
 import * as compaction from '../vendor/agent-core/compaction.mjs'
+import * as approval from '../vendor/agent-core/approval.mjs'
 
 import type {
   AgentLoopParams,
@@ -90,3 +91,7 @@ export const compactionBudget: (
   maxTokens: unknown,
   overheadTokens?: unknown,
 ) => { nCtx: number; usable: number } | null = compaction.compactionBudget
+
+/** The tool a call_tool call names, and its arguments, or null (Nest's catalog dispatcher). */
+export const callToolTarget: (name: string, args: unknown) => { name: string; args: Record<string, unknown> } | null =
+  approval.callToolTarget

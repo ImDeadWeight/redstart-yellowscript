@@ -43,7 +43,7 @@ import {
   type StagedFile,
 } from '../tools/checkpoint.ts'
 import { applyPendingWrite, type WriteBackend } from '../tools/apply.ts'
-import { type ApprovalStore, isAutoApproved, rememberApproval } from '../tools/approval.ts'
+import { type ApprovalStore, type TaskTrust, autoApplyReason, rememberApproval } from '../tools/approval.ts'
 import type { PendingWrite } from '../tools/types.ts'
 
 const execFileAsync = promisify(execFile)
@@ -81,7 +81,11 @@ export function realGitBackend(shadowRoot: string): GitBackend {
       return fs.promises.readFile(abs, 'utf8')
     },
     async writeFile(abs, content) {
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true })
       await fs.promises.writeFile(abs, content, 'utf8')
+    },
+    async removeFile(abs) {
+      await fs.promises.rm(abs, { force: true })
     },
   }
 }
@@ -112,6 +116,8 @@ interface ReviewDeps {
   /** Records each successful checkpoint so the `Revert Last Write` command can
    *  restore it. Kept optional so tests/reuse needn't supply it. */
   recordCheckpoint?: (checkpoint: Checkpoint, files: readonly StagedFile[]) => void
+  /** "Apply all in this task": offered when present, and honoured until the run ends. */
+  task?: TaskTrust
 }
 
 /**
@@ -129,6 +135,7 @@ async function snapshot(deps: ReviewDeps, pending: PendingWrite): Promise<Checkp
     workspaceAbsolute: c.absolutePath,
     relativePath: vscodeRelative(c.absolutePath, deps),
     content: c.before,
+    wasAbsent: c.isNew,
   }))
   try {
     const checkpoint = await deps.checkpoints.checkpoint(staged, pending.label)
@@ -154,11 +161,12 @@ function outputWarn(err: unknown): void {
 
 /** Best-effort workspace-relative key for a shadow path. */
 function vscodeRelative(absolutePath: string, deps: ReviewDeps): string {
-  // The checkpoint stores by relative path; for the shadow we just need a stable
-  // key unique per file. Use the workspace-relative form when resolvable, else
-  // the basename. Exact value only matters for partial reverts, which key by the
-  // same `StagedFile` array we pass back to `revert`.
-  return path.basename(absolutePath)
+  // The shadow needs a stable key unique per file; the exact value only matters
+  // to `revert`, which is handed back the same StagedFile array. The whole
+  // absolute path, flattened, so two files with one name (src/a/index.ts and
+  // src/b/index.ts) cannot overwrite each other in one checkpoint.
+  void deps
+  return absolutePath.replace(/^[A-Za-z]:/, (d) => d[0]!.toLowerCase()).replace(/[\\/:]+/g, '__')
 }
 
 /** Open a native diff tab (before on disk vs. proposed after) for one change. */
@@ -187,9 +195,11 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
   const backend = deps.backend ?? realWriteBackend
 
   return async (pending: PendingWrite): Promise<boolean> => {
-    // Auto-approve path: checkpoint still taken, but no prompt.
+    // Auto-approve path: checkpoint still taken, but no prompt. Never for a
+    // deletion (autoApplyReason).
     const toolName = pending.changes[0]?.path ? autoToolFor(pending) : ''
-    if (toolName && isAutoApproved(deps.store, toolName)) {
+    const deletes = pending.changes.some((c) => c.isDeleted)
+    if (autoApplyReason({ toolName, deletes }, deps.store, deps.task?.trusted() ?? false)) {
       await snapshot(deps, pending)
       await applyPendingWrite(pending, backend)
       return true
@@ -203,6 +213,8 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
       `Yellowscript wants to ${pending.label}. Review the diff${pending.changes.length > 1 ? 's' : ''} and choose.`,
       { modal: true },
       'Apply',
+      // Offered only when the host scopes a task; deletions still always ask.
+      ...(deps.task ? ['Apply all in this task'] : []),
       'Apply & always allow',
       'Reject',
     )
@@ -214,6 +226,8 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
     // Checkpoint the PRE-WRITE state, then apply. Order matters (see file head).
     await snapshot(deps, pending)
     const outcome = await applyPendingWrite(pending, backend)
+
+    if (decision === 'Apply all in this task') deps.task?.trust()
 
     if (decision === 'Apply & always allow') {
       const tool = autoToolFor(pending)

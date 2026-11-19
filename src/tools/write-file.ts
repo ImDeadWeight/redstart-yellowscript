@@ -67,7 +67,7 @@ export const nodeWriteFs: WriteFs = {
 }
 
 /** Build a single-file preview (with a unified-diff string) from a FileChange. */
-function previewOf(change: FileChange, roots: readonly string[]): FileChangePreview {
+export function previewOf(change: FileChange, roots: readonly string[]): FileChangePreview {
   const label = describeWorkspacePath(roots, change.absolutePath)
   return {
     path: label,
@@ -96,7 +96,7 @@ function unifiedDiffFor(change: FileChange, label: string): string {
   return lines.join('\n')
 }
 
-function summariseChanges(changes: readonly FileChangePreview[]): string {
+export function summariseChanges(changes: readonly FileChangePreview[]): string {
   const created = changes.filter((c) => c.isNew).length
   const edited = changes.filter((c) => !c.isNew && !c.isDeleted).length
   const deleted = changes.filter((c) => c.isDeleted).length

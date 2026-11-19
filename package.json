@@ -136,6 +136,11 @@
         "command": "redstartYellowscript.revertLastWrite",
         "title": "Revert Last Write",
         "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.revertLastTask",
+        "title": "Revert Last Task",
+        "category": "Yellowscript"
       }
     ],
     "configuration": {

@@ -83,6 +83,23 @@ let mergedTools: ToolRegistry | null = null
 /** Last successful write checkpoint per workspace root, for `Revert Last Write`.
  *  Only the most recent is kept — a multistep revert is out of scope for now. */
 const lastCheckpoint = new Map<string, { checkpoint: Checkpoint; files: readonly StagedFile[] }>()
+
+/** Per conversation: the running task's trust, and every write it checkpointed. */
+interface TaskState {
+  trusted: boolean
+  checkpoints: Array<{ root: string; checkpoint: Checkpoint; files: readonly StagedFile[] }>
+}
+const tasks = new Map<string, TaskState>()
+/** The conversation whose task wrote last, for Revert Last Task. */
+let lastTaskConversation: string | null = null
+function taskFor(conversationId: string): TaskState {
+  let task = tasks.get(conversationId)
+  if (!task) {
+    task = { trusted: false, checkpoints: [] }
+    tasks.set(conversationId, task)
+  }
+  return task
+}
 /** Resolved once — the binary does not move while the window is open, and
  *  probing the filesystem on every search would be wasteful. */
 let ripgrepPath: string | null = null
@@ -354,6 +371,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.runWorkflow', () => showPage('workflows')),
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
+    vscode.commands.registerCommand('redstartYellowscript.revertLastTask', revertLastTaskCommand),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
@@ -523,6 +541,14 @@ function getSession(id: string): ChatSession {
           store: approvalStore(),
           recordCheckpoint: (checkpoint, files) => {
             lastCheckpoint.set(roots[0]!, { checkpoint, files })
+            taskFor(id).checkpoints.push({ root: roots[0]!, checkpoint, files })
+            lastTaskConversation = id
+          },
+          task: {
+            trusted: () => taskFor(id).trusted,
+            trust: () => {
+              taskFor(id).trusted = true
+            },
           },
         })
         return gate(pending)
@@ -532,6 +558,14 @@ function getSession(id: string): ChatSession {
       projectId: () => linkedProject()?.id ?? null,
       onPersist: () => persistConversation(id),
       emit: (message) => {
+        // A task is one user message's run: it starts when that message runs
+        // (not when it queues) and ends with the turn. "Apply all in this
+        // task" lasts until then; its checkpoints stay for Revert Last Task.
+        if (message.type === 'message' && message.message.role === 'user' && !message.message.pending) {
+          tasks.set(id, { trusted: false, checkpoints: [] })
+        } else if (message.type === 'turn/completed' || message.type === 'turn/failed') {
+          taskFor(id).trusted = false
+        }
         chatView?.post(message)
         if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
           statusBar?.setModel(getSession(message.conversationId).currentModel ?? null, message.stats.tokensPerSecond)
@@ -1125,6 +1159,40 @@ async function revertLastWriteCommand(): Promise<void> {
     const reason = err instanceof Error ? err.message : String(err)
     vscode.window.showErrorMessage(`Could not revert the last write: ${reason}`)
     output?.error('revert failed', err)
+  }
+}
+
+/**
+ * Undo every write the last task made, newest first, so a file written twice
+ * ends at its state before the task. Files the task created are removed.
+ */
+async function revertLastTaskCommand(): Promise<void> {
+  const task = lastTaskConversation ? tasks.get(lastTaskConversation) : undefined
+  if (!task || task.checkpoints.length === 0) {
+    vscode.window.showInformationMessage('Yellowscript: nothing to revert — the last task made no checkpointed writes.')
+    return
+  }
+  const files = [...new Set(task.checkpoints.flatMap((c) => c.files.map((f) => f.workspaceAbsolute)))]
+  const choice = await vscode.window.showWarningMessage(
+    `Revert the last Yellowscript task? It made ${task.checkpoints.length} write${task.checkpoints.length === 1 ? '' : 's'}; ` +
+      `${files.length} file${files.length === 1 ? '' : 's'} go back to how they were before it (files it created are deleted):`,
+    { modal: true, detail: files.join('\n') },
+    'Revert task',
+  )
+  if (choice !== 'Revert task') return
+
+  try {
+    for (const entry of [...task.checkpoints].reverse()) {
+      await checkpointForWorkspace(entry.root).revert(entry.checkpoint, entry.files)
+    }
+    output?.info(`revert: undid ${task.checkpoints.length} write(s) of the last task (${files.length} file(s))`)
+    task.checkpoints = []
+    lastCheckpoint.clear()
+    vscode.window.showInformationMessage(`Yellowscript: reverted the last task (${files.length} file${files.length === 1 ? '' : 's'}).`)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    vscode.window.showErrorMessage(`Could not revert the last task: ${reason}`)
+    output?.error('task revert failed', err)
   }
 }
 

@@ -79,3 +79,27 @@ export function rememberApproval(store: ApprovalStore, toolName: string): void {
 export function forgetApproval(store: ApprovalStore, toolName: string): void {
   store.setAllowedTools(store.getAllowedTools().filter((name) => name !== toolName))
 }
+
+/**
+ * Why a planned write may skip review, or null when it must be shown.
+ *
+ * - A deletion is ALWAYS shown, whatever was granted: "always allow" on an
+ *   edit tool must never become a silent delete.
+ * - `task`: the person chose "Apply all in this task" earlier in the same run.
+ * - `always`: the tool is remembered as always-allowed in this workspace.
+ */
+export function autoApplyReason(
+  write: { toolName: string; deletes: boolean },
+  store: ApprovalStore,
+  taskTrusted: boolean,
+): 'task' | 'always' | null {
+  if (write.deletes) return null
+  if (taskTrusted) return 'task'
+  return write.toolName && isAutoApproved(store, write.toolName) ? 'always' : null
+}
+
+/** Run-scoped trust: "Apply all in this task" lasts until the run ends. */
+export interface TaskTrust {
+  trusted(): boolean
+  trust(): void
+}

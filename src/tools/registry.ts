@@ -29,6 +29,7 @@ import { createDiagnosticsTool, type DiagnosticsProvider } from './diagnostics.t
 import { createEditorContextTool, type EditorStateProvider } from './editor-context.ts'
 import { createEditFileTool, createWriteFileTool, nodeWriteFs, type WriteFs } from './write-file.ts'
 import { runCommandTool } from './run-command.ts'
+import { createDeleteFileTool, createMoveFileTool, createReplaceTool } from './file-ops.ts'
 
 /** One entry of the OpenAI-compatible `tools` array. */
 export interface ToolPayloadEntry {
@@ -71,8 +72,11 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     createGrepTool(options.ripgrepPath),
     createDiagnosticsTool(options.diagnostics),
     createEditorContextTool(options.editorState),
+    createReplaceTool(writeFs),
     createEditFileTool(writeFs),
     createWriteFileTool(writeFs),
+    createDeleteFileTool(writeFs),
+    createMoveFileTool(writeFs),
     runCommandTool,
   ]
 

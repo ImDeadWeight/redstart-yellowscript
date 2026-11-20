@@ -28,6 +28,7 @@ import {
 import { PathScopeError, resolveWithinWorkspace } from './workspace-path.ts'
 import { runRipgrep } from './ripgrep.ts'
 import { globToRegExp, literalSearch, walkFiles } from './fallback-search.ts'
+import { secretReason } from './protected-paths.ts'
 
 /** Total matches returned. Beyond this the answer is "narrow your search", not
  *  more output — the context window is the scarce resource. */
@@ -117,6 +118,9 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
 
       const matches: Match[] = []
       let truncated = false
+      // Secrets files are not searched (protected-paths.ts): a match would put
+      // their content in the prompt without asking. The model is told how many.
+      const skipped = new Set<string>()
 
       for (const root of roots) {
         if (matches.length >= limit) {
@@ -136,16 +140,23 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
         truncated ||= outcome.truncated
         const prefix = roots.length > 1 ? `${path.basename(root)}/` : ''
         for (const match of outcome.matches) {
+          if (secretReason(match.file)) {
+            skipped.add(`${prefix}${match.file}`)
+            continue
+          }
           matches.push({ ...match, file: `${prefix}${match.file}` })
         }
       }
 
       const banner = degraded ? '(ripgrep unavailable — literal search, .gitignore not applied)\n\n' : ''
+      const skippedNote = skipped.size
+        ? `\n\n[${skipped.size} file${skipped.size === 1 ? '' : 's'} that may hold secrets (${[...skipped].slice(0, 3).join(', ')}) not searched; ys_read_file one asks the person]`
+        : ''
 
       if (matches.length === 0) {
         const hint = degraded ? '' : ' Files excluded by .gitignore are not searched.'
         return toolOk(
-          `${banner}No matches for "${pattern}".${hint}`,
+          `${banner}No matches for "${pattern}".${hint}${skippedNote}`,
           `ys_grep "${pattern}" — no matches`,
         )
       }
@@ -167,7 +178,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
       const note = truncated ? `\n\n[stopped at ${limit} matches — narrow the search]` : ''
       const header = `${matches.length} match${matches.length === 1 ? '' : 'es'} in ${grouped.size} file${grouped.size === 1 ? '' : 's'}:`
       const { text, truncated: cut } = truncateForModel(
-        `${banner}${header}\n\n${blocks.join('\n\n')}${note}`,
+        `${banner}${header}\n\n${blocks.join('\n\n')}${note}${skippedNote}`,
       )
 
       return toolOk(text, `ys_grep "${pattern}" — ${matches.length} match(es)`, truncated || cut)

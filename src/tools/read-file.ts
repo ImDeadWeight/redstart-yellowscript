@@ -17,6 +17,7 @@ import {
   type ToolResult,
 } from './types.ts'
 import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
+import { secretReason } from './protected-paths.ts'
 
 /** Lines returned when the model doesn't ask for a range. Large enough for
  *  almost any source file, small enough that a bundled asset can't eat the
@@ -74,6 +75,16 @@ export const readFileTool: Tool = {
     }
 
     const label = describeWorkspacePath(context.workspaceRoots, absolute)
+
+    // What a read returns goes into the prompt and the transcript, so a
+    // secrets file waits for the person.
+    const secret = secretReason(absolute)
+    if (secret) {
+      const allowed = context.askRead ? await context.askRead({ absolutePath: absolute, label, reason: secret }) : false
+      if (!allowed) {
+        return toolError(`Not read: ${secret}, and reading it needs the person's go-ahead, which was not given. Ask them for what you need from it instead.`)
+      }
+    }
 
     let stat: Awaited<ReturnType<typeof fsp.stat>>
     try {

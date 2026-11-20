@@ -216,7 +216,8 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
     // deletion (autoApplyReason).
     const toolName = pending.changes[0]?.path ? autoToolFor(pending) : ''
     const deletes = pending.changes.some((c) => c.isDeleted)
-    if (autoApplyReason({ toolName, deletes }, deps.store, deps.task?.trusted() ?? false)) {
+    const alwaysAsk = pending.alwaysAsk !== undefined
+    if (autoApplyReason({ toolName, deletes, alwaysAsk }, deps.store, deps.task?.trusted() ?? false)) {
       const checkpoint = await snapshot(deps, pending)
       await applyPendingWrite(pending, backend)
       return applied(checkpoint)
@@ -228,6 +229,7 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
       kind: 'write',
       title: pending.changes.length > 1 ? `Change ${pending.changes.length} files` : 'Change a file',
       subject: pending.label,
+      ...(pending.alwaysAsk ? { detail: `Always asked: ${pending.alwaysAsk}.` } : {}),
       files: pending.changes.map((c) => ({
         path: c.path,
         change: c.isNew ? 'create' : c.isDeleted ? 'delete' : 'edit',
@@ -236,8 +238,8 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
       options: [
         { id: 'apply', label: 'Apply', kind: 'allow' },
         // Offered only when the host scopes a task; deletions still always ask.
-        ...(deps.task ? [{ id: 'task', label: 'Apply all in this task', kind: 'always' as const }] : []),
-        ...(deletes ? [] : [{ id: 'always', label: 'Always allow edits', kind: 'always' as const }]),
+        ...(deps.task && !alwaysAsk ? [{ id: 'task', label: 'Apply all in this task', kind: 'always' as const }] : []),
+        ...(deletes || alwaysAsk ? [] : [{ id: 'always', label: 'Always allow edits', kind: 'always' as const }]),
         { id: 'reject', label: 'Reject', kind: 'deny' },
       ],
       openFile: (index) => {

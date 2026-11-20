@@ -84,16 +84,18 @@ export function forgetApproval(store: ApprovalStore, toolName: string): void {
  * Why a planned write may skip review, or null when it must be shown.
  *
  * - A deletion is ALWAYS shown, whatever was granted: "always allow" on an
- *   edit tool must never become a silent delete.
+ *   edit tool must never become a silent delete. So is a write to a path that
+ *   decides what runs (`alwaysAsk`, protected-paths.ts).
  * - `task`: the person chose "Apply all in this task" earlier in the same run.
  * - `always`: the tool is remembered as always-allowed in this workspace.
  */
 export function autoApplyReason(
-  write: { toolName: string; deletes: boolean },
+  write: { toolName: string; deletes: boolean; alwaysAsk?: boolean },
   store: ApprovalStore,
   taskTrusted: boolean,
 ): 'task' | 'always' | null {
-  if (write.deletes) return null
+  // Protected paths (settings, tasks, package.json scripts) ask like a deletion.
+  if (write.deletes || write.alwaysAsk) return null
   if (taskTrusted) return 'task'
   return write.toolName && isAutoApproved(store, write.toolName) ? 'always' : null
 }

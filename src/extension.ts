@@ -586,7 +586,20 @@ function getSession(id: string): ChatSession {
       },
       onUnauthorized: () => manager?.handleUnauthorized(),
       tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
-      toolContext: () => ({ workspaceRoots: workspaceRoots() }),
+      toolContext: () => ({
+        workspaceRoots: workspaceRoots(),
+        askRead: async (request) =>
+          (await getSession(id).askApproval({
+            kind: 'tool',
+            title: 'Read a file that may hold secrets',
+            subject: request.label,
+            detail: `${request.reason}. What it says goes to the model and is saved with this chat.`,
+            options: [
+              { id: 'read', label: 'Allow this time', kind: 'allow' },
+              { id: 'deny', label: 'Deny', kind: 'deny' },
+            ],
+          })) === 'read',
+      }),
       approveChange: (pending) => {
         const roots = workspaceRoots()
         if (roots.length === 0) {

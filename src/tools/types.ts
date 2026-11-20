@@ -75,6 +75,21 @@ export interface ToolContext {
   /** The conversation whose run made the call, so a tool that needs the
    *  person (a Nest tool's approval) asks in the right tab. */
   conversationId?: string
+  /**
+   * Ask the person before a read whose content should not go to the model
+   * unasked (a .env file, a key: protected-paths.ts). Resolves true to read.
+   * Absent (the bench, tests): such reads are refused.
+   */
+  askRead?: (request: ReadRequest) => Promise<boolean>
+}
+
+/** A read that waits for the person. */
+export interface ReadRequest {
+  absolutePath: string
+  /** As the model and the card name it. */
+  label: string
+  /** Why it asks, e.g. ".env usually holds secrets". */
+  reason: string
 }
 
 export interface ToolResult {
@@ -176,6 +191,9 @@ export interface PendingWrite {
   /** Workspace-relative label for the UI card. */
   label: string
   changes: readonly FileChangePreview[]
+  /** Why this write must be shown even under "Always allow edits" or "Apply
+   *  all in this task" (protected-paths.ts): it touches what runs code. */
+  alwaysAsk?: string
 }
 
 export interface FileChangePreview {

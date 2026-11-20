@@ -243,6 +243,15 @@ taken even when auto-approval bypasses the prompt.
 **Revert Last Task** undoes every write of the last task, newest first, and
 removes the files it created.
 
+Some paths are protected, whatever has been allowed. Writes inside `.git`
+(its config and hooks are programs git runs), to the checkpoint repository,
+or to Yellowscript's own `redstartYellowscript.*` settings are refused. Other
+changes to `.vscode/settings.json`, a `.code-workspace` file,
+`.vscode/tasks.json` or `launch.json`, and a change to `package.json`'s
+`scripts`, always ask, like a deletion. Reading a `.env` file, a key or a
+credentials file (`.npmrc`, `.netrc`, `id_rsa`) asks first, and search skips
+them, since what a read returns goes to the model and into the saved chat.
+
 When a run writes files or runs commands, its answer ends with a summary:
 each file it changed (click one for its diff since the run began, read from
 the checkpoint, so it works after a reload), the commands with their exit

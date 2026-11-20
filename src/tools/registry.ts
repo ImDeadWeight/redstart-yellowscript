@@ -34,6 +34,8 @@ import { runCommandTool } from './run-command.ts'
 import { createDeleteFileTool, createMoveFileTool, createReplaceTool } from './file-ops.ts'
 import { createProcessTool, legacyProcessCall } from './process-tools.ts'
 import { repairJson, type RepairKind } from './argument-repair.ts'
+import { checkWrite, stricter, type WriteVerdict } from './protected-paths.ts'
+import * as fs from 'node:fs'
 import type { BackgroundProcesses } from './process-runner.ts'
 import { createCheckPageTool, type CheckPageDeps } from './browser-check.ts'
 
@@ -167,10 +169,39 @@ function registryOver(tools: readonly Tool[], byName: ReadonlyMap<string, Tool>,
 
       // The caller's context, roots and all: a local ys_* tool handed empty
       // roots would refuse every path once Nest's tools were merged in.
-      const result = await tool.execute(args, context)
+      const result = guardWrite(await tool.execute(args, context), context)
       return parsed.repairs?.length ? { ...result, argumentsRepaired: parsed.repairs } : result
     },
   }
+}
+
+/** Roots as the filesystem names them, to compare with resolved paths. */
+function realRoots(roots: readonly string[]): string[] {
+  return roots.map((root) => {
+    try {
+      return fs.realpathSync.native(root)
+    } catch {
+      return root
+    }
+  })
+}
+
+/**
+ * Every planned write passes here, whichever tool planned it: a change to a
+ * protected path is refused, or marked to be asked about every time
+ * (protected-paths.ts).
+ */
+function guardWrite(result: ToolResult, context: ToolContext): ToolResult {
+  const pending = result.pendingWrite
+  if (!pending) return result
+  const roots = realRoots(context.workspaceRoots)
+  let verdict: WriteVerdict = null
+  for (const change of pending.changes) {
+    verdict = stricter(verdict, checkWrite(roots, change.absolutePath, change))
+  }
+  if (verdict && 'refuse' in verdict) return toolError(`Not written: ${verdict.refuse}`)
+  if (verdict) return { ...result, pendingWrite: { ...pending, alwaysAsk: verdict.ask } }
+  return result
 }
 
 /**

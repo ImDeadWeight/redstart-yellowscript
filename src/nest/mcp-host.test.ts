@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { McpHost, parseMcpResponse, type McpMessage, type McpNestClient, type McpTool } from './mcp-host.ts'
+import { McpHost, PROJECT_META_KEY, parseMcpResponse, withProjectMeta, type McpMessage, type McpNestClient, type McpTool } from './mcp-host.ts'
 
 interface Sent {
   method: string | undefined
@@ -278,5 +278,18 @@ describe('parseMcpResponse', () => {
     assert.ok(parseMcpResponse('application/json', '[{"jsonrpc":"2.0","id":"b","result":1}]', 'b'))
     assert.equal(parseMcpResponse('application/json', '{"jsonrpc":"2.0","id":"x","result":1}', 'a'), null)
     assert.equal(parseMcpResponse('text/html', '<html>', 'a'), null)
+  })
+})
+
+describe('withProjectMeta', () => {
+  it('adds the linked project to a call, keeping what was there', () => {
+    assert.deepEqual(withProjectMeta({ 'redstart/approvalId': 'a1' }, 'p7'), { 'redstart/approvalId': 'a1', [PROJECT_META_KEY]: 'p7' })
+    assert.deepEqual(withProjectMeta(undefined, 'p7'), { 'redstart/projectId': 'p7' })
+  })
+
+  it('no project, no change', () => {
+    const meta = { x: 1 }
+    assert.equal(withProjectMeta(meta, null), meta)
+    assert.equal(withProjectMeta(undefined, ''), undefined)
   })
 })

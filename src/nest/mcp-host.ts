@@ -84,6 +84,21 @@ export interface McpConnection {
 
 /** The MCP revision this client speaks (the first with Streamable HTTP). */
 export const MCP_PROTOCOL_VERSION = '2025-03-26'
+/** The _meta key that names the Nest project a call belongs to. */
+export const PROJECT_META_KEY = 'redstart/projectId'
+
+/**
+ * A tools/call's _meta with the workspace's linked project added. Nest finds a
+ * call's project through a conversation it stores, and Yellowscript's chats
+ * are local, so a project-scoped memory_save had no project to go to
+ * (PLAN-long-tasks.md item 9). A Nest that does not read the key ignores it;
+ * one that does checks the account may write that project.
+ */
+export function withProjectMeta(meta: Record<string, unknown> | undefined, projectId: string | null | undefined): Record<string, unknown> | undefined {
+  if (!projectId) return meta
+  return { ...(meta ?? {}), [PROJECT_META_KEY]: projectId }
+}
+
 /** tools/call can run a web fetch or Python; everything else is quick. */
 const CALL_TIMEOUT_MS = 300_000
 const RPC_TIMEOUT_MS = 30_000

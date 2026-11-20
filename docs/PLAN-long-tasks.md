@@ -25,8 +25,8 @@ costs there, and phase 0 makes room first.
 | 3 | Dev-server URL detection | 1 | Yellowscript | Done |
 | 16 | Protected paths (before 15) | 1 | Yellowscript | Done; checked in the registry, so every write tool is covered |
 | 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | Done; the recorded `dev-server-fix` run is still to do |
-| 4 | Outline, symbols, references | 2 | Yellowscript | |
-| 5 | Big files read as an outline | 2 | Yellowscript | |
+| 4 | Outline, symbols, references | 2 | Yellowscript | Done; the with/without token comparison needs a live run |
+| 5 | Big files read as an outline | 2 | Yellowscript | Done |
 | 6 | Page steps, `eval`, viewport | 3 | Yellowscript | |
 | 7 | The game test hook convention | 3 | Templates, `AGENTS.md` | |
 | 8 | Workspace notes (`ys_note`) | 4 | Yellowscript | |

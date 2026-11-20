@@ -1,0 +1,7 @@
+{
+  "title": "Find and fix a bug in an 8-file, 3,000-line game",
+  "prompt": "In this game (Barrel Run, under src/), picking up a gem adds only 1 point to the score. A ruby should be worth 50, an emerald 75 and a sapphire 100, and more during a combo. Find the cause and fix it. Don't change the point values or the combo rule.",
+  "maxTurns": 25,
+  "timeoutS": 900,
+  "tags": ["core"]
+}

@@ -35,6 +35,7 @@ import type { PendingWrite, ToolEffect } from '../tools/types.ts'
 import { formatRunLog } from '../chat/run-log.ts'
 import { classifyCommand } from '../tools/safe-commands.ts'
 import { nodeCommandContext } from '../tools/command-context.ts'
+import { createTsSymbolProvider } from './ts-symbols.ts'
 
 /** One task, as `bench/tasks/<id>/task.json` describes it. */
 export interface BenchTask {
@@ -45,6 +46,8 @@ export interface BenchTask {
   maxTurns?: number
   /** Wall-clock limit for the whole run. */
   timeoutS?: number
+  /** Tools left out of this task's run (names), e.g. to measure what one saves. */
+  withholdTools?: string[]
   /** Later messages, each sent after the previous run ends, with that run's
    *  log on its answer as the chat sends it (chat/run-log.ts). */
   followUps?: string[]
@@ -79,6 +82,8 @@ export interface RunRecord {
   commandPrompts: number
   /** Context trims during the run. */
   trims: number
+  /** Prompt tokens the model read across every request (prompt_n + cache_n). */
+  promptTokens?: number
   questions: number
   nCtx: number | null
   durationMs: number
@@ -139,6 +144,8 @@ export interface RunTaskOptions {
   keep?: boolean
   /** One line per event, for the console. */
   log?: (line: string) => void
+  /** Tools to leave out, on top of the task's own withholdTools. */
+  withhold?: string[]
 }
 
 /** Run one task end to end and score it. Never throws: a failure is a record. */
@@ -156,6 +163,8 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }),
     processes,
     browser: { browser: () => findBrowser(), screenshotDir: () => path.join(workspace, '.yellowscript', 'screenshots') },
+    symbols: createTsSymbolProvider(workspace),
+    withhold: [...(task.withholdTools ?? []), ...(options.withhold ?? [])],
   })
 
   const context = buildWorkspaceContext(workspace)
@@ -175,6 +184,15 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     questions: 0, nCtx: null, durationMs: 0, answer: '',
   }
 
+  // Every request's prompt size, summed: what a tool saves in reading.
+  let promptTokens = 0
+  const counting: CompletionStreamer = {
+    async streamChatCompletion(request, handlers, signal) {
+      const result = await options.client.streamChatCompletion(request, handlers, signal)
+      promptTokens += (result.timings?.prompt_n ?? 0) + (result.timings?.cache_n ?? 0)
+      return result
+    },
+  }
   /** Each file's content before the task first wrote it, for "this run changed the scripts". */
   const before = new Map<string, string>()
   let result: AgentResult | undefined
@@ -185,7 +203,7 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
       if (index > 0) log(`  message ${index + 1}: ${prompt.slice(0, 80)}`)
       messages.push({ role: 'user', content: prompt })
       result = await runAgentLoop({
-        client: options.client,
+        client: counting,
         request: { messages: [...messages] },
         tools,
         toolContext: { workspaceRoots: [workspace] },
@@ -262,6 +280,7 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     }
   }
   record.trims = trims
+  record.promptTokens = promptTokens
   record.questions = questions
   record.nCtx = tracker?.contextSize ?? null
 
@@ -330,10 +349,10 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
     '',
     `**${passed}/${records.length} passed.**`,
     '',
-    '| Task | Result | Stop | Turns | Calls | Errors | Prompts | Trims | Time | Check |',
-    '|---|---|---|---|---|---|---|---|---|---|',
+    '| Task | Result | Stop | Turns | Calls | Errors | Prompts | Trims | Prompt tokens | Time | Check |',
+    '|---|---|---|---|---|---|---|---|---|---|---|',
     ...records.map((r) =>
-      `| ${r.task} | ${r.pass ? 'PASS' : 'FAIL'} | ${r.stopReason} | ${r.iterations} | ${r.toolCalls} | ${r.toolErrors} | ${r.commandPrompts ?? 0} | ${r.trims} | ${(r.durationMs / 1000).toFixed(0)}s | ${r.check.split('\n')[0]!.replace(/\|/g, '\\|').slice(0, 80)} |`,
+      `| ${r.task} | ${r.pass ? 'PASS' : 'FAIL'} | ${r.stopReason} | ${r.iterations} | ${r.toolCalls} | ${r.toolErrors} | ${r.commandPrompts ?? 0} | ${r.trims} | ${r.promptTokens?.toLocaleString('en-US') ?? '–'} | ${(r.durationMs / 1000).toFixed(0)}s | ${r.check.split('\n')[0]!.replace(/\|/g, '\\|').slice(0, 80)} |`,
     ),
     '',
     'Row for docs/bench-results.md:',

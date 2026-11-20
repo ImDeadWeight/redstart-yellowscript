@@ -1,0 +1,1 @@
+{ "answer": "takeGem added Math.sign(value) instead of value.", "stopReason": "complete", "questions": 0, "calls": [] }

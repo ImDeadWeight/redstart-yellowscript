@@ -46,6 +46,7 @@ import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
 import {
   diagnosticsAfterWrite,
   diagnosticsProvider,
+  symbolProvider,
   editorStateProvider,
   resolveRipgrep,
   workspaceRoots,
@@ -170,6 +171,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   tools = createToolRegistry({
     ripgrepPath,
     diagnostics: diagnosticsProvider,
+    symbols: symbolProvider,
     editorState: editorStateProvider,
     processes: backgroundProcesses,
     unifiedDiff: vscode.workspace.getConfiguration('redstartYellowscript').get<boolean>('tools.unifiedDiff') === true,

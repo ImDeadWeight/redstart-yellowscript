@@ -23,7 +23,8 @@
 
 import { toolError, toolOk, type JsonSchema, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { migrateToolName } from './approval.ts'
-import { readFileTool } from './read-file.ts'
+import { createReadFileTool } from './read-file.ts'
+import { createFindSymbolTool, createOutlineTool, createReferencesTool, type SymbolProvider } from './symbols.ts'
 import { listDirectoryTool } from './list-directory.ts'
 import { createGlobTool } from './glob.ts'
 import { createGrepTool } from './grep.ts'
@@ -60,10 +61,16 @@ export interface ToolRegistryOptions {
   processes?: BackgroundProcesses
   /** The headless browser for ys_check_page. Absent: no such tool. */
   browser?: CheckPageDeps
+  /** The language server's symbols (ys_find_symbol, ys_references, and a
+   *  better ys_outline). Absent: ys_outline reads the text alone. */
+  symbols?: SymbolProvider
   /** Offer ys_edit_file (unified diffs) to the model. Off by default: small
    *  models get diffs wrong, and ys_replace covers the case. A call to it
    *  still runs either way, since old transcripts and habits carry it. */
   unifiedDiff?: boolean
+  /** Tool names to leave out: the bench measures a task with and without
+   *  a tool this way. */
+  withhold?: readonly string[]
 }
 
 export interface ToolRegistry {
@@ -85,11 +92,14 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
   const writeFs = options.writeFs ?? nodeWriteFs
 
   const editFile = createEditFileTool(writeFs)
+  const symbols = options.symbols ?? null
   const tools: Tool[] = [
-    readFileTool,
+    createReadFileTool(symbols),
     listDirectoryTool,
     createGlobTool(options.ripgrepPath),
     createGrepTool(options.ripgrepPath),
+    createOutlineTool(symbols),
+    ...(symbols ? [createFindSymbolTool(symbols), createReferencesTool(symbols)] : []),
     createDiagnosticsTool(options.diagnostics),
     createEditorContextTool(options.editorState),
     createReplaceTool(writeFs),
@@ -103,6 +113,11 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
       : []),
     ...(options.browser ? [createCheckPageTool(options.browser)] : []),
   ]
+
+  if (options.withhold?.length) {
+    const withheld = new Set(options.withhold)
+    for (let i = tools.length - 1; i >= 0; i--) if (withheld.has(tools[i]!.definition.name)) tools.splice(i, 1)
+  }
 
   const byName = new Map<string, Tool>()
   for (const tool of tools) {

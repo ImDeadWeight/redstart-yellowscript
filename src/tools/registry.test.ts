@@ -37,6 +37,7 @@ describe('createToolRegistry', () => {
       'ys_grep',
       'ys_list_directory',
       'ys_move_file',
+      'ys_outline',
       'ys_read_file',
       'ys_replace',
       'ys_run_command',
@@ -83,7 +84,9 @@ describe('the tool list fits its budget', () => {
       editorState: emptyEditor,
       processes: new BackgroundProcesses(),
       browser: { browser: () => null, screenshotDir: () => null },
+      symbols: { outline: async () => [], workspaceSymbols: async () => [], references: async () => [] },
     })
+    assert.ok(full.names.includes('ys_references'))
     const size = JSON.stringify(full.payload()).length
     assert.ok(size <= TOOL_PAYLOAD_BUDGET, `${size} characters, budget ${TOOL_PAYLOAD_BUDGET}`)
   })

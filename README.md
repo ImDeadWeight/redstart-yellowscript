@@ -195,7 +195,10 @@ string → `{}`, malformed JSON → descriptive error).
 
 | Tool | Description |
 |---|---|
-| `ys_read_file` | Read a file's content (workspace-relative). Truncated at 20k characters. |
+| `ys_read_file` | Read a file's content (workspace-relative). Truncated at 20k characters. A file over 400 lines read without `offset` returns its outline and first 80 lines; then read a range. |
+| `ys_outline` | A file's functions, classes and methods with line ranges, from the language server; for HTML, CSS, Markdown and the like, from the text. |
+| `ys_find_symbol` | Where a name is defined in the workspace (up to 20). |
+| `ys_references` | Every use of a symbol, with the line (up to 40). By name, or by path and line; an ambiguous name lists the candidates. |
 | `ys_list_directory` | List files in a workspace directory with sizes and types. |
 | `ys_glob` | Match files by glob pattern. Uses ripgrep when available; falls back to literal matching. |
 | `ys_grep` | Search file contents by regex. Uses ripgrep when available; falls back gracefully. |

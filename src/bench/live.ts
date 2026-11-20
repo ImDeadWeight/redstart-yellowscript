@@ -13,7 +13,8 @@
 // 2. An oversized request comes back as exceed_context_size_error with n_ctx,
 //    so the loop's trim-and-retry has the numbers it needs.
 // 3. One real tool round trip: the model reads a file and reports a word in it.
-// 4. A real dev server starts in the background, ys_check_page loads it, and
+// 4. A real dev server starts in the background, ys_check_page loads it (and
+//    runs steps and an eval on it), and
 //    stopping it ends the whole process tree (the port is free again).
 //
 // Exits 0 when every check passed. Without the two variables it says so and
@@ -140,6 +141,14 @@ await check('a background dev server: start, check the page, stop the tree', asy
     // The fixture page has a bug on purpose: the check must see it.
     assert(/title "Barrel Club"/.test(page.content), `page not loaded: ${page.content.slice(0, 200)}`)
     assert(/\[exception\].*renderScore/.test(page.content), 'the page error was not reported')
+    // Steps and eval on the real browser: the heading is there, the list the
+    // bug leaves empty is empty.
+    const stepped = await createCheckPageTool({ browser: () => browser, screenshotDir: () => null }).execute(
+      { target: `http://localhost:${port}/`, wait_s: 0, steps: [{ inspect: 'h1' }, { click: 'h1' }], eval: "document.querySelectorAll('#scores li').length" },
+      { workspaceRoots: [site] },
+    )
+    assert(/--- inspect h1 ---\n.*visible/.test(stepped.content), `inspect did not run: ${stepped.content.slice(0, 300)}`)
+    assert(/--- eval ---\n0\b/.test(stepped.content), `eval did not read the empty list: ${stepped.content.slice(0, 300)}`)
   } finally {
     processes.stop(started.id)
   }

@@ -28,6 +28,9 @@ describe('resolveTarget', () => {
     assert.match((resolveTarget('javascript:alert(1)', [root]) as { error: string }).error, /localhost URL or a workspace-relative/)
     assert.match((resolveTarget('../outside.html', [root]) as { error: string }).error, /outside the workspace/)
     assert.match((resolveTarget('missing.html', [root]) as { error: string }).error, /does not exist/)
+    // A game's test mode: the query stays on the file URL.
+    assert.match((resolveTarget('index.html?test', [root]) as { url: string }).url, /^file:\/\/.*index\.html\?test$/)
+    assert.match((resolveTarget('index.html#level-2', [root]) as { url: string }).url, /index\.html#level-2$/)
   })
 })
 

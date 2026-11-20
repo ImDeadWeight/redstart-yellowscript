@@ -1,0 +1,7 @@
+{
+  "title": "Make the player jump, and prove it by playing",
+  "prompt": "In this game (index.html, game.js), pressing Space does not make the player jump. Fix it. Then prove it works: load index.html?test with ys_check_page, press Space in its steps, and read the player's height with eval (the game keeps its state on window.__game; see AGENTS.md).",
+  "maxTurns": 20,
+  "timeoutS": 600,
+  "tags": ["core", "web"]
+}

@@ -1,0 +1,1 @@
+{ "answer": "The handler compared e.key with the old Spacebar name; it now checks e.code === Space.", "stopReason": "complete", "questions": 0, "calls": [{ "name": "ys_check_page", "args": "{\"target\":\"index.html?test\",\"steps\":[{\"key\":\"Space\"}],\"eval\":\"__game.player.y\"}", "isError": false }] }

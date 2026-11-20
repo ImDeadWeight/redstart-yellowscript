@@ -27,6 +27,7 @@ time limit; runs where the context budget had to trim.
 | `navigate-large` | A bug in an 8-file, 3,000-line game; compare prompt tokens with `--withhold ys_outline,ys_find_symbol,ys_references` |
 | `long-context-reads` | 30 files (~50k tokens) read one by one on a 32k window: the context budget |
 | `ask-before-guessing` | An ambiguous request: must ask (`ask_user`), then follow the answer |
+| `play-check` | Space does not jump: fix it, and prove it with `ys_check_page` steps and `eval` on `index.html?test` |
 | `canvas-pong` | A one-file canvas game, checked with `ys_check_page`, loading without errors |
 | `dev-server-fix` | Start a server in the background, find the page error, fix it, re-check, stop |
 | `barrel-platformer` | Milestone (`--tag milestone`): a single-screen platformer with every listed mechanic |

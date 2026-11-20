@@ -204,7 +204,7 @@ string → `{}`, malformed JSON → descriptive error).
 | `ys_grep` | Search file contents by regex. Uses ripgrep when available; falls back gracefully. |
 | `ys_diagnostics` | Return all VSCode diagnostics (errors, warnings, info, hints) with location and message. |
 | `ys_editor_context` | Return active editor state: open file, language, dirty status, cursor, selection, and open files. |
-| `ys_check_page` | Load a `localhost` URL or a workspace HTML file in headless Edge/Chrome/Chromium; report exceptions, console errors, failed requests, the canvases and visible text. The screenshot is saved to `.yellowscript/screenshots/`, and given to the model only if it reads images. Set `YELLOWSCRIPT_BROWSER` to pick a browser. |
+| `ys_check_page` | Load a `localhost` URL or a workspace HTML file in headless Edge/Chrome/Chromium; report exceptions, console errors, failed requests, the canvases and visible text. The screenshot is saved to `.yellowscript/screenshots/`, and given to the model only if it reads images. Set `YELLOWSCRIPT_BROWSER` to pick a browser. Up to 20 `steps` act on the page after load (`key` with `hold_ms`, `click` a selector or `[x, y]`, `type` `into`, `wait_ms`, `wait_for`, `screenshot`, `inspect` an element's box, visibility and styles); `eval` reads a value afterwards (a game's `window.__game`); `viewport` loads it at `390x844`. Errors are tied to the step before them. |
 
 ### Write tools (with shadow-git checkpoint)
 

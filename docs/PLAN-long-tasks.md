@@ -27,8 +27,8 @@ costs there, and phase 0 makes room first.
 | 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | Done; the recorded `dev-server-fix` run is still to do |
 | 4 | Outline, symbols, references | 2 | Yellowscript | Done; the with/without token comparison needs a live run |
 | 5 | Big files read as an outline | 2 | Yellowscript | Done |
-| 6 | Page steps, `eval`, viewport | 3 | Yellowscript | |
-| 7 | The game test hook convention | 3 | Templates, `AGENTS.md` | |
+| 6 | Page steps, `eval`, viewport | 3 | Yellowscript | Done; tested in real headless Edge, not a fake socket |
+| 7 | The game test hook convention | 3 | Templates, `AGENTS.md` | Done in the bench tasks; the starter is item 13 |
 | 8 | Workspace notes (`ys_note`) | 4 | Yellowscript | |
 | 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript | |
 | 10 | Attention when a run waits on you | 5 | Yellowscript | |

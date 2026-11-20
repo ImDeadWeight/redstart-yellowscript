@@ -61,6 +61,8 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Show Connection Status` | Details view plus the next useful action |
 | `Yellowscript: Inspect Workspace Tools` | Run all `ys_*` tools with probe args and dump results to the output channel |
 | `Yellowscript: Revert Last Write` | Restore files from the most recent approved write via the shadow checkpoint |
+| `Yellowscript: Show the Chat Waiting for You` | Bring the chat that waits on an approval or a question to the front (also the status bar's bell) |
+| `Yellowscript: Add to Yellowscript` | The editor's selection (or the current line) as a chip in the composer; also in the editor's context menu |
 | `Yellowscript: Revert Last Task` | Undo every write of the last task, newest first; files it created are removed |
 | `Yellowscript: Open Settings` | Open the Redstart Yellowscript settings page |
 
@@ -77,7 +79,12 @@ to open settings directly.
 | `redstartYellowscript.autoConnect` | `true` | Reconnect to the last-used Nest when a window opens. |
 | `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
 | `redstartYellowscript.agent.maxTurns` | `40` | Model round trips per message before asking whether to keep going (5–500). A repeated identical tool call is stopped sooner. |
+| `redstartYellowscript.commands.builtInSafe` | `true` | Run read-only commands (`git status`, `cat`, `rg`) without asking. |
+| `redstartYellowscript.commands.autoRunProjectChecks` | `true` | Run the project's test, build and lint scripts and a dev server without asking. |
+| `redstartYellowscript.extraReadRoots` | `[]` | Folders outside the workspace the read tools may read. |
 | `redstartYellowscript.allowedCommands` | `[]` | Command prefixes that run without asking in this workspace (`npm test`). Chained, piped or redirected lines always ask. |
+| `redstartYellowscript.notifyWhenWaiting` | `true` | Notify when a chat waits for you, or a long run finishes, while the window is not focused. |
+| `redstartYellowscript.tools.unifiedDiff` | `false` | Offer `ys_edit_file` (unified diffs) to the model. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ys_write_file`, `ys_edit_file`). |
 
 A password is used once: Yellowscript signs in, has Nest issue a key for this
@@ -155,6 +162,32 @@ so the model is offered both (agent-core runs them; see below).
   instead of stopping silently. A tool call repeated with identical arguments
   a fourth time is not run; the model is told to change approach.
 
+### Images, files and selections
+
+- **Images:** paste or drop them into the composer (up to 4 a message,
+  downscaled to 1,280px). They go to the model only when it reads images
+  (llama-server's `/props`); otherwise the composer says so.
+- **`@file`:** type `@` and part of a path to pick a workspace file. It
+  goes with the message as its content, or as its outline when it is over
+  300 lines; the bubble shows a chip. Secrets files are not offered.
+- **Selections:** **Add to Yellowscript** in the editor's context menu adds
+  the selected lines as a chip. **Fix with Yellowscript**, a quick fix on an
+  error or warning, sends the problem with the lines around it.
+
+### When a run needs you, or was cut off
+
+When the window is not focused and a chat starts waiting (an approval, a
+question, the turn limit), a notification names the chat, with **Show**; the
+status bar shows a bell until it is answered. A run of over two minutes that
+finishes unwatched says so too. `notifyWhenWaiting` turns the notifications
+off.
+
+A reload or a crash ends a run and stops its processes. The chat keeps a
+record while a run goes, so on the next load it shows **This task was
+interrupted** with **Continue** (and **Restart and continue** when it had
+processes running, such as a dev server) or **Dismiss**. What the run had
+already done is in its log, so Continue starts from there.
+
 ### Long runs and the context window
 
 A run's tool results are sent back on every request, so a long task would
@@ -167,7 +200,16 @@ as too large anyway, Yellowscript trims harder and retries once. Each trim is
 logged to the output channel.
 
 Every request with tools also starts with a short note about the workspace:
-its `AGENTS.md` (or `CLAUDE.md`) and a two-level file tree.
+its `AGENTS.md` (or `CLAUDE.md`), the model's own notes
+(`.yellowscript/NOTES.md`, kept with `ys_note`), and a two-level file tree.
+
+Across messages, only your words and the assistant's answers are sent, so
+each answer also carries a short log of what its run did: files created,
+changed, moved or deleted, commands and their exit codes, processes started
+and their address, the last page check's first problem. Rejected writes and
+commands are listed as rejected. Logs older than the last six answers shrink
+to one line. What is running right now (`p1 "npm run dev" →
+http://localhost:5173`) goes on your newest message.
 
 The webview is Svelte 5 (`src/webview/components/`). Its state is a plain
 reducer, `src/webview/view-model.ts`, tested under `node --test`; the
@@ -183,13 +225,16 @@ string → `{}`, malformed JSON → descriptive error).
 
 | Tool | Description |
 |---|---|
-| `ys_read_file` | Read a file's content (workspace-relative). Truncated at 20k characters. |
+| `ys_read_file` | Read a file's content (workspace-relative). Truncated at 20k characters. A file over 400 lines read without `offset` returns its outline and first 80 lines; then read a range. |
+| `ys_outline` | A file's functions, classes and methods with line ranges, from the language server; for HTML, CSS, Markdown and the like, from the text. |
+| `ys_find_symbol` | Where a name is defined in the workspace (up to 20). |
+| `ys_references` | Every use of a symbol, with the line (up to 40). By name, or by path and line; an ambiguous name lists the candidates. |
 | `ys_list_directory` | List files in a workspace directory with sizes and types. |
 | `ys_glob` | Match files by glob pattern. Uses ripgrep when available; falls back to literal matching. |
 | `ys_grep` | Search file contents by regex. Uses ripgrep when available; falls back gracefully. |
 | `ys_diagnostics` | Return all VSCode diagnostics (errors, warnings, info, hints) with location and message. |
 | `ys_editor_context` | Return active editor state: open file, language, dirty status, cursor, selection, and open files. |
-| `ys_check_page` | Load a `localhost` URL or a workspace HTML file in headless Edge/Chrome/Chromium; report exceptions, console errors, failed requests, the canvases and visible text. The screenshot is saved to `.yellowscript/screenshots/`, and given to the model only if it reads images. Set `YELLOWSCRIPT_BROWSER` to pick a browser. |
+| `ys_check_page` | Load a `localhost` URL or a workspace HTML file in headless Edge/Chrome/Chromium; report exceptions, console errors, failed requests, the canvases and visible text. The screenshot is saved to `.yellowscript/screenshots/`, and given to the model only if it reads images. Set `YELLOWSCRIPT_BROWSER` to pick a browser. Up to 20 `steps` act on the page after load (`key` with `hold_ms`, `click` a selector or `[x, y]`, `type` `into`, `wait_ms`, `wait_for`, `screenshot`, `inspect` an element's box, visibility and styles); `eval` reads a value afterwards (a game's `window.__game`); `viewport` loads it at `390x844`. Errors are tied to the step before them. |
 
 ### Write tools (with shadow-git checkpoint)
 
@@ -197,9 +242,10 @@ string → `{}`, malformed JSON → descriptive error).
 |---|---|
 | `ys_replace` | Propose replacing exact text (`old_string` → `new_string`), unique unless `replace_all`. The edit local models get right. |
 | `ys_write_file` | Propose writing a complete file (new or full replacement). Checkpointed for revert. |
-| `ys_edit_file` | Propose editing a file via unified diff. Diff must match current content; mismatches rejected. |
+| `ys_edit_file` | Propose editing a file via unified diff. Offered only with `tools.unifiedDiff`; small models get diffs wrong. |
 | `ys_delete_file` | Propose deleting a file. Always reviewed, whatever has been allowed. |
 | `ys_move_file` | Propose moving or renaming a file. |
+| `ys_note` | Propose replacing one `## section` of `.yellowscript/NOTES.md`, the model's notes on the project (how to run and check it, where things live, decisions, known problems). The notes go with every request, after `AGENTS.md`, up to 1,500 characters; the sections left out are named. |
 
 An applied write's result ends with the errors and warnings the language
 server now reports in the files it wrote.
@@ -209,14 +255,40 @@ server now reports in the files it wrote.
 | Tool | Description |
 |---|---|
 | `ys_run_command` | Propose a shell command; it runs after approval and the result starts with its exit code, then stdout and stderr. `timeout_s` (default 120, max 900). |
-| `ys_process_start` | Propose a long-running command (a dev server, a watcher) in the background. Same approval. |
-| `ys_process_output` | Read what a background process printed since the last read (`wait_s` to wait for a server to come up). |
-| `ys_process_stop` | Stop a background process. All of them stop when the window closes. |
+| `ys_process` | Background commands (a dev server, a watcher). `action: "start"` proposes one, with the same approval, and waits up to 5s for the address it prints (`p1 is serving http://localhost:5173`) or for it to exit; `"output"` reads what it printed since the last read (`wait_s` to wait); `"stop"` ends it. All of them stop when the window closes. |
 
 Commands run with your shell and environment; their output streams into the
-**Yellowscript Commands** output channel. **Always allow** on the prompt adds
-the command's prefix (`npm test`, `npm run build`) to `allowedCommands` for
-this workspace. A line that chains, pipes or redirects always asks.
+**Yellowscript Commands** output channel. Some run without asking:
+
+- **Read-only** (`commands.builtInSafe`): listing and reading workspace
+  files (`ls`, `dir`, `cat`, `type`, `head`), searching (`grep`, `rg`,
+  `findstr`, `find` without `-exec` or `-delete`), versions, package facts
+  (`npm ls`, `npm view`), read-only git (`status`, `diff`, `log`, `show`,
+  `blame`, listing branches), `node --check` and `npx tsc --noEmit`. Git
+  runs with hooks, fsmonitor, external diffs and the pager turned off.
+- **The project's own checks** (`commands.autoRunProjectChecks`): the
+  `test`, `build`, `lint`, `typecheck`, `check` and `format:check` scripts
+  that exist in `package.json` (unless this run changed them), a `dev`,
+  `start`, `serve` or `preview` script in the background, locally installed
+  `vitest run`, `jest`, `eslint`, `prettier --check` and `playwright test`,
+  and `pytest`, `ruff check`, `mypy`, `cargo` and `go` checks.
+
+Everything else asks. A line that chains, pipes, redirects or expands a
+variable (`$HOME`, `%USERPROFILE%`, `~`) always asks, and so does one that
+names a path outside the workspace, inside `.git`, or a secrets file, or
+searches a folder that holds one. Such a command's card and its output-channel
+line name the rule that let it run. **Always allow** on the prompt adds the
+command's prefix (`npm test`, `npm run build`) to `allowedCommands` for this
+workspace; it is not offered for `git push`, `git reset --hard`,
+`git clean`, `git restore` or a recursive delete, which ask every time.
+Credentials in URLs (`https://user:token@host`) are masked in what the model
+reads.
+
+The read tools can read outside the workspace after asking: **Allow this
+time**, **Always for this folder** (kept in `extraReadRoots`), or **Deny**.
+Never writing there, and never the home folder itself, the folders above it,
+`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker` or the system
+folders.
 
 ## Write approval & shadow checkpoints
 
@@ -235,6 +307,21 @@ taken even when auto-approval bypasses the prompt.
 **Revert Last Write** restores files from the most recent checkpoint.
 **Revert Last Task** undoes every write of the last task, newest first, and
 removes the files it created.
+
+Some paths are protected, whatever has been allowed. Writes inside `.git`
+(its config and hooks are programs git runs), to the checkpoint repository,
+or to Yellowscript's own `redstartYellowscript.*` settings are refused. Other
+changes to `.vscode/settings.json`, a `.code-workspace` file,
+`.vscode/tasks.json` or `launch.json`, and a change to `package.json`'s
+`scripts`, always ask, like a deletion. Reading a `.env` file, a key or a
+credentials file (`.npmrc`, `.netrc`, `id_rsa`) asks first, and search skips
+them, since what a read returns goes to the model and into the saved chat.
+
+When a run writes files or runs commands, its answer ends with a summary:
+each file it changed (click one for its diff since the run began, read from
+the checkpoint, so it works after a reload), the commands with their exit
+codes, and the processes it started with their address. The newest such
+summary has **Revert this task**.
 
 ## MCP tools (Nest integration)
 

@@ -17,7 +17,8 @@ import {
   type ToolContext,
   type ToolResult,
 } from './types.ts'
-import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
+import { PathScopeError, describeWorkspacePath } from './workspace-path.ts'
+import { resolveReadPath } from './read-scope.ts'
 
 /** Entries listed before the rest are dropped. A directory with more than this
  *  is a build output or a dependency tree, and the model needs to know it is
@@ -28,17 +29,14 @@ export const listDirectoryTool: Tool = {
   definition: {
     name: assertWorkspaceToolName('ys_list_directory'),
     description:
-      'List the contents of a workspace directory, one entry per line, directories first. ' +
-      'Directories are shown with a trailing slash and files with their size. ' +
-      'Does not recurse — use ys_glob to match files across a tree. ' +
-      'Nothing outside the workspace can be listed.',
+      'List one workspace directory: folders first (trailing /), files with their size. ' +
+      'Not recursive; use ys_glob across a tree.',
     inputSchema: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description:
-            'Workspace-relative directory, e.g. "src". Omit or pass "." for the workspace root.',
+          description: 'Workspace-relative directory; omit for the root.',
         },
       },
       required: [],
@@ -54,7 +52,7 @@ export const listDirectoryTool: Tool = {
 
     let absolute: string
     try {
-      absolute = resolveWithinWorkspace(context.workspaceRoots, requested)
+      absolute = await resolveReadPath(context, requested)
     } catch (err) {
       if (err instanceof PathScopeError) {
         if (err.reason === 'no-workspace') {

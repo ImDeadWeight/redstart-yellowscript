@@ -1,5 +1,5 @@
 // =============================================================================
-// Host-side command approval for ys_run_command and ys_process_start.
+// Host-side command approval for ys_run_command and ys_process start.
 // =============================================================================
 // Implements the `CommandApprovalGate` port. The model only ever proposes a
 // command; this is where it runs, and only after the person has seen it
@@ -12,17 +12,18 @@
 // timeout. Output streams live into the "Yellowscript Commands" output
 // channel, which is where the person watches it.
 //
-// A background command (ys_process_start) is started and left running; the
-// model reads it with ys_process_output.
+// A background command (ys_process start) is started and left running; the
+// model reads it with ys_process output.
 // =============================================================================
 
 import * as vscode from 'vscode'
 
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
-import { formatCommandRun, runCommandLine, runFailed, type BackgroundProcesses } from '../tools/process-runner.ts'
+import { formatCommandRun, runCommandLine, runFailed, startInBackground, type BackgroundProcesses } from '../tools/process-runner.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
 import type { AskApproval } from '../chat/approvals.ts'
+import type { CommandTier } from '../tools/safe-commands.ts'
 
 const ALLOWED_KEY = 'allowedCommands'
 
@@ -44,6 +45,8 @@ export interface CommandGateDeps {
   processes: BackgroundProcesses
   /** Ask on the conversation's approval card. */
   ask: AskApproval
+  /** Which tier the line is in (safe-commands.ts); absent: everything asks. */
+  classify?: (pending: PendingCommand) => CommandTier
 }
 
 /**
@@ -52,14 +55,19 @@ export interface CommandGateDeps {
  */
 export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand) => Promise<CommandOutcome | null> {
   return async (pending: PendingCommand): Promise<CommandOutcome | null> => {
-    const allowedAlready = isCommandAllowed(pending.command, allowedCommands())
-    if (!allowedAlready) {
-      const prefix = allowPrefixFor(pending.command)
+    const tier = deps.classify?.(pending) ?? null
+    // Tier A and B run without asking; the person's own prefixes come after,
+    // except for a line that discards work, which asks every time.
+    const safe = tier && tier.tier !== 'C' ? tier : null
+    const neverAlways = tier?.tier === 'C' ? tier.neverAlways : undefined
+    const allowedAlready = !safe && !neverAlways && isCommandAllowed(pending.command, allowedCommands())
+    if (!safe && !allowedAlready) {
+      const prefix = neverAlways ? null : allowPrefixFor(pending.command)
       const choice = await deps.ask({
         kind: 'command',
         title: pending.background ? 'Start a command in the background' : 'Run a command',
         subject: pending.command,
-        detail: `in ${pending.label}`,
+        detail: neverAlways ? `in ${pending.label}. Asked every time: ${neverAlways}.` : `in ${pending.label}`,
         options: [
           { id: 'run', label: pending.background ? 'Start' : 'Run', kind: 'allow' },
           ...(prefix ? [{ id: 'always', label: `Always allow "${prefix}"`, kind: 'always' as const }] : []),
@@ -71,22 +79,14 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
     }
 
     const channel = deps.channel
-    channel.appendLine(`\n$ ${pending.command}    (${pending.label}${allowedAlready ? ', allowed' : ''})`)
+    const how = safe ? `, safe: ${safe.rule}` : allowedAlready ? ', allowed' : ''
+    channel.appendLine(`\n$ ${pending.command}    (${pending.label}${how})`)
+    const auto = safe ? { autoRule: safe.rule } : {}
 
     if (pending.background) {
       try {
-        const started = deps.processes.start(pending.command, pending.cwd)
-        // Give it a moment, so a command that fails at once says so now.
-        const first = await deps.processes.output(started.id, { waitMs: 3_000 })
-        const state = first?.process.running ? 'is running' : `exited at once with code ${first?.process.exitCode ?? 'none'}`
-        const text = first?.text.trimEnd()
-        return {
-          text:
-            `Started ${started.id}: ${pending.command} — it ${state}.\n` +
-            (text ? `--- first output ---\n${text.slice(-4_000)}\n` : '(no output yet)\n') +
-            `Read more with ys_process_output {"id":"${started.id}"}; end it with ys_process_stop.`,
-          isError: first ? !first.process.running && first.process.exitCode !== 0 : false,
-        }
+        // Waits for its address or its exit, so the model is told which.
+        return { ...(await startInBackground(deps.processes, pending.command, pending.cwd)), ...auto }
       } catch (err) {
         return { text: `Could not start the command: ${err instanceof Error ? err.message : String(err)}`, isError: true }
       }
@@ -94,13 +94,15 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
 
     channel.show(true)
     const run = await runCommandLine({
-      command: pending.command,
+      // A hardened git line runs with Yellowscript's own settings added.
+      command: safe?.run ?? pending.command,
       cwd: pending.cwd,
+      ...(safe?.env ? { env: safe.env } : {}),
       ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}),
       onOutput: (chunk) => channel.append(chunk),
     })
     const text = formatCommandRun(run)
     channel.appendLine(`[${text.split('\n')[0]}]`)
-    return { text, isError: runFailed(run) }
+    return { text, isError: runFailed(run), exitCode: run.exitCode, ...auto }
   }
 }

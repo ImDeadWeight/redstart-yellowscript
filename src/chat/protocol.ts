@@ -33,6 +33,8 @@
 // =============================================================================
 
 import type { StreamChannel } from '../nest/streaming.ts'
+import type { ToolEffect } from '../tools/types.ts'
+import { parseAttachments } from './attachments.ts'
 
 /**
  * Bumped when a message shape changes incompatibly. The webview announces the
@@ -71,7 +73,20 @@ export interface ChatMessageView {
   /** The tools this assistant turn ran, in order. Kept on the turn (not only
    *  sent as live messages) so a rebuilt panel can draw the cards again. */
   tools?: ToolCardView[]
+  /** A user message's images, files and selections (chat/attachments.ts). */
+  attachments?: AttachmentView[]
+  /** What this turn's run changed (writes, commands, processes, page
+   *  checks), in order. Sent to the model after the turn's text on later
+   *  requests (chat/run-log.ts), and drawn as the task summary. */
+  run?: ToolEffect[]
 }
+
+/** Something attached to a user message. A file's content is read by the
+ *  host when the message is sent and kept, so later requests repeat it. */
+export type AttachmentView =
+  | { kind: 'image'; name: string; dataUrl: string }
+  | { kind: 'file'; path: string; content?: string; lines?: number; outline?: boolean }
+  | { kind: 'selection'; path: string; startLine: number; endLine: number; text: string }
 
 /** One tool call on an assistant turn. */
 export interface ToolCardView {
@@ -162,6 +177,22 @@ export interface ConversationState {
   atTurnLimit: boolean
   /** The tool call waiting to be allowed or denied, or null. */
   approval: ApprovalView | null
+  /** A run that was still going when the window closed or crashed. */
+  interrupted?: InterruptedView | null
+}
+
+/** A run cut off by a reload or a crash, offered to be continued. */
+export interface InterruptedView {
+  startedAt: number
+  /** The background commands it had running, which stopped with the window. */
+  processes: string[]
+}
+
+/** What a running turn records with the conversation, so a reload can tell
+ *  it was cut off. Cleared when the run ends. */
+export interface InFlightRun {
+  startedAt: number
+  processes: { id: string; command: string; cwd: string }[]
 }
 
 /** A Nest project, as the Projects page lists it. */
@@ -239,6 +270,8 @@ export interface SessionSnapshot {
   queued: number
   /** The Nest project this workspace is linked to. */
   project?: { id: string; name: string }
+  /** The model reads images; false: the composer says so instead of sending them. */
+  vision?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +282,9 @@ export type WebviewMessage =
   /** Sent once per webview lifetime, after the DOM is built. The host answers
    *  with `init`. Also re-sent after VSCode rebuilds a hidden view. */
   | { type: 'ready'; protocolVersion: number }
-  | { type: 'send'; text: string }
+  | { type: 'send'; text: string; attachments?: AttachmentView[] }
+  /** The @ picker: workspace files matching `query`. */
+  | { type: 'searchFiles'; query: string }
   | { type: 'abort' }
   | { type: 'newConversation' }
   | { type: 'listConversations' }
@@ -289,6 +324,14 @@ export type WebviewMessage =
   | { type: 'clearPlan' }
   /** At the turn limit: keep going, or stop. */
   | { type: 'continueAtLimit'; go: boolean }
+  /** An interrupted run: continue it (restarting its processes first, when
+   *  `restart`), or put the card away. */
+  | { type: 'resumeTask'; restart: boolean }
+  | { type: 'dismissInterrupted' }
+  /** The task summary: open a file's diff since the run (`turnId`) began. */
+  | { type: 'openTaskDiff'; turnId: string; path: string }
+  /** The task summary: undo every write of the run `turnId`. */
+  | { type: 'revertTask'; turnId: string }
 
 // ---------------------------------------------------------------------------
 // host → webview
@@ -343,9 +386,15 @@ export type HostMessage =
       summary: string
       isError: boolean
       truncated: boolean
+      /** What the call changed, for the run's task summary. */
+      effect?: ToolEffect
     }
    /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
     | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
+    /** The @ picker's answer: workspace files matching `query`. */
+    | { type: 'fileMatches'; query: string; paths: string[] }
+    /** Put a chip in the composer (the editor's "Add to Yellowscript"). */
+    | { type: 'addAttachment'; attachment: AttachmentView }
     /** Phase 4: the current tool-set inventory (local ys_* + live Nest tools), sent
      *  so the webview can render the tool picker and grey out server-banned names.
      *  Each entry carries its origin so the card can show "runs on Nest" vs local. */
@@ -399,7 +448,13 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
         ? { type: 'ready', protocolVersion: msg.protocolVersion }
         : null
     case 'send':
-      return typeof msg.text === 'string' ? { type: 'send', text: msg.text } : null
+      if (typeof msg.text !== 'string') return null
+      {
+        const attachments = parseAttachments(msg.attachments)
+        return attachments.length ? { type: 'send', text: msg.text, attachments } : { type: 'send', text: msg.text }
+      }
+    case 'searchFiles':
+      return typeof msg.query === 'string' ? { type: 'searchFiles', query: msg.query.slice(0, 200) } : null
     case 'abort':
       return { type: 'abort' }
     case 'newConversation':
@@ -460,6 +515,14 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
         : null
     case 'clearPlan':
       return { type: 'clearPlan' }
+    case 'resumeTask':
+      return { type: 'resumeTask', restart: msg.restart === true }
+    case 'dismissInterrupted':
+      return { type: 'dismissInterrupted' }
+    case 'openTaskDiff':
+      return typeof msg.turnId === 'string' && typeof msg.path === 'string' ? { type: 'openTaskDiff', turnId: msg.turnId, path: msg.path } : null
+    case 'revertTask':
+      return typeof msg.turnId === 'string' ? { type: 'revertTask', turnId: msg.turnId } : null
     case 'loadPage':
       return msg.page === 'projects' || msg.page === 'workflows' ? { type: 'loadPage', page: msg.page } : null
     case 'linkProject':

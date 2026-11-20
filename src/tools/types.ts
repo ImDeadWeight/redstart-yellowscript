@@ -75,6 +75,27 @@ export interface ToolContext {
   /** The conversation whose run made the call, so a tool that needs the
    *  person (a Nest tool's approval) asks in the right tab. */
   conversationId?: string
+  /**
+   * Ask the person before a read whose content should not go to the model
+   * unasked (a .env file, a key: protected-paths.ts). Resolves true to read.
+   * Absent (the bench, tests): such reads are refused.
+   */
+  askRead?: (request: ReadRequest) => Promise<boolean>
+  /** Folders outside the workspace the person allowed reading
+   *  (redstartYellowscript.extraReadRoots; read-scope.ts). */
+  readRoots?: readonly string[]
+}
+
+/** A read that waits for the person. */
+export interface ReadRequest {
+  absolutePath: string
+  /** As the model and the card name it. */
+  label: string
+  /** Why it asks, e.g. ".env usually holds secrets". */
+  reason: string
+  /** Set for a read outside the workspace: the folder "Always for this
+   *  folder" would add to the extra read roots. */
+  outsideFolder?: string
 }
 
 export interface ToolResult {
@@ -107,7 +128,58 @@ export interface ToolResult {
    * the model reads back, so the card shows the command exactly as it will run.
    */
   pendingCommand?: PendingCommand
+  /** Set by the registry when the call's arguments were malformed JSON that
+   *  it repaired (argument-repair.ts). Counted by the bench; not shown. */
+  argumentsRepaired?: readonly string[]
+  /** What the call changed or found, as data: the run log (chat/run-log.ts)
+   *  and the task summary are built from these, not from `content`. */
+  effect?: ToolEffect
 }
+
+/**
+ * What a tool call did, for the run log. JSON-safe: stored with the
+ * transcript. Reads and searches have none; they changed nothing.
+ */
+export type ToolEffect =
+  | {
+      kind: 'write'
+      /** False when the person rejected it: the model must not assume it happened. */
+      applied: boolean
+      /** `path` is what the model and the card see; `absolutePath` finds the
+       *  file's copy in the checkpoint. */
+      files: { path: string; absolutePath?: string; isNew: boolean; isDeleted: boolean }[]
+      /** The shadow-git checkpoint taken before it was applied: what the task
+       *  summary diffs against and Revert This Task restores. */
+      checkpoint?: { revision: string; root: string }
+    }
+  | {
+      kind: 'command'
+      command: string
+      /** False when the person rejected it. */
+      ran: boolean
+      exitCode: number | null
+      /** Started in the background, as this process id. */
+      processId?: string
+      /** Where a background process runs, so an interrupted task can restart it. */
+      cwd?: string
+      /** The address a background process said it serves. */
+      url?: string
+      /** The run did not succeed (non-zero exit, timeout, could not start). */
+      failed?: boolean
+      /** A failed run's last line of output, for the log. */
+      lastLine?: string
+      /** It ran without asking, under this rule (safe-commands.ts). */
+      autoRule?: string
+    }
+  | { kind: 'stop'; processId: string }
+  | {
+      kind: 'check'
+      target: string
+      /** Exceptions, console errors and failed requests. */
+      problems: number
+      /** The first of them, since that is what the next message asks about. */
+      first: string | null
+    }
 
 /** A shell command the model proposes to run, for always-ask approval. */
 export interface PendingCommand {
@@ -119,7 +191,7 @@ export interface PendingCommand {
   label: string
   /** One-shot time limit; the runner's default when absent. */
   timeoutMs?: number
-  /** Start it as a background process (ys_process_start) instead of waiting. */
+  /** Start it as a background process (ys_process start) instead of waiting. */
   background?: boolean
 }
 
@@ -129,6 +201,9 @@ export interface PendingWrite {
   /** Workspace-relative label for the UI card. */
   label: string
   changes: readonly FileChangePreview[]
+  /** Why this write must be shown even under "Always allow edits" or "Apply
+   *  all in this task" (protected-paths.ts): it touches what runs code. */
+  alwaysAsk?: string
 }
 
 export interface FileChangePreview {

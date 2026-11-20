@@ -472,6 +472,30 @@ describe('runAgentLoop — reporting', () => {
     assert.match(result.toolRuns[0]?.result.content ?? '', /Applied/)
     assert.equal(result.toolRuns[0]?.result.pendingWrite, undefined)
   })
+
+  test('the write effect records the checkpoint the gate took', async () => {
+    const tools = registry()
+    const client = scriptedStreamer([
+      streamResult({ toolCalls: [callDelta('ys_write_file', JSON.stringify({ path: 'new.txt', content: 'x\n' }))] }),
+      streamResult({ content: 'done' }),
+    ])
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools,
+      toolContext,
+      approveChange: async () => ({ applied: true, checkpoint: { revision: 'abc123', root: '/ws' } }),
+    })
+    const effect = result.toolRuns[0]!.result.effect
+    assert.equal(effect?.kind, 'write')
+    if (effect?.kind === 'write') {
+      assert.equal(effect.applied, true)
+      assert.deepEqual(effect.checkpoint, { revision: 'abc123', root: '/ws' })
+      assert.equal(effect.files[0]!.path, 'new.txt')
+      assert.equal(effect.files[0]!.isNew, true)
+      assert.ok(effect.files[0]!.absolutePath)
+    }
+  })
 })
 
 // --- What agent-core brings ---------------------------------------------------
@@ -756,6 +780,9 @@ describe('runAgentLoop — a model that cannot stop (2026-11-19)', () => {
   test('reads of different files are never a repeat', () => {
     assert.notEqual(callSignature('ys_read_file', '{"path":"data/level-01.txt"}'), callSignature('ys_read_file', '{"path":"data/level-02.txt"}'))
     assert.equal(callSignature('ys_run_command', '{"command":"echo break2"}'), callSignature('ys_run_command', '{"command":"echo break3"}'))
+    // A start is a command; reading two processes' output is not one call.
+    assert.equal(callSignature('ys_process', '{"action":"start","command":"node s1.js"}'), callSignature('ys_process', '{"action":"start","command":"node s2.js"}'))
+    assert.notEqual(callSignature('ys_process', '{"action":"output","id":"p1"}'), callSignature('ys_process', '{"action":"output","id":"p2"}'))
   })
 
   test('ask_user and update_plan are offered even when Nest offers nothing', async () => {

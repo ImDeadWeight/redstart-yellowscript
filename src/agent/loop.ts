@@ -36,7 +36,8 @@ import type { ChatCompletionRequest, StreamHandlers, StreamResult } from '../nes
 import { NestHttpError, type ToolCall } from '../nest/types.ts'
 import type { ToolCallDelta, StreamTimings } from '../nest/streaming.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
-import type { PendingCommand, PendingWrite, ToolContext, ToolResult } from '../tools/types.ts'
+import { isProcessStart } from '../tools/process-tools.ts'
+import type { PendingCommand, PendingWrite, ToolContext, ToolEffect, ToolResult } from '../tools/types.ts'
 import {
   FALLBACK_ID_PREFIX,
   runAgentLoop as runCoreLoop,
@@ -141,7 +142,13 @@ export interface AgentLoopHandlers extends StreamHandlers {
  * so the whole loop stays testable with a scripted gate — the real one lives in
  * the host alongside `vscode`.
  */
-export type ApprovalGate = (pending: PendingWrite) => Promise<boolean>
+export type ApprovalGate = (pending: PendingWrite) => Promise<boolean | WriteOutcome>
+
+/** An approval gate's answer, with the checkpoint it took before applying. */
+export interface WriteOutcome {
+  applied: boolean
+  checkpoint?: { revision: string; root: string }
+}
 
 /**
  * The approval gate for a planned command (Phase 4.1). Unlike writes, a command
@@ -158,6 +165,14 @@ export type CommandApprovalGate = (pending: PendingCommand) => Promise<CommandOu
 export interface CommandOutcome {
   text: string
   isError: boolean
+  /** For the run log; null when it did not exit (timed out, still running). */
+  exitCode?: number | null
+  /** Started in the background as this process. */
+  processId?: string
+  /** The address the background process said it serves. */
+  url?: string
+  /** It ran without asking, under this rule (safe-commands.ts). */
+  autoRule?: string
 }
 
 export interface AgentLoopOptions {
@@ -484,11 +499,19 @@ function answerSummary(answer: AskAnswerShape | null): string {
 async function review(toolResult: ToolResult, options: AgentLoopOptions): Promise<ToolResult> {
   if (toolResult.pendingWrite && options.approveChange) {
     const pending = toolResult.pendingWrite
-    const applied = await options.approveChange(pending)
+    const answer = await options.approveChange(pending)
+    const outcome: WriteOutcome = typeof answer === 'boolean' ? { applied: answer } : answer
+    const applied = outcome.applied
     // Honest accounting: the model is told whether the write actually
     // happened, never that a pending plan succeeded on its own.
-    if (!applied) return withRejectedNote(toolResult)
-    const done = withAppliedNote(toolResult)
+    const effect: ToolEffect = {
+      kind: 'write',
+      applied,
+      files: pending.changes.map((c) => ({ path: c.path, absolutePath: c.absolutePath, isNew: c.isNew, isDeleted: c.isDeleted })),
+    }
+    if (outcome.checkpoint) effect.checkpoint = outcome.checkpoint
+    if (!applied) return { ...withRejectedNote(toolResult), effect }
+    const done: ToolResult = { ...withAppliedNote(toolResult), effect }
     // What the write broke, without another call. Deleted files have none.
     const written = pending.changes.filter((c) => !c.isDeleted).map((c) => c.absolutePath)
     if (options.diagnosticsAfterWrite && written.length > 0) {
@@ -500,10 +523,37 @@ async function review(toolResult: ToolResult, options: AgentLoopOptions): Promis
   if (toolResult.pendingCommand && options.approveCommand) {
     // Always-ask: show verbatim → run on approval → capture output. The gate
     // returns the captured output, or null if rejected.
-    const output = await options.approveCommand(toolResult.pendingCommand)
-    return withCommandNote(toolResult, output)
+    const pending = toolResult.pendingCommand
+    const output = await options.approveCommand(pending)
+    return { ...withCommandNote(toolResult, output), effect: commandEffect(pending, output) }
   }
   return toolResult
+}
+
+/** The run log's record of a command, from what the gate returned. */
+function commandEffect(pending: PendingCommand, outcome: CommandOutcome | string | null): ToolEffect {
+  if (outcome === null) return { kind: 'command', command: pending.command, ran: false, exitCode: null }
+  const output = typeof outcome === 'string' ? { text: outcome, isError: false } : outcome
+  const effect: ToolEffect = { kind: 'command', command: pending.command, ran: true, exitCode: output.exitCode ?? null }
+  if (output.processId) {
+    effect.processId = output.processId
+    effect.cwd = pending.cwd
+  }
+  if (output.autoRule) effect.autoRule = output.autoRule
+  if (output.url) effect.url = output.url
+  if (output.isError) {
+    effect.failed = true
+    const last = lastMeaningfulLine(output.text)
+    if (last) effect.lastLine = last
+  }
+  return effect
+}
+
+/** The last line of a failed command's output worth quoting: not a header. */
+function lastMeaningfulLine(text: string): string | null {
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !/^(---|\[|Exit code )/.test(l))
+  const last = lines.at(-1)
+  return last ? last.slice(0, 120) : null
 }
 
 /** Replace a pending-write result's text with the honest "applied" outcome, so
@@ -553,7 +603,7 @@ function withCommandNote(result: ToolResult, outcome: CommandOutcome | string | 
   const next: ToolResult = {
     ...result,
     content: output.text,
-    summary: `${result.summary.replace(/ \(pending approval\)$/, '')} — ${output.isError ? 'failed' : 'ran'}`,
+    summary: `${result.summary.replace(/ \(pending approval\)$/, '')} — ${output.isError ? 'failed' : 'ran'}${output.autoRule ? ` without asking (${output.autoRule})` : ''}`,
     isError: output.isError,
   }
   delete next.pendingCommand
@@ -588,6 +638,6 @@ export function withHostTools(payload: ToolPayloadEntry[], options: Pick<AgentLo
  * check). Reads keep exact arguments: level-01 … level-30 are different work.
  */
 export function callSignature(name: string, args: string): string {
-  const loose = name === 'ys_run_command' || name === 'ys_process_start'
+  const loose = name === 'ys_run_command' || name === 'ys_process_start' || (name === 'ys_process' && isProcessStart(args))
   return `${name}\u0000${(loose ? args.replace(/\d+/g, '#') : args).trim()}`
 }

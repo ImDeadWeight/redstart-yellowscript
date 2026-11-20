@@ -16,6 +16,7 @@ import { locateRipgrep } from '../tools/ripgrep.ts'
 import { migrateToolNames, type ApprovalStore } from '../tools/approval.ts'
 import { formatWriteDiagnostics, type DiagnosticRecord, type DiagnosticSeverity } from '../tools/diagnostics.ts'
 import type { EditorState, EditorPosition } from '../tools/editor-context.ts'
+import type { OutlineSymbol, SymbolProvider } from '../tools/symbols.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -227,4 +228,61 @@ export async function diagnosticsAfterWrite(files: string[]): Promise<string | n
     sub?.dispose()
   }
   return formatWriteDiagnostics(diagnosticsProvider(), files, workspaceRoots())
+}
+
+// ---------------------------------------------------------------------------
+// Symbols: VS Code's document, workspace and reference providers.
+// ---------------------------------------------------------------------------
+
+/** "Function", "Method"… as the tools print them. */
+function kindName(kind: vscode.SymbolKind): string {
+  return (vscode.SymbolKind[kind] ?? 'symbol').toLowerCase()
+}
+
+function fromDocumentSymbol(symbol: vscode.DocumentSymbol): OutlineSymbol {
+  const out: OutlineSymbol = { name: symbol.name, kind: kindName(symbol.kind), line: symbol.range.start.line + 1, endLine: symbol.range.end.line + 1 }
+  if (symbol.children.length) out.children = symbol.children.map(fromDocumentSymbol)
+  return out
+}
+
+/**
+ * The language servers' symbols, for ys_outline, ys_find_symbol and
+ * ys_references. Each call goes through VS Code's commands, which open the
+ * document if they need to; a file type with no language extension returns
+ * nothing, and ys_outline falls back to its text outline.
+ */
+export const symbolProvider: SymbolProvider = {
+  async outline(absolutePath) {
+    const found = await vscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
+      'vscode.executeDocumentSymbolProvider',
+      vscode.Uri.file(absolutePath),
+    )
+    return (found ?? []).map((s) =>
+      'children' in s
+        ? fromDocumentSymbol(s)
+        : { name: s.name, kind: kindName(s.kind), line: s.location.range.start.line + 1, endLine: s.location.range.end.line + 1 },
+    )
+  },
+  async workspaceSymbols(query) {
+    const found = await vscode.commands.executeCommand<vscode.SymbolInformation[]>('vscode.executeWorkspaceSymbolProvider', query)
+    return (found ?? [])
+      .filter((s) => s.location.uri.scheme === 'file')
+      .map((s) => ({
+        name: s.name,
+        kind: kindName(s.kind),
+        file: s.location.uri.fsPath,
+        line: s.location.range.start.line + 1,
+        ...(s.containerName ? { container: s.containerName } : {}),
+      }))
+  },
+  async references(absolutePath, line, character) {
+    const found = await vscode.commands.executeCommand<vscode.Location[]>(
+      'vscode.executeReferenceProvider',
+      vscode.Uri.file(absolutePath),
+      new vscode.Position(line - 1, character - 1),
+    )
+    return (found ?? [])
+      .filter((l) => l.uri.scheme === 'file')
+      .map((l) => ({ file: l.uri.fsPath, line: l.range.start.line + 1, character: l.range.start.character + 1 }))
+  },
 }

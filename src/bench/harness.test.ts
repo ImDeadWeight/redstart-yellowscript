@@ -109,8 +109,39 @@ describe('runTask', () => {
     assert.equal(record.toolErrors, 0)
     assert.equal(record.model, 'scripted')
     assert.equal(record.nCtx, 32_768)
+    assert.equal(record.commandPrompts, 1, 'node src/main.js runs code, so it would have asked')
     // The model was told about the workspace before it started.
     assert.match(String(client.requests[0]!.messages[0]!.content), /The workspace is ys-bench-fix-crash-/)
+  })
+
+  test('a follow-up is a new request carrying the first run\'s log', async () => {
+    const followUp = tasks.find((t) => t.id === 'follow-up-edit')!
+    const client = scripted([
+      call('c1', 'ys_write_file', { path: 'src/lib/greeting.js', content: 'export function greet(name) {\n  return `Hello, ${name}!`\n}\n' }),
+      { content: 'Added greet in src/lib/greeting.js.' },
+      call('c2', 'ys_replace', { path: 'src/lib/greeting.js', old_string: 'greet(name) {\n  return `Hello,', new_string: 'greet(name, greeting = "Hello") {\n  return `${greeting},' }),
+      { content: 'Done.' },
+    ])
+    const record = await runTask(followUp, { client, label: 'scripted' })
+    assert.equal(record.pass, true, record.check)
+    const second = client.requests[2]!.messages
+    assert.equal(second.at(-2)!.content, 'Added greet in src/lib/greeting.js.\n\n[What this run did]\ncreated src/lib/greeting.js')
+    assert.match(String(second.at(-1)!.content), /optional second parameter/)
+  })
+
+  test('a new session starts clean, and its workspace message carries the notes', async () => {
+    const notesCarry = tasks.find((t) => t.id === 'notes-carry')!
+    const client = scripted([
+      call('c1', 'ys_note', { section: 'How to test', text: 'node tools/check.mjs --suite unit' }),
+      { content: 'Recorded.' },
+      call('c2', 'ys_run_command', { command: 'node tools/check.mjs --suite unit' }),
+      { content: '4 passed.' },
+    ])
+    const record = await runTask(notesCarry, { client, label: 'scripted' })
+    assert.equal(record.pass, true, record.check)
+    const second = client.requests[2]!.messages
+    assert.deepEqual(second.map((m) => m.role), ['system', 'user'], 'nothing from session 1 but the workspace')
+    assert.match(String(second[0]!.content), /## How to test\nnode tools\/check\.mjs --suite unit/)
   })
 
   test('a model that gives up fails, with the check saying why', async () => {
@@ -128,9 +159,9 @@ describe('runTask', () => {
   })
 
   test('the summary ends with one row for the results log', () => {
-    const base = { label: 'x', model: 'm', check: 'ok', stopReason: 'complete' as const, iterations: 4, toolErrors: 0, invalidArgs: 0, recovered: 0, repeats: 0, trims: 0, questions: 0, nCtx: 32768, durationMs: 1000, answer: '' }
+    const base = { label: 'x', model: 'm', check: 'ok', stopReason: 'complete' as const, iterations: 4, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, commandPrompts: 0, trims: 0, questions: 0, nCtx: 32768, durationMs: 1000, answer: '' }
     const text = summarize([{ ...base, task: 'a', pass: true, toolCalls: 4 }, { ...base, task: 'b', pass: false, toolCalls: 6, toolErrors: 3, trims: 2 }], 'x', new Date('2026-11-19T12:00:00Z'))
     assert.match(text, /\*\*1\/2 passed\.\*\*/)
-    assert.match(text.trim().split('\n').at(-1)!, /^\| 2026-11-19 \| x \| m \| 1\/2 \(50%\) \| 70% \| 0% \| 0% \| 4\.0 \| 0 \| 1 \|$/)
+    assert.match(text.trim().split('\n').at(-1)!, /^\| 2026-11-19 \| x \| m \| 1\/2 \(50%\) \| 70% \| 0% \| 0% \| 0% \| 4\.0 \| 0 \| 0 \| 1 \|$/)
   })
 })

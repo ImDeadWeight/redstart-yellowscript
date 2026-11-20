@@ -1,7 +1,8 @@
 # Plan: long web-development tasks
 
 *As of 2026-11-19. Follows [PLAN-complex-tasks.md](PLAN-complex-tasks.md),
-whose items 1–14 are built. Nothing here is started.*
+whose items 1–14 are built. Work is on `feat/long-tasks`; the State column
+says how far it has got.*
 
 **Goal.** The milestone ladder from the earlier plan (Pong → platformer → the
 full game with levels, art, sound and a title screen → the Redstart website),
@@ -16,25 +17,25 @@ costs there, and phase 0 makes room first.
 
 ## Status
 
-| # | Item | Phase | Where |
-|---|---|---|---|
-| 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core |
-| 1 | Run log carried into the next message | 1 | Yellowscript |
-| 2 | Task summary card | 1 | Yellowscript |
-| 3 | Dev-server URL detection | 1 | Yellowscript |
-| 16 | Protected paths (before 15) | 1 | Yellowscript |
-| 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript |
-| 4 | Outline, symbols, references | 2 | Yellowscript |
-| 5 | Big files read as an outline | 2 | Yellowscript |
-| 6 | Page steps, `eval`, viewport | 3 | Yellowscript |
-| 7 | The game test hook convention | 3 | Templates, `AGENTS.md` |
-| 8 | Workspace notes (`ys_note`) | 4 | Yellowscript |
-| 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript |
-| 10 | Attention when a run waits on you | 5 | Yellowscript |
-| 11 | Resume an interrupted task | 5 | Yellowscript |
-| 12 | Images, `@file` and selections in the composer | 5 | Yellowscript |
-| 13 | Assets: sprites and sounds | 6 | Yellowscript |
-| 14 | Site check and importing content | 6 | Yellowscript (+ Nest's web fetch) |
+| # | Item | Phase | Where | State |
+|---|---|---|---|---|
+| 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core | Done: 11,120 → 6,674 characters, and 8,951 with the 4 tools phases 2–4 added (budget 9,000, so phase 6 has to make room); repair in Yellowscript until agent-core takes it |
+| 1 | Run log carried into the next message | 1 | Yellowscript | Done; live line on the newest message (see item) |
+| 2 | Task summary card | 1 | Yellowscript | Done; shows processes as started, not whether they still run |
+| 3 | Dev-server URL detection | 1 | Yellowscript | Done |
+| 16 | Protected paths (before 15) | 1 | Yellowscript | Done; checked in the registry, so every write tool is covered |
+| 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | Done; the recorded `dev-server-fix` run is still to do |
+| 4 | Outline, symbols, references | 2 | Yellowscript | Done; the with/without token comparison needs a live run |
+| 5 | Big files read as an outline | 2 | Yellowscript | Done |
+| 6 | Page steps, `eval`, viewport | 3 | Yellowscript | Done; tested in real headless Edge, not a fake socket |
+| 7 | The game test hook convention | 3 | Templates, `AGENTS.md` | Done in the bench tasks; the starter is item 13 |
+| 8 | Workspace notes (`ys_note`) | 4 | Yellowscript | Done |
+| 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript | Done: Yellowscript sends `redstart/projectId`; Nest reads it on redstart-project `feat/project-memory-from-meta` |
+| 10 | Attention when a run waits on you | 5 | Yellowscript | Done |
+| 11 | Resume an interrupted task | 5 | Yellowscript | Done; a turn saved mid-stream no longer spins after a reload |
+| 12 | Images, `@file` and selections in the composer | 5 | Yellowscript | Done; seen rendered in a headless preview of the webview, not yet in VS Code |
+| 13 | Assets: sprites and sounds | 6 | Yellowscript | Not started: waits for milestone 3, as planned |
+| 14 | Site check and importing content | 6 | Yellowscript (+ Nest's web fetch) | Not started: waits for milestone 4 and the site's stack |
 
 Phases are an order, not a schedule: 1 helps every multi-message task at once
 and removes most of the prompts a long run stops on; 2 has to land before the
@@ -142,8 +143,11 @@ the same message. The text is what the model said; the log is what it did.
   `run-log.ts`, not in the context budget, so the prefix stays stable from
   request to request and the prompt cache holds.
 
-**Live state** goes in the workspace system message, built fresh on each
-request (extend `buildWorkspaceContext`'s caller, not the stored log):
+**Live state** is built fresh on each request. *As built:* it is prefixed to
+the newest user message, not put in the workspace system message: a change
+at the start of the request (a process starting or stopping) would cost the
+whole prompt cache, and Qwen's chat template refuses a system message
+anywhere but first.
 
 ```
 Running now: p1 "npm run dev" → http://localhost:5173 (started 12 min ago)

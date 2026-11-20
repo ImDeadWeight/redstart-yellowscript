@@ -42,28 +42,23 @@ export const runCommandTool: Tool = {
   definition: {
     name: assertWorkspaceToolName('ys_run_command'),
     description:
-      'Propose running a shell command in the workspace. The command is shown to the user verbatim and ' +
-      'runs only after they approve it — it is NEVER executed automatically. Use it for builds, tests, ' +
-      'linting, git, and other local operations. The working directory stays inside the workspace. ' +
-      'Prefer this over editing files by hand when the task is "run X and tell me the output". The result ' +
-      'starts with the exit code. It waits for the command to finish (timeout_s, default 120); for a server ' +
-      'or watcher that never exits, use ys_process_start.',
+      'Propose a shell command for a build, test, lint or git. The user sees it verbatim and approves ' +
+      'it first. It waits for the command to finish; the result starts with the exit code. For a server ' +
+      'or watcher that never exits, use ys_process.',
     inputSchema: {
       type: 'object',
       properties: {
         command: {
           type: 'string',
-          description: 'The exact command line to run, e.g. "npm test" or "git status".',
+          description: 'e.g. "npm test".',
         },
         cwd: {
           type: 'string',
-          description:
-            'Optional workspace-relative directory to run in. Omit for the workspace root. ' +
-            'Must be inside the workspace.',
+          description: 'Optional workspace directory; default the root.',
         },
         timeout_s: {
           type: 'number',
-          description: 'Seconds before the command is stopped (default 120, max 900).',
+          description: 'Default 120, max 900.',
         },
       },
       required: ['command'],

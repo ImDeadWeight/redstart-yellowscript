@@ -67,23 +67,18 @@ export function createDiagnosticsTool(provider: DiagnosticsProvider): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_diagnostics'),
       description:
-        'Read the current problems (errors, warnings) reported by the language servers — the ' +
-        'same list shown in the Problems panel. Use this to check whether code compiles or ' +
-        'lints cleanly instead of guessing. Returns errors first. ' +
-        'Note that diagnostics update asynchronously, so immediately after an edit the list may ' +
-        'still be catching up.',
+        'The errors and warnings the language servers report (the Problems panel), errors first. ' +
+        'Use it to check that code compiles. It can lag a moment behind an edit.',
       inputSchema: {
         type: 'object',
         properties: {
           path: {
             type: 'string',
-            description:
-              'Optional workspace-relative file or directory to report on. Omit for the whole workspace.',
+            description: 'Optional file or directory.',
           },
           severity: {
             type: 'string',
-            description:
-              'Optional minimum severity: "error" for errors only, "warning" for errors and warnings.',
+            description: 'Optional minimum severity.',
             enum: ['error', 'warning', 'info', 'hint'],
           },
         },

@@ -1,0 +1,10 @@
+{
+  "title": "A second session uses what the first one wrote in its notes",
+  "prompt": "Work out how this project's unit tests are run (it is not npm test), run them, and record the exact command in this project's notes with ys_note, so a later session knows it without looking it up again.",
+  "followUps": [
+    { "prompt": "Run the unit tests and tell me how many passed.", "newSession": true }
+  ],
+  "maxTurns": 15,
+  "timeoutS": 600,
+  "tags": ["core"]
+}

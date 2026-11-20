@@ -5,8 +5,11 @@
   import { view } from '../store.svelte.ts'
   import Message from './Message.svelte'
   import Icon from './Icon.svelte'
+  import { latestTaskId } from '../view-model.ts'
 
   let { messages, notices, generation }: { messages: ChatMessageView[]; notices: Notice[]; generation: number } = $props()
+
+  const latest = $derived(latestTaskId(messages))
 
   let scroller: HTMLDivElement | undefined = $state()
   /** Follow new output only while the person is at the bottom: yanking the
@@ -43,7 +46,7 @@
     </div>
   {/if}
   {#each messages as message (message.id)}
-    <Message {message} />
+    <Message {message} latestTask={message.id === latest} />
   {/each}
   {#each notices as notice (notice.id)}
     <div class="notice {notice.level}" role={notice.level === 'error' ? 'alert' : 'status'}>

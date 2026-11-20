@@ -1,7 +1,7 @@
 // The live view state. One $state object, replaced whole by the pure reducer
 // in view-model.ts on every host message, so the components stay readers.
 
-import type { HostMessage } from '../chat/protocol.ts'
+import type { AttachmentView, HostMessage } from '../chat/protocol.ts'
 import { applyHostMessage, initialViewState, type ViewState } from './view-model.ts'
 
 class ViewStore {
@@ -30,6 +30,13 @@ class ViewStore {
   closePage(): void {
     this.current = { ...this.current, page: null }
     this.workflowFocus = null
+  }
+
+  /** Hand the composer the chips the host sent, once. */
+  takeInbox(): AttachmentView[] {
+    const taken = this.current.inbox
+    if (taken.length) this.current = { ...this.current, inbox: [] }
+    return taken
   }
 
   dismissNotice(id: number): void {

@@ -5,6 +5,7 @@
 //   YELLOWSCRIPT_TEST_LIVE_NEST=http://127.0.0.1:19080 \
 //   YELLOWSCRIPT_TEST_TOKEN=rst_... \
 //   npm run bench -- --label "qwen3.6-35b Q4_K_XL" [--task fix-failing-test] [--repeat 3] [--keep]
+//                    [--withhold ys_outline,ys_find_symbol,ys_references]
 //
 // Each task runs in a fresh temp copy of bench/tasks/<id>/workspace and is
 // scored by its check.mjs. Results go to bench/results/<stamp>-<label>/:
@@ -34,6 +35,8 @@ const { values } = parseArgs({
     keep: { type: 'boolean', default: false },
     list: { type: 'boolean', default: false },
     quiet: { type: 'boolean', default: false },
+    // Leave tools out (comma-separated names), to measure what they save.
+    withhold: { type: 'string' },
   },
 })
 
@@ -86,6 +89,7 @@ for (const task of tasks) {
       contextSource: client,
       label,
       keep: values.keep,
+      ...(values.withhold ? { withhold: values.withhold.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
       ...(values.quiet ? {} : { log: (line: string) => console.log(line) }),
     })
     const { workspace, ...record } = run

@@ -5,6 +5,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { createToolRegistry, parseToolArguments } from './registry.ts'
+import { BackgroundProcesses } from './process-runner.ts'
 import type { ToolContext } from './types.ts'
 import type { EditorState } from './editor-context.ts'
 
@@ -31,12 +32,13 @@ describe('createToolRegistry', () => {
     assert.deepEqual([...registry().names].sort(), [
       'ys_delete_file',
       'ys_diagnostics',
-      'ys_edit_file',
       'ys_editor_context',
       'ys_glob',
       'ys_grep',
       'ys_list_directory',
       'ys_move_file',
+      'ys_note',
+      'ys_outline',
       'ys_read_file',
       'ys_replace',
       'ys_run_command',
@@ -54,6 +56,40 @@ describe('createToolRegistry', () => {
   test('names are unique', () => {
     const names = registry().names
     assert.equal(new Set(names).size, names.length)
+  })
+
+  test('ys_edit_file is offered only with unifiedDiff', () => {
+    const on = createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: emptyEditor, unifiedDiff: true })
+    assert.ok(on.names.includes('ys_edit_file'))
+    assert.ok(!registry().names.includes('ys_edit_file'))
+  })
+
+  test('the background processes are one ys_process tool', () => {
+    const names = createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: emptyEditor, processes: new BackgroundProcesses() }).names
+    assert.deepEqual(names.filter((n) => n.startsWith('ys_process')), ['ys_process'])
+  })
+})
+
+/**
+ * The local tool list is sent on every request; on a 32k model every
+ * character of it is context the task cannot use (PLAN-long-tasks.md item 0).
+ * Raise this only by deciding a new tool is worth what it costs.
+ */
+const TOOL_PAYLOAD_BUDGET = 9_000
+
+describe('the tool list fits its budget', () => {
+  test(`the full local set is at most ${TOOL_PAYLOAD_BUDGET} characters`, () => {
+    const full = createToolRegistry({
+      ripgrepPath: '/somewhere/rg',
+      diagnostics: () => [],
+      editorState: emptyEditor,
+      processes: new BackgroundProcesses(),
+      browser: { browser: () => null, screenshotDir: () => null },
+      symbols: { outline: async () => [], workspaceSymbols: async () => [], references: async () => [] },
+    })
+    assert.ok(full.names.includes('ys_references'))
+    const size = JSON.stringify(full.payload()).length
+    assert.ok(size <= TOOL_PAYLOAD_BUDGET, `${size} characters, budget ${TOOL_PAYLOAD_BUDGET}`)
   })
 })
 
@@ -113,6 +149,31 @@ describe('execute', () => {
     assert.match(result.content, /ys_read_file/)
   })
 
+  test('ys_edit_file still runs when called by name, though not offered', async () => {
+    const diff = '--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-hello\n+bye\n'
+    const result = await registry().execute('ys_edit_file', JSON.stringify({ diff }), ctx)
+    assert.equal(result.isError, false, result.content)
+    assert.ok(result.pendingWrite)
+  })
+
+  test('an old ys_process_start call runs as ys_process start', async () => {
+    const tools = createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: emptyEditor, processes: new BackgroundProcesses() })
+    const result = await tools.execute('ys_process_start', '{"command":"npm run dev"}', ctx)
+    assert.equal(result.pendingCommand?.background, true)
+  })
+
+  test('repaired arguments run, and say they were repaired', async () => {
+    const result = await registry().execute('ys_read_file', "{'path': 'a.txt',}", ctx)
+    assert.equal(result.isError, false, result.content)
+    assert.match(result.content, /hello/)
+    assert.deepEqual(result.argumentsRepaired, ['single quotes', 'trailing comma'])
+  })
+
+  test('valid arguments carry no repair mark', async () => {
+    const result = await registry().execute('ys_read_file', '{"path":"a.txt"}', ctx)
+    assert.equal(result.argumentsRepaired, undefined)
+  })
+
   test('a pre-rename ws_ call from an old transcript runs the ys_ tool', async () => {
     const legacy = await registry().execute('ws_read_file', '{"path":"a.txt"}', ctx)
     const current = await registry().execute('ys_read_file', '{"path":"a.txt"}', ctx)
@@ -163,7 +224,34 @@ describe('parseToolArguments', () => {
   })
 
   test('reports genuinely unparseable text', () => {
-    const result = parseToolArguments("{'a': 1}")
-    assert.equal(result.ok, false)
+    assert.equal(parseToolArguments('{path: a.txt}').ok, false)
+    assert.equal(parseToolArguments('{"a": 1').ok, false)
+  })
+
+  test('repairs the mechanical mistakes and names them', () => {
+    // [raw, parsed, repairs]. String.raw keeps every backslash as typed.
+    const cases: [string, unknown, string[]][] = [
+      ["{'a': 1}", { a: 1 }, ['single quotes']],
+      ['{"a": [1, 2,], }', { a: [1, 2] }, ['trailing comma']],
+      ['```json\n{"a": 1}\n```', { a: 1 }, ['code fence']],
+      [String.raw`{'say': 'it\'s "fine"'}`, { say: 'it\'s "fine"' }, ['single quotes']],
+      [String.raw`{"pattern": "\d+\s"}`, { pattern: String.raw`\d+\s` }, ['invalid escape']],
+      ['{"path": "a.js", "content": "const a = 1\n\tb()\n"}', { path: 'a.js', content: 'const a = 1\n\tb()\n' }, ['raw newline']],
+      ["{'text': 'a, b,]'}", { text: 'a, b,]' }, ['single quotes']],
+    ]
+    for (const [raw, value, repairs] of cases) {
+      const result = parseToolArguments(raw)
+      assert.equal(result.ok, true, raw)
+      if (result.ok) {
+        assert.deepEqual(result.value, value, raw)
+        assert.deepEqual(result.repairs ?? [], repairs, raw)
+      }
+    }
+  })
+
+  test('valid JSON escapes survive a repair', () => {
+    const result = parseToolArguments(String.raw`{'a': "x\n\"y\" \u00e9",}`)
+    assert.equal(result.ok, true)
+    if (result.ok) assert.deepEqual(result.value, { a: 'x\n"y" \u00e9' })
   })
 })

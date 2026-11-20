@@ -2,9 +2,12 @@
   import type { ChatMessageView } from '../../chat/protocol.ts'
   import { renderMarkdown } from '../markdown.ts'
   import ToolCard from './ToolCard.svelte'
+  import TaskSummary from './TaskSummary.svelte'
+  import { taskSummary } from '../../chat/run-log.ts'
+  import { attachmentLabel } from '../../chat/attachments.ts'
   import Icon from './Icon.svelte'
 
-  let { message }: { message: ChatMessageView } = $props()
+  let { message, latestTask = false }: { message: ChatMessageView; latestTask?: boolean } = $props()
 
   // renderMarkdown escapes the whole input before emitting any tag of its own
   // (see markdown.ts): the only safe way to put model text into {@html}.
@@ -19,6 +22,7 @@
   const grouped = $derived(tools.length >= GROUP_AT && !message.streaming)
   const failed = $derived(tools.filter((t) => t.status === 'error').length)
   let showTools = $state(false)
+  const summary = $derived(message.streaming ? null : taskSummary(message.run))
 </script>
 
 <article class="message {message.role}" class:pending={message.pending} class:streaming={message.streaming}>
@@ -28,8 +32,21 @@
         <summary><Icon name="bolt" size={12} />{message.workflow.title}</summary>
         <div class="workflow-text">{message.content}</div>
       </details>
-    {:else}
+    {:else if message.content}
       <div class="bubble">{message.content}</div>
+    {/if}
+    {#if message.attachments?.length}
+      <div class="attached">
+        {#each message.attachments as attachment, i (i)}
+          {#if attachment.kind === 'image'}
+            <img class="thumb" src={attachment.dataUrl} alt={attachment.name} title={attachment.name} />
+          {:else}
+            <span class="chip" title={attachment.kind === 'file' && attachment.outline ? 'Sent as its outline: the file is long' : ''}>
+              <Icon name="file" size={11} />{attachmentLabel(attachment)}
+            </span>
+          {/if}
+        {/each}
+      </div>
     {/if}
     {#if message.pending}<span class="note">Queued</span>{/if}
   {:else}
@@ -61,6 +78,9 @@
     {/if}
     {#if message.error}
       <div class="error" role="alert">{message.error}</div>
+    {/if}
+    {#if summary}
+      <TaskSummary turnId={message.id} {summary} canRevert={latestTask} />
     {/if}
     {#if message.aborted || stats?.tokensPerSecond}
       <footer>
@@ -99,6 +119,18 @@
   .workflow summary :global(.icon) { color: var(--ys-accent); }
   .workflow-text { margin-top: 6px; white-space: pre-wrap; font-size: 0.9em; opacity: 0.8; max-height: 200px; overflow-y: auto; }
   .note { font-size: 0.8em; opacity: 0.6; }
+  .attached { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; max-width: 92%; }
+  .thumb { height: 60px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--ys-card-border); }
+  .attached .chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    font-size: 0.8em;
+    border-radius: 10px;
+    border: 1px solid var(--ys-user-bubble-border);
+    background: var(--ys-user-bubble);
+  }
   .tools { display: flex; flex-direction: column; gap: 3px; }
   .group {
     display: flex;

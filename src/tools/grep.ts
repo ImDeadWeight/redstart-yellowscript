@@ -25,9 +25,11 @@ import {
   type ToolContext,
   type ToolResult,
 } from './types.ts'
-import { PathScopeError, resolveWithinWorkspace } from './workspace-path.ts'
+import { PathScopeError } from './workspace-path.ts'
+import { resolveReadPath } from './read-scope.ts'
 import { runRipgrep } from './ripgrep.ts'
 import { globToRegExp, literalSearch, walkFiles } from './fallback-search.ts'
+import { secretReason } from './protected-paths.ts'
 
 /** Total matches returned. Beyond this the answer is "narrow your search", not
  *  more output — the context window is the scarce resource. */
@@ -45,13 +47,10 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_grep'),
       description: degraded
-        ? 'Search the text of workspace files for a LITERAL substring. Regular expressions are ' +
-          'not available in this workspace, so the pattern is matched exactly as written. ' +
-          'Returns matching lines grouped by file. Note: .gitignore is not applied.'
-        : 'Search the text of workspace files with a regular expression, and return matching ' +
-          'lines grouped by file. Respects .gitignore. The syntax is Rust regex: character ' +
-          'classes, groups, alternation and anchors all work, but lookaround and backreferences ' +
-          'are not supported. Set "literal" to true to search for the pattern verbatim instead.',
+        ? 'Search workspace files for a LITERAL substring (no regular expressions here). ' +
+          'Matching lines, grouped by file. .gitignore is not applied.'
+        : 'Search workspace files with a regular expression (Rust syntax: no lookaround or ' +
+          'backreferences). Matching lines, grouped by file. Respects .gitignore.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -59,27 +58,27 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
             type: 'string',
             description: degraded
               ? 'Literal text to find.'
-              : 'Regular expression to search for (Rust regex syntax).',
+              : 'The regular expression.',
           },
           path: {
             type: 'string',
-            description: 'Optional workspace-relative directory to search under.',
+            description: 'Optional directory to search under.',
           },
           glob: {
             type: 'string',
-            description: 'Optional file filter, e.g. "*.ts" — only matching files are searched.',
+            description: 'Optional file filter, e.g. "*.ts".',
           },
           caseSensitive: {
             type: 'boolean',
-            description: 'Match case exactly. Defaults to false (case-insensitive).',
+            description: 'Default false.',
           },
           literal: {
             type: 'boolean',
-            description: 'Treat the pattern as literal text rather than a regular expression.',
+            description: 'Match the pattern verbatim.',
           },
           maxResults: {
             type: 'integer',
-            description: `Cap on matches returned. Defaults to ${MAX_MATCHES}.`,
+            description: `Default ${MAX_MATCHES}.`,
             minimum: 1,
           },
         },
@@ -100,7 +99,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
         roots =
           scope === null
             ? [...context.workspaceRoots]
-            : [resolveWithinWorkspace(context.workspaceRoots, scope)]
+            : [await resolveReadPath(context, scope)]
       } catch (err) {
         if (err instanceof PathScopeError) {
           return err.reason === 'no-workspace'
@@ -120,6 +119,9 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
 
       const matches: Match[] = []
       let truncated = false
+      // Secrets files are not searched (protected-paths.ts): a match would put
+      // their content in the prompt without asking. The model is told how many.
+      const skipped = new Set<string>()
 
       for (const root of roots) {
         if (matches.length >= limit) {
@@ -139,16 +141,23 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
         truncated ||= outcome.truncated
         const prefix = roots.length > 1 ? `${path.basename(root)}/` : ''
         for (const match of outcome.matches) {
+          if (secretReason(match.file)) {
+            skipped.add(`${prefix}${match.file}`)
+            continue
+          }
           matches.push({ ...match, file: `${prefix}${match.file}` })
         }
       }
 
       const banner = degraded ? '(ripgrep unavailable — literal search, .gitignore not applied)\n\n' : ''
+      const skippedNote = skipped.size
+        ? `\n\n[${skipped.size} file${skipped.size === 1 ? '' : 's'} that may hold secrets (${[...skipped].slice(0, 3).join(', ')}) not searched; ys_read_file one asks the person]`
+        : ''
 
       if (matches.length === 0) {
         const hint = degraded ? '' : ' Files excluded by .gitignore are not searched.'
         return toolOk(
-          `${banner}No matches for "${pattern}".${hint}`,
+          `${banner}No matches for "${pattern}".${hint}${skippedNote}`,
           `ys_grep "${pattern}" — no matches`,
         )
       }
@@ -170,7 +179,7 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
       const note = truncated ? `\n\n[stopped at ${limit} matches — narrow the search]` : ''
       const header = `${matches.length} match${matches.length === 1 ? '' : 'es'} in ${grouped.size} file${grouped.size === 1 ? '' : 's'}:`
       const { text, truncated: cut } = truncateForModel(
-        `${banner}${header}\n\n${blocks.join('\n\n')}${note}`,
+        `${banner}${header}\n\n${blocks.join('\n\n')}${note}${skippedNote}`,
       )
 
       return toolOk(text, `ys_grep "${pattern}" — ${matches.length} match(es)`, truncated || cut)

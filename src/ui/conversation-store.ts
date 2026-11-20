@@ -10,7 +10,7 @@
 // =============================================================================
 
 import type * as vscode from 'vscode'
-import type { ChatMessageView, PlanStepView } from '../chat/protocol.ts'
+import type { ChatMessageView, InFlightRun, PlanStepView } from '../chat/protocol.ts'
 
 /** A record's effective tab position. Records written before `order` existed
  *  fall back to `createdAt`; anything still without that sorts to the bottom. */
@@ -46,6 +46,8 @@ export interface Conversation {
   plan?: PlanStepView[]
   /** Text typed into the composer and not sent yet. */
   draft?: string
+  /** Set while a run is going; still set on load means it was cut off. */
+  inFlight?: InFlightRun
 }
 
 /** Nothing worth keeping: no transcript and nothing typed. Closing one of

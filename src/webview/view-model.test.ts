@@ -4,10 +4,13 @@ import assert from 'node:assert/strict'
 import { EMPTY_CONVERSATION_STATE, PROTOCOL_VERSION, type HostMessage } from '../chat/protocol.ts'
 import {
   applyHostMessage,
+  atQuery,
+  fitWithin,
   argumentsPreview,
   buildAnswer,
   composerPlaceholder,
   initialViewState,
+  latestTaskId,
   matchWorkflows,
   planProgress,
   slashQuery,
@@ -75,6 +78,32 @@ describe('applyHostMessage', () => {
     assert.equal(s.messages[0]?.tools?.length, 1, 'a repeated call id is one card')
     assert.equal(s.messages[0]?.tools?.[0]?.status, 'done')
     assert.equal(s.messages[0]?.tools?.[0]?.summary, 'a.ts, 10 lines')
+  })
+
+  test('a result\'s effect is added to its turn\'s run, for the task summary', () => {
+    const effect = { kind: 'write' as const, applied: true, files: [{ path: 'a.ts', isNew: false, isDeleted: false }] }
+    const s = run(
+      init(),
+      { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '' } },
+      { type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_replace', arguments: '{}', recovered: false },
+      { type: 'tool/result', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_replace', summary: 'applied', isError: false, truncated: false, effect },
+      { type: 'tool/result', conversationId: 'c1', turnId: 't1', callId: 'k2', name: 'ys_read_file', summary: 'read', isError: false, truncated: false },
+    )
+    assert.deepEqual(s.messages[0]?.run, [effect])
+  })
+
+  test('only the newest task with a checkpointed write offers Revert', () => {
+    const write = (checkpoint: boolean) => ({
+      kind: 'write' as const, applied: true, files: [{ path: 'a.ts', isNew: false, isDeleted: false }],
+      ...(checkpoint ? { checkpoint: { revision: 'r', root: '/w' } } : {}),
+    })
+    assert.equal(latestTaskId([
+      { id: 'a1', role: 'assistant', content: '', run: [write(true)] },
+      { id: 'a2', role: 'assistant', content: '', run: [write(true)] },
+      { id: 'a3', role: 'assistant', content: '', run: [write(false)] },
+      { id: 'a4', role: 'assistant', content: 'just talk' },
+    ]), 'a2')
+    assert.equal(latestTaskId([{ id: 'u', role: 'user', content: 'hi' }]), null)
   })
 
   test('conversation state follows the active tab only', () => {
@@ -153,5 +182,29 @@ describe('projects, workflows and pages', () => {
     const list = [w('notes-to-report', 'Turn notes into a report'), w('report', 'Weekly report'), w('standup', 'Daily standup')]
     assert.deepEqual(matchWorkflows(list, 'rep').map((x) => x.name), ['report', 'notes-to-report'])
     assert.equal(matchWorkflows(list, '').length, 3)
+  })
+})
+
+describe('attachments in the composer', () => {
+  test('the @ query at the caret', () => {
+    assert.equal(atQuery('look at @src/ga'), 'src/ga')
+    assert.equal(atQuery('@'), '')
+    assert.equal(atQuery('mail me@example.com'), null, 'not inside a word')
+    assert.equal(atQuery('look at @src/game.js now'), null)
+  })
+
+  test('downscaled to 1,280px on the longer edge', () => {
+    assert.deepEqual(fitWithin(2560, 1440), { width: 1280, height: 720 })
+    assert.deepEqual(fitWithin(800, 600), { width: 800, height: 600 })
+  })
+
+  test('file matches and chips from the host land in the view state', () => {
+    const s = run(
+      init(),
+      { type: 'fileMatches', query: 'ga', paths: ['src/game.js'] },
+      { type: 'addAttachment', attachment: { kind: 'selection', path: 'a.js', startLine: 1, endLine: 2, text: 'x' } },
+    )
+    assert.deepEqual(s.fileMatches, { query: 'ga', paths: ['src/game.js'] })
+    assert.equal(s.inbox.length, 1)
   })
 })

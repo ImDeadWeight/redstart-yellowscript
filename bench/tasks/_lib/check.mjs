@@ -54,11 +54,15 @@ export function original(taskDir, rel) {
 
 /**
  * Load a page headless (the same code as ys_check_page) and return its events
- * and summary, or null when this machine has no browser.
+ * and summary, or null when this machine has no browser. `steps` and
+ * `evaluate` are as ys_check_page takes them; the result has `evaluation`.
  */
-export async function checkPageHeadless(url) {
+export async function checkPageHeadless(url, { steps, evaluate, waitMs = 1_500 } = {}) {
   const mod = await import(new URL('../../../src/tools/browser-check.ts', import.meta.url).href)
+  const { parseSteps } = await import(new URL('../../../src/tools/page-steps.ts', import.meta.url).href)
   const browser = mod.findBrowser()
   if (!browser) return null
-  return mod.checkPage({ url, browser, waitMs: 1_500, screenshot: false })
+  const parsed = parseSteps(steps)
+  if (parsed.error) throw new Error(parsed.error)
+  return mod.checkPage({ url, browser, waitMs, screenshot: false, steps: parsed.steps, ...(evaluate ? { evaluate } : {}) })
 }

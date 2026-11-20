@@ -32,6 +32,7 @@ import { pathToFileURL } from 'node:url'
 import { killTree } from './process-runner.ts'
 import { assertWorkspaceToolName, stringArg, toolError, toolOk, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { PathScopeError, resolveWithinWorkspace } from './workspace-path.ts'
+import { EVAL_TIMEOUT_MS, MAX_EVAL_CHARS, describeStep, keyEvent, parseSteps, parseViewport, type PageStep } from './page-steps.ts'
 
 export const DEFAULT_WAIT_MS = 2_000
 export const MAX_WAIT_MS = 15_000
@@ -82,10 +83,14 @@ export function resolveTarget(target: string, roots: readonly string[]): { url: 
   if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^[a-z]:[\\/]/i.test(trimmed)) {
     return { error: 'Give an http://localhost URL or a workspace-relative file path.' }
   }
+  // index.html?test or page.html#level-2: the file, then its query or hash.
+  const suffixAt = trimmed.search(/[?#]/)
+  const filePart = suffixAt >= 0 ? trimmed.slice(0, suffixAt) : trimmed
+  const suffix = suffixAt >= 0 ? trimmed.slice(suffixAt) : ''
   try {
-    const file = resolveWithinWorkspace(roots, trimmed)
-    if (!fs.existsSync(file)) return { error: `"${trimmed}" does not exist.` }
-    return { url: pathToFileURL(file).toString() }
+    const file = resolveWithinWorkspace(roots, filePart)
+    if (!fs.existsSync(file)) return { error: `"${filePart}" does not exist.` }
+    return { url: `${pathToFileURL(file).toString()}${suffix}` }
   } catch (err) {
     if (err instanceof PathScopeError) return { error: `"${trimmed}" is outside the workspace.` }
     return { error: `Could not resolve "${trimmed}": ${err instanceof Error ? err.message : String(err)}` }
@@ -95,6 +100,15 @@ export function resolveTarget(target: string, roots: readonly string[]): { url: 
 export interface PageEvent {
   kind: 'exception' | 'error' | 'warning' | 'log' | 'request-failed'
   text: string
+  /** The step (1-based) that ran last before it: an exception right after
+   *  {"key": "Space"} is the jump. Absent: during load. */
+  afterStep?: number
+}
+
+export interface StepOutcome {
+  step: string
+  ok: boolean
+  error?: string
 }
 
 export interface PageCheck {
@@ -107,6 +121,15 @@ export interface PageCheck {
   /** PNG, base64; absent when the capture failed. */
   screenshot?: string
   durationMs: number
+  /** Each step that ran; the run stops at the first that fails. */
+  steps?: StepOutcome[]
+  /** `inspect` steps: the element's facts, as text. */
+  inspections?: { selector: string; text: string }[]
+  /** `screenshot` steps, labelled. */
+  shots?: { label: string; data: string }[]
+  /** The `eval` expression's JSON value, or why it failed. */
+  evaluation?: { ok: boolean; text: string }
+  viewport?: string
 }
 
 /** A minimal CDP client over one browser WebSocket, flat sessions. */
@@ -222,16 +245,56 @@ const SUMMARY_SCRIPT = `(() => {
   });
 })()`
 
-/** Load `url` headless, wait `waitMs` after load, and report. */
-export async function checkPage(options: { url: string; browser: string; waitMs?: number; screenshot?: boolean }): Promise<PageCheck> {
+/** An element's box, visibility, text and a few computed styles. */
+const inspectScript = (selector: string) => `(() => {
+  const el = document.querySelector(${JSON.stringify(selector)});
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const s = getComputedStyle(el);
+  const visible = r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0;
+  return JSON.stringify({
+    box: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+    visible,
+    text: (el.innerText || el.value || '').trim().slice(0, 200),
+    position: s.position, display: s.display, color: s.color, background: s.backgroundColor, fontSize: s.fontSize,
+  });
+})()`
+
+/** The centre of the first element `selector` matches, scrolled into view. */
+const centreScript = (selector: string) => `(() => {
+  const el = document.querySelector(${JSON.stringify(selector)});
+  if (!el) return null;
+  el.scrollIntoView({ block: 'center', inline: 'center' });
+  const r = el.getBoundingClientRect();
+  return JSON.stringify([r.x + r.width / 2, r.y + r.height / 2]);
+})()`
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+export interface CheckPageOptions {
+  url: string
+  browser: string
+  waitMs?: number
+  screenshot?: boolean
+  steps?: PageStep[]
+  /** Evaluated after the steps; its JSON value is reported. */
+  evaluate?: string
+  viewport?: { width: number; height: number; mobile: boolean }
+}
+
+/** Load `url` headless, wait `waitMs` after load, run the steps, and report. */
+export async function checkPage(options: CheckPageOptions): Promise<PageCheck> {
   const started = Date.now()
   const waitMs = Math.min(Math.max(0, options.waitMs ?? DEFAULT_WAIT_MS), MAX_WAIT_MS)
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-browser-'))
   let child: ChildProcess | undefined
   let cdp: Cdp | undefined
   const events: PageEvent[] = []
+  let currentStep = 0
   const push = (e: PageEvent) => {
-    if (events.length < MAX_EVENTS) events.push({ kind: e.kind, text: e.text.slice(0, 500) })
+    // The browser asks for a favicon by itself; its 404 is not the page's bug.
+    if (e.kind === 'request-failed' && /\/favicon\.ico\b/.test(e.text)) return
+    if (events.length < MAX_EVENTS) events.push({ kind: e.kind, text: e.text.slice(0, 500), ...(currentStep ? { afterStep: currentStep } : {}) })
   }
   try {
     const launched = await launch(options.browser, profile)
@@ -263,6 +326,10 @@ export async function checkPage(options: { url: string; browser: string; waitMs?
       }
     })
     await Promise.all(['Page.enable', 'Runtime.enable', 'Log.enable', 'Network.enable'].map((m) => cdp!.send(m, {}, sessionId)))
+    if (options.viewport) {
+      const { width, height, mobile } = options.viewport
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile }, sessionId)
+    }
     const nav = await cdp.send('Page.navigate', { url: options.url }, sessionId)
     if (nav.errorText) push({ kind: 'request-failed', text: `navigation failed: ${nav.errorText}` })
     else {
@@ -272,7 +339,86 @@ export async function checkPage(options: { url: string; browser: string; waitMs?
       clearTimeout(loadTimer)
     }
     // Let it run: a game loop's errors arrive after load.
-    await new Promise((r) => setTimeout(r, waitMs))
+    await sleep(waitMs)
+
+    const page = cdp
+    const evaluate = async (expression: string): Promise<unknown> => {
+      const out = await page.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)
+      return out?.result?.value
+    }
+    const stepOutcomes: StepOutcome[] = []
+    const inspections: { selector: string; text: string }[] = []
+    const shots: { label: string; data: string }[] = []
+    for (const [index, step] of (options.steps ?? []).entries()) {
+      currentStep = index + 1
+      const outcome: StepOutcome = { step: describeStep(step), ok: true }
+      stepOutcomes.push(outcome)
+      try {
+        if ('key' in step) {
+          const k = keyEvent(step.key)!
+          const base = { key: k.key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode }
+          await page.send('Input.dispatchKeyEvent', { type: k.text ? 'keyDown' : 'rawKeyDown', ...base, ...(k.text ? { text: k.text } : {}) }, sessionId)
+          await sleep(step.holdMs)
+          await page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, sessionId)
+        } else if ('click' in step) {
+          let point = step.click
+          if (typeof point === 'string') {
+            const found = await evaluate(centreScript(point))
+            if (typeof found !== 'string') throw new Error(`no element matches ${JSON.stringify(point)}`)
+            point = JSON.parse(found) as [number, number]
+          }
+          const [x, y] = point
+          await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }, sessionId)
+          await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, sessionId)
+          await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, sessionId)
+        } else if ('type' in step) {
+          if (step.into) {
+            const focused = await evaluate(`(() => { const el = document.querySelector(${JSON.stringify(step.into)}); if (!el) return false; el.focus(); return true })()`)
+            if (focused !== true) throw new Error(`no element matches ${JSON.stringify(step.into)}`)
+          }
+          await page.send('Input.insertText', { text: step.type }, sessionId)
+        } else if ('waitMs' in step) {
+          await sleep(step.waitMs)
+        } else if ('waitFor' in step) {
+          const deadline = Date.now() + 5_000
+          while ((await evaluate(`!!document.querySelector(${JSON.stringify(step.waitFor)})`)) !== true) {
+            if (Date.now() > deadline) throw new Error('timed out after 5s')
+            await sleep(100)
+          }
+        } else if ('screenshot' in step) {
+          const shot = await page.send('Page.captureScreenshot', { format: 'png' }, sessionId)
+          if (shot?.data) shots.push({ label: step.screenshot, data: shot.data })
+        } else if ('inspect' in step) {
+          const found = await evaluate(inspectScript(step.inspect))
+          if (typeof found !== 'string') throw new Error(`no element matches ${JSON.stringify(step.inspect)}`)
+          const f = JSON.parse(found)
+          inspections.push({
+            selector: step.inspect,
+            text: `box ${f.box.join(',')} (x,y,w,h) · ${f.visible ? 'visible' : 'NOT visible'} · position ${f.position} · display ${f.display} · color ${f.color} · background ${f.background} · font-size ${f.fontSize}${f.text ? `\ntext: ${f.text}` : ''}`,
+          })
+        }
+        // Let what the step set off happen, so its errors land after it.
+        await sleep(50)
+      } catch (err) {
+        outcome.ok = false
+        outcome.error = err instanceof Error ? err.message : String(err)
+        break
+      }
+    }
+
+    let evaluation: PageCheck['evaluation']
+    if (options.evaluate) {
+      currentStep = 0
+      const out = await page
+        .send('Runtime.evaluate', { expression: options.evaluate, returnByValue: true, awaitPromise: true, timeout: EVAL_TIMEOUT_MS }, sessionId)
+        .catch((err: Error) => ({ exceptionDetails: { text: err.message } }))
+      if (out?.exceptionDetails) {
+        evaluation = { ok: false, text: out.result?.description ?? out.exceptionDetails.exception?.description ?? out.exceptionDetails.text ?? 'it threw' }
+      } else {
+        const json = JSON.stringify(out?.result?.value ?? null) ?? 'undefined'
+        evaluation = { ok: true, text: json.length > MAX_EVAL_CHARS ? `${json.slice(0, MAX_EVAL_CHARS)}…[${json.length - MAX_EVAL_CHARS} more characters]` : json }
+      }
+    }
 
     const evaluated = await cdp.send('Runtime.evaluate', { expression: SUMMARY_SCRIPT, returnByValue: true }, sessionId).catch(() => null)
     const info = evaluated?.result?.value ? JSON.parse(evaluated.result.value) : null
@@ -289,6 +435,11 @@ export async function checkPage(options: { url: string; browser: string; waitMs?
     }
     const result: PageCheck = { url: options.url, loaded, title: info?.title ?? '', events, summary: summaryLines.join('\n'), durationMs: Date.now() - started }
     if (screenshot) result.screenshot = screenshot
+    if (stepOutcomes.length) result.steps = stepOutcomes
+    if (inspections.length) result.inspections = inspections
+    if (shots.length) result.shots = shots
+    if (evaluation) result.evaluation = evaluation
+    if (options.viewport) result.viewport = `${options.viewport.width}x${options.viewport.height}${options.viewport.mobile ? ' (mobile)' : ''}`
     await cdp.send('Browser.close').catch(() => undefined)
     return result
   } finally {
@@ -305,14 +456,21 @@ export function formatPageCheck(check: PageCheck, screenshotPath: string | null)
   for (const e of check.events) counts[e.kind]++
   const problems = counts.exception + counts.error + counts['request-failed']
   const lines = [
-    `${check.url} — ${check.loaded ? 'loaded' : 'did NOT finish loading'}${check.title ? `, title "${check.title}"` : ''} (${(check.durationMs / 1000).toFixed(1)}s)`,
+    `${check.url} — ${check.loaded ? 'loaded' : 'did NOT finish loading'}${check.title ? `, title "${check.title}"` : ''}${check.viewport ? ` at ${check.viewport}` : ''} (${(check.durationMs / 1000).toFixed(1)}s)`,
     problems === 0
       ? `No errors${counts.warning ? `, ${counts.warning} warning(s)` : ''}.`
       : `${counts.exception} uncaught exception(s), ${counts.error} console error(s), ${counts['request-failed']} failed request(s), ${counts.warning} warning(s).`,
   ]
   const order: PageEvent['kind'][] = ['exception', 'error', 'request-failed', 'warning', 'log']
   const sorted = [...check.events].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))
-  if (sorted.length) lines.push('--- console ---', ...sorted.map((e) => `[${e.kind}] ${e.text}`))
+  if (check.steps?.length) {
+    const failed = check.steps.find((s) => !s.ok)
+    if (failed) lines.push(`Step ${check.steps.indexOf(failed) + 1} (${failed.step}) failed: ${failed.error}. The steps after it did not run.`)
+    lines.push('--- steps ---', ...check.steps.map((s, i) => `${i + 1}. ${s.step} — ${s.ok ? 'ok' : `FAILED: ${s.error}`}`))
+  }
+  if (sorted.length) lines.push('--- console ---', ...sorted.map((e) => `[${e.kind}]${e.afterStep ? ` (after step ${e.afterStep})` : ''} ${e.text}`))
+  for (const i of check.inspections ?? []) lines.push(`--- inspect ${i.selector} ---`, i.text)
+  if (check.evaluation) lines.push('--- eval ---', check.evaluation.ok ? check.evaluation.text : `threw: ${check.evaluation.text}`)
   if (check.summary) lines.push('--- page ---', check.summary)
   if (screenshotPath) lines.push(`Screenshot saved to ${screenshotPath}.`)
   return lines.join('\n')
@@ -330,16 +488,23 @@ export function createCheckPageTool(deps: CheckPageDeps): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_check_page'),
       description:
-        'Load a page in a headless browser and report uncaught exceptions, console errors and warnings, ' +
-        'failed requests, and what the page shows (title, canvases, visible text), plus a screenshot. Use it ' +
-        'after changing a web page or a canvas game, with a dev server URL on this machine ' +
-        '(http://localhost:5173) or a workspace HTML file (index.html). wait_s lets it run that long after ' +
-        'load (default 2, max 15) so errors in a game loop show up.',
+        'Load a page headless and report exceptions, console errors, failed requests and what it shows ' +
+        '(title, canvases, text), with a screenshot. Steps act on it after load, in order; eval reads a value ' +
+        'after them. A game: {"steps": [{"key": "ArrowRight", "hold_ms": 800}, {"key": "Space"}], "eval": ' +
+        '"window.__game.player"} (a game exposes its state as window.__game). A form: {"steps": [{"type": "hi", "into": "#q"}, {"click": "#go"}, ' +
+        '{"wait_for": ".results li"}]}.',
       inputSchema: {
         type: 'object',
         properties: {
-          target: { type: 'string', description: 'http://localhost… URL, or a workspace-relative .html path.' },
-          wait_s: { type: 'number', description: 'Seconds to let the page run after it loads (0–15).' },
+          target: { type: 'string', description: 'http://localhost:… URL, or a workspace .html path.' },
+          wait_s: { type: 'number', description: "Seconds to run after load, so a game loop's errors show (default 2, max 15)." },
+          steps: {
+            type: 'array',
+            description: 'One action each: key (+hold_ms), click (selector or [x, y]), type (+into), wait_ms, wait_for, screenshot, inspect.',
+            items: { type: 'object' },
+          },
+          eval: { type: 'string', description: 'A JS expression; its JSON value is reported.' },
+          viewport: { type: 'string', description: 'e.g. "390x844".' },
         },
         required: ['target'],
         additionalProperties: false,
@@ -358,9 +523,22 @@ export function createCheckPageTool(deps: CheckPageDeps): Tool {
         )
       }
       const waitS = Number((args as { wait_s?: unknown })?.wait_s)
+      const o = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
+      const parsed = parseSteps(o.steps)
+      if ('error' in parsed) return toolError(parsed.error)
+      const viewport = parseViewport(o.viewport)
+      if (viewport && 'error' in viewport) return toolError(viewport.error)
+      const expression = typeof o.eval === 'string' && o.eval.trim() ? o.eval : undefined
       let check: PageCheck
       try {
-        check = await checkPage({ url: resolved.url, browser, ...(Number.isFinite(waitS) ? { waitMs: waitS * 1000 } : {}) })
+        check = await checkPage({
+          url: resolved.url,
+          browser,
+          ...(Number.isFinite(waitS) ? { waitMs: waitS * 1000 } : {}),
+          ...(parsed.steps.length ? { steps: parsed.steps } : {}),
+          ...(expression ? { evaluate: expression } : {}),
+          ...(viewport ? { viewport } : {}),
+        })
       } catch (err) {
         return toolError(`The page check failed: ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -369,14 +547,25 @@ export function createCheckPageTool(deps: CheckPageDeps): Tool {
       if (check.screenshot && dir) {
         try {
           fs.mkdirSync(dir, { recursive: true })
-          saved = path.join(dir, `page-${new Date().toISOString().replace(/[:.]/g, '-')}.png`)
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+          // The labelled ones are for the person; only the last goes to the model.
+          for (const shot of check.shots ?? []) fs.writeFileSync(path.join(dir, `page-${stamp}-${shot.label}.png`), Buffer.from(shot.data, 'base64'))
+          saved = path.join(dir, `page-${stamp}.png`)
           fs.writeFileSync(saved, Buffer.from(check.screenshot, 'base64'))
         } catch {
           saved = null
         }
       }
-      const problems = check.events.some((e) => e.kind === 'exception' || e.kind === 'error' || e.kind === 'request-failed')
-      const result = toolOk(formatPageCheck(check, saved), `ys_check_page — ${problems ? 'problems found' : 'no errors'}`)
+      const order: PageEvent['kind'][] = ['exception', 'error', 'request-failed']
+      const problems = check.events.filter((e) => order.includes(e.kind)).sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))
+      const failedStep = check.steps?.find((s) => !s.ok)
+      const result = toolOk(formatPageCheck(check, saved), `ys_check_page — ${failedStep ? 'a step failed' : problems.length ? 'problems found' : 'no errors'}`)
+      result.effect = {
+        kind: 'check',
+        target: resolved.url,
+        problems: problems.length + (check.loaded ? 0 : 1) + (failedStep ? 1 : 0),
+        first: !check.loaded ? 'did not finish loading' : failedStep ? `step ${failedStep.step} failed: ${failedStep.error}` : (problems[0]?.text.split('\n')[0]!.slice(0, 160) ?? null),
+      }
       if (check.screenshot) result.images = [`data:image/png;base64,${check.screenshot}`]
       return result
     },

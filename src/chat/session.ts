@@ -23,6 +23,8 @@ import type {
   ConversationState,
   HostMessage,
   PlanStepView,
+  AttachmentView,
+  InFlightRun,
   QuestionItemView,
   QuestionView,
   ToolCardView,
@@ -33,12 +35,17 @@ import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../ag
 import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
-import type { ToolContext } from '../tools/types.ts'
+import type { ToolContext, ToolEffect } from '../tools/types.ts'
+import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
+import { userContent } from './attachments.ts'
 
 /** Outbound protocol messages, before the owning conversation's id is tagged
  *  on. Distributes the `conversationId` omission across the union so callers can
  *  build a message without it and let ChatSession attach it. */
 type OutboundMessage = HostMessage extends infer T ? (T extends { conversationId: string } ? Omit<T, 'conversationId'> : T) : never
+
+/** What Continue sends after a reload cut a run off. */
+export const RESUME_PROMPT = 'Continue the task from where it stopped.'
 
 /**
  * How the assistant's own thinking is treated on the NEXT request.
@@ -86,6 +93,9 @@ export interface SessionDeps {
   /** A system message about the workspace (its instructions, its files),
    *  sent first on every request that carries tools. */
   workspaceContext?: () => string | null
+  /** What is running right now (a dev server and its address), computed on
+   *  each request and put before the newest message, not stored. */
+  liveState?: () => string | null
   /** The plan changed (null: cleared), so the host can keep it on disk. */
   onPlanChanged?: (steps: PlanStep[] | null) => void
   /** After an applied write: the problems now in those files, for the model. */
@@ -113,7 +123,7 @@ export class ChatSession {
   private model: string | null = null
   /** Prompts waiting behind a turn that is still streaming. Drained in order
    *  when the turn finishes, so a user can line up several asks per tab. */
-  private pending: { id: string; prompt: string; workflow?: { name: string; title: string } }[] = []
+  private pending: { id: string; prompt: string; workflow?: { name: string; title: string }; attachments?: AttachmentView[] }[] = []
   /** The conversation's update_plan checklist. Kept by the model through the
    *  loop's plan port; saved with the conversation; cleared by the person. */
   private plan: PlanStepView[] | null = null
@@ -123,6 +133,10 @@ export class ChatSession {
   private limitWait: ((go: boolean) => void) | null = null
   /** Tool calls waiting for allow / deny, shown one at a time. */
   private readonly approvals: ApprovalQueue
+  /** The running turn's record, saved with the conversation. */
+  private inFlight: InFlightRun | null = null
+  /** A run from an earlier window that never ended: offered to continue. */
+  private interrupted: InFlightRun | null = null
 
   constructor(deps: SessionDeps) {
     this.deps = deps
@@ -178,7 +192,35 @@ export class ChatSession {
       plan: this.plan ? this.plan.map((step) => ({ ...step })) : null,
       atTurnLimit: this.limitWait !== null,
       approval: this.approvals.view(),
+      interrupted: this.interrupted ? { startedAt: this.interrupted.startedAt, processes: this.interrupted.processes.map((p) => p.command) } : null,
     }
+  }
+
+  /** The running turn's record, for persistence; null when idle. */
+  inFlightSnapshot(): InFlightRun | null {
+    return this.inFlight ? { startedAt: this.inFlight.startedAt, processes: this.inFlight.processes.map((p) => ({ ...p })) } : null
+  }
+
+  /** Put the "interrupted" card away. */
+  dismissInterrupted(): void {
+    if (!this.interrupted) return
+    this.interrupted = null
+    this.emitState()
+    this.deps.onPersist?.()
+  }
+
+  /**
+   * Continue an interrupted run. Returns the background commands it had
+   * running, for the host to restart first when the person asked to; then
+   * sends the message that picks the task up again. The run log of what had
+   * finished is on its turn already, so the model starts knowing it.
+   */
+  resumeInterrupted(): { processes: { command: string; cwd: string }[]; sent: Promise<void> } | null {
+    const was = this.interrupted
+    if (!was || this.busy) return null
+    this.interrupted = null
+    this.emitState()
+    return { processes: was.processes.map(({ command, cwd }) => ({ command, cwd })), sent: this.send(RESUME_PROMPT) }
   }
 
   /** The plan, for persistence. */
@@ -239,13 +281,23 @@ export class ChatSession {
    * and must be allowed to finish. Switching tabs never calls this; it is a
    * pure view change handled by the host.
    */
-  load(messages: ChatMessageView[], plan: PlanStepView[] | null = null): void {
-    this.messages = messages.map((message) => ({ ...message }))
-    if (!this.busy) this.plan = plan ? plan.map((step) => ({ ...step })) : null
+  load(messages: ChatMessageView[], plan: PlanStepView[] | null = null, inFlight: InFlightRun | null = null): void {
+    // A turn saved mid-stream by a window that then closed is not streaming
+    // any more: it stopped.
+    this.messages = messages.map((message) => (message.streaming && !this.busy ? { ...message, streaming: false, aborted: true } : { ...message }))
+    if (!this.busy) {
+      this.plan = plan ? plan.map((step) => ({ ...step })) : null
+      this.interrupted = inFlight ? { startedAt: inFlight.startedAt, processes: inFlight.processes.map((p) => ({ ...p })) } : null
+    }
     this.emit({ type: 'conversation', messages: this.messages, state: this.state() })
   }
 
   /** A snapshot of the transcript, safe to hand across the webview boundary. */
+  /** What the run of assistant turn `turnId` did (for its task summary). */
+  runOf(turnId: string): ToolEffect[] | null {
+    return this.messages.find((m) => m.id === turnId && m.role === 'assistant')?.run ?? null
+  }
+
   snapshot(): ChatMessageView[] {
     return this.messages.map((message) => ({
       ...message,
@@ -276,14 +328,19 @@ export class ChatSession {
    * a user can start a long ask and line up the next one in another tab or
    * below. Queued prompts drain in order as each turn finishes.
    */
-  async send(text: string, workflow?: { name: string; title: string }): Promise<void> {
+  async send(text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): Promise<void> {
     const prompt = text.trim()
-    if (!prompt) return
-    const extra = workflow ? { workflow: { ...workflow } } : {}
+    const attached = attachments?.length ? attachments.map((a) => ({ ...a })) : null
+    if (!prompt && !attached) return
+    const extra = {
+      ...(workflow ? { workflow: { ...workflow } } : {}),
+      ...(attached ? { attachments: attached } : {}),
+    }
 
     // A message typed while the assistant waits on a question IS the answer
     // (agent-core's contract): it goes to the question, not into the queue.
-    if (this.question && !workflow) {
+    // One with attachments is a new message: an answer has nowhere to put them.
+    if (this.question && !workflow && !attached) {
       // On a several-question card it is one reply to all of them.
       this.answer(this.question.view.id, { text: prompt })
       return
@@ -305,7 +362,10 @@ export class ChatSession {
       // Flip the queued user message to active: same id, pending cleared. The
       // webview updates the existing (greyed) bubble rather than adding a new
       // one.
-      const nextExtra = next.workflow ? { workflow: next.workflow } : {}
+      const nextExtra = {
+        ...(next.workflow ? { workflow: next.workflow } : {}),
+        ...(next.attachments ? { attachments: next.attachments } : {}),
+      }
       this.emit({ type: 'message', message: { id: next.id, role: 'user', content: next.prompt, pending: false, ...nextExtra } })
       await this.runTurn({ id: next.id, role: 'user', content: next.prompt, ...nextExtra })
     }
@@ -328,6 +388,13 @@ export class ChatSession {
 
     this.messages.push(userMessage)
     this.emit({ type: 'message', message: { ...userMessage } })
+    // Recorded before the first save, so a crash from here on reads as
+    // interrupted on the next load.
+    this.inFlight = { startedAt: Date.now(), processes: [] }
+    if (this.interrupted) {
+      this.interrupted = null
+      this.emitState()
+    }
 
     const turn: ChatMessageView = { id: this.nextId(), role: 'assistant', content: '', streaming: true }
     this.messages.push(turn)
@@ -341,6 +408,9 @@ export class ChatSession {
 
     const controller = new AbortController()
     this.controller = controller
+    // What the run changes, kept as it happens: a turn that fails after three
+    // writes still made those writes, and the next message must know.
+    const effects: ToolEffect[] = []
 
     try {
       const handlers = {
@@ -411,6 +481,18 @@ export class ChatSession {
                 })
               },
               onToolResult: (call, toolResult) => {
+                const effect = toolResult.effect
+                if (effect) {
+                  effects.push(effect)
+                  turn.run = [...effects]
+                  if (effect.kind === 'command' && effect.ran && effect.processId && effect.exitCode === null && effect.cwd) {
+                    this.inFlight?.processes.push({ id: effect.processId, command: effect.command, cwd: effect.cwd })
+                  } else if (effect.kind === 'stop' && this.inFlight) {
+                    this.inFlight.processes = this.inFlight.processes.filter((p) => p.id !== effect.processId)
+                  }
+                  // Saved as it happens: a crash keeps the run log so far.
+                  this.deps.onPersist?.()
+                }
                 turn.tools = (turn.tools ?? []).map((card) =>
                   card.callId === call.id
                     ? {
@@ -429,6 +511,7 @@ export class ChatSession {
                   summary: toolResult.summary,
                   isError: toolResult.isError,
                   truncated: toolResult.truncated,
+                  ...(toolResult.effect ? { effect: toolResult.effect } : {}),
                 })
               },
             },
@@ -476,6 +559,7 @@ export class ChatSession {
       }
     } finally {
       if (this.controller === controller) this.controller = null
+      this.inFlight = null
       this.deps.onPersist?.()
     }
   }
@@ -563,21 +647,49 @@ export class ChatSession {
     const workspace = registry ? (this.deps.workspaceContext?.() ?? null) : null
     if (workspace) messages.push({ role: 'system', content: workspace })
 
+    // The newest assistant messages keep their full run log; older ones get
+    // one line. Decided by position, so a message's log stays the same text
+    // until FULL_LOGS_KEPT newer ones push it out, and the cache holds.
+    const assistants = this.messages.filter((m) => m.role === 'assistant' && !m.streaming)
+    // Images go as image parts only to a model that reads them.
+    const vision = this.deps.context?.()?.vision === true
+    const fullFrom = assistants.length - FULL_LOGS_KEPT
+    let assistantIndex = -1
+
     for (const message of this.messages) {
       if (message.role === 'assistant') {
-        if (message.error) continue
-        if (!message.content && !message.reasoning) continue
+        assistantIndex++
+        const log = message.run?.length
+          ? assistantIndex >= fullFrom ? formatRunLog(message.run) : collapsedRunLog(message.run)
+          : null
+        // A failed turn's text stays out (replaying an error teaches the model
+        // to imitate it), but what its run did is real.
+        if (message.error) {
+          if (log) messages.push({ role: 'assistant', content: log })
+          continue
+        }
+        if (!message.content && !message.reasoning && !log) continue
         const entry: ChatCompletionRequest['messages'][number] = {
           role: 'assistant',
-          content: message.content,
+          content: log ? (message.content ? `${message.content}\n\n${log}` : log) : message.content,
         }
         if (INCLUDE_REASONING_IN_CONTEXT && message.reasoning) {
           entry.reasoning_content = message.reasoning
         }
         messages.push(entry)
       } else {
-        messages.push({ role: 'user', content: message.content })
+        messages.push({ role: 'user', content: userContent(message.content, message.attachments, vision) })
       }
+    }
+
+    // Live state goes on the newest message, not in the system message: it
+    // changes whenever a process starts or stops, and a change at the start
+    // of the request would cost the whole prompt cache.
+    const live = registry ? (this.deps.liveState?.() ?? null) : null
+    const newest = messages.at(-1)
+    if (live && newest?.role === 'user') {
+      if (typeof newest.content === 'string') newest.content = `[${live}]\n\n${newest.content}`
+      else newest.content = newest.content.map((part, i) => (i === 0 && part.type === 'text' ? { ...part, text: `[${live}]\n\n${part.text}` } : part))
     }
 
     // No `tools` in Phase 1. That is load-bearing, not an omission: the gateway

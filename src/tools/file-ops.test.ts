@@ -107,6 +107,10 @@ describe('autoApplyReason', () => {
     assert.equal(autoApplyReason({ toolName: 'ys_edit_file', deletes: true }, store(['ys_edit_file']), true), null)
   })
 
+  it('never skips review for a protected path (settings, tasks, scripts)', () => {
+    assert.equal(autoApplyReason({ toolName: 'ys_write_file', deletes: false, alwaysAsk: true }, store(['ys_write_file']), true), null)
+  })
+
   it('honours task trust, then the remembered grant', () => {
     assert.equal(autoApplyReason({ toolName: 'ys_edit_file', deletes: false }, store([]), true), 'task')
     assert.equal(autoApplyReason({ toolName: 'ys_edit_file', deletes: false }, store(['ys_edit_file']), false), 'always')

@@ -334,7 +334,8 @@ export class NestClient {
 export interface ChatCompletionRequest {
   messages: Array<{
     role: 'system' | 'user' | 'assistant' | 'tool'
-    content: string
+    /** Parts for a user message with images (chat/attachments.ts). */
+    content: string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>
     reasoning_content?: string
     tool_calls?: unknown[]
     tool_call_id?: string

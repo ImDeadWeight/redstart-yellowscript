@@ -28,10 +28,14 @@ import { ContextTracker, type ContextSource, type FitReport } from '../agent/con
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ChatCompletionRequest } from '../nest/client.ts'
 import { createToolRegistry } from '../tools/registry.ts'
-import { BackgroundProcesses, formatCommandRun, runCommandLine, runFailed } from '../tools/process-runner.ts'
+import { BackgroundProcesses, formatCommandRun, runCommandLine, runFailed, startInBackground } from '../tools/process-runner.ts'
 import { findBrowser } from '../tools/browser-check.ts'
 import { buildWorkspaceContext } from '../tools/workspace-context.ts'
-import type { PendingWrite } from '../tools/types.ts'
+import type { PendingWrite, ToolEffect } from '../tools/types.ts'
+import { formatRunLog } from '../chat/run-log.ts'
+import { classifyCommand } from '../tools/safe-commands.ts'
+import { nodeCommandContext } from '../tools/command-context.ts'
+import { createTsSymbolProvider } from './ts-symbols.ts'
 
 /** One task, as `bench/tasks/<id>/task.json` describes it. */
 export interface BenchTask {
@@ -42,6 +46,13 @@ export interface BenchTask {
   maxTurns?: number
   /** Wall-clock limit for the whole run. */
   timeoutS?: number
+  /** Tools left out of this task's run (names), e.g. to measure what one saves. */
+  withholdTools?: string[]
+  /** Later messages, each sent after the previous run ends, with that run's
+   *  log on its answer as the chat sends it (chat/run-log.ts). One marked
+   *  newSession starts a fresh conversation in the same workspace: only what
+   *  is on disk (the notes, the plan) carries over. */
+  followUps?: Array<string | { prompt: string; newSession?: boolean }>
   /** Answers given to ask_user, in order; past the end, the question is dismissed. */
   answers?: AskAnswer[]
   tags?: string[]
@@ -60,14 +71,21 @@ export interface RunRecord {
   iterations: number
   toolCalls: number
   toolErrors: number
-  /** Calls whose arguments were not valid JSON. */
+  /** Calls whose arguments were not valid JSON and could not be repaired. */
   invalidArgs: number
+  /** Calls whose malformed arguments the registry repaired and ran. */
+  repairedArgs: number
   /** Calls recovered from the model's text, not tool_calls. */
   recovered: number
   /** Calls refused as identical repeats. */
   repeats: number
+  /** Commands that would have asked the person (tier C, safe-commands.ts):
+   *  the bench approves everything, so this is how the friction shows. */
+  commandPrompts: number
   /** Context trims during the run. */
   trims: number
+  /** Prompt tokens the model read across every request (prompt_n + cache_n). */
+  promptTokens?: number
   questions: number
   nCtx: number | null
   durationMs: number
@@ -128,6 +146,8 @@ export interface RunTaskOptions {
   keep?: boolean
   /** One line per event, for the console. */
   log?: (line: string) => void
+  /** Tools to leave out, on top of the task's own withholdTools. */
+  withhold?: string[]
 }
 
 /** Run one task end to end and score it. Never throws: a failure is a record. */
@@ -145,12 +165,18 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }),
     processes,
     browser: { browser: () => findBrowser(), screenshotDir: () => path.join(workspace, '.yellowscript', 'screenshots') },
+    symbols: createTsSymbolProvider(workspace),
+    withhold: [...(task.withholdTools ?? []), ...(options.withhold ?? [])],
   })
 
-  const context = buildWorkspaceContext(workspace)
-  const request: ChatCompletionRequest = {
-    messages: [...(context ? [{ role: 'system' as const, content: context }] : []), { role: 'user', content: task.prompt }],
+  // Rebuilt for each message, as the chat does: notes written by one run are
+  // in the next one's workspace message.
+  const systemMessage = (): ChatCompletionRequest['messages'] => {
+    const context = buildWorkspaceContext(workspace)
+    return context ? [{ role: 'system', content: context }] : []
   }
+  let messages: ChatCompletionRequest['messages'] = []
+  const prompts = [{ prompt: task.prompt, newSession: true }, ...(task.followUps ?? []).map((f) => (typeof f === 'string' ? { prompt: f, newSession: false } : { newSession: false, ...f }))]
   const answers = [...(task.answers ?? [])]
   let plan: PlanStep[] | null = null
   let trims = 0
@@ -161,54 +187,83 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
 
   const record: RunRecord = {
     task: task.id, label: options.label, model: null, pass: false, check: '', stopReason: 'error',
-    iterations: 0, toolCalls: 0, toolErrors: 0, invalidArgs: 0, recovered: 0, repeats: 0, trims: 0,
+    iterations: 0, toolCalls: 0, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, commandPrompts: 0, trims: 0,
     questions: 0, nCtx: null, durationMs: 0, answer: '',
   }
 
+  // Every request's prompt size, summed: what a tool saves in reading.
+  let promptTokens = 0
+  const counting: CompletionStreamer = {
+    async streamChatCompletion(request, handlers, signal) {
+      const result = await options.client.streamChatCompletion(request, handlers, signal)
+      promptTokens += (result.timings?.prompt_n ?? 0) + (result.timings?.cache_n ?? 0)
+      return result
+    },
+  }
+  /** Each file's content before the task first wrote it, for "this run changed the scripts". */
+  const before = new Map<string, string>()
   let result: AgentResult | undefined
+  /** Every message's run, in order: the check can look at one message's calls. */
+  const runs: AgentResult[] = []
   try {
-    result = await runAgentLoop({
-      client: options.client,
-      request,
-      tools,
-      toolContext: { workspaceRoots: [workspace] },
-      signal: controller.signal,
-      maxIterations: task.maxTurns ?? 40,
-      context: tracker,
-      approveChange: async (pending) => {
-        applyPendingWrite(pending)
-        return true
-      },
-      approveCommand: async (pending) => {
-        if (pending.background) {
-          const started = processes.start(pending.command, pending.cwd)
-          const first = await processes.output(started.id, { waitMs: 3_000 })
-          return {
-            text: `Started ${started.id}: ${pending.command} — ${first?.process.running ? 'running' : `exited with code ${first?.process.exitCode}`}.\n${first?.text.slice(-4_000) ?? ''}`,
-            isError: first ? !first.process.running && first.process.exitCode !== 0 : false,
+    for (const [index, { prompt, newSession }] of prompts.entries()) {
+      if (index > 0) log(`  message ${index + 1}${newSession ? ' (new session)' : ''}: ${prompt.slice(0, 80)}`)
+      messages = [...systemMessage(), ...(newSession ? [] : messages.filter((m) => m.role !== 'system')), { role: 'user', content: prompt }]
+      result = await runAgentLoop({
+        client: counting,
+        request: { messages: [...messages] },
+        tools,
+        toolContext: { workspaceRoots: [workspace] },
+        signal: controller.signal,
+        maxIterations: task.maxTurns ?? 40,
+        context: tracker,
+        approveChange: async (pending) => {
+          for (const c of pending.changes) if (!before.has(c.absolutePath.toLowerCase())) before.set(c.absolutePath.toLowerCase(), c.before)
+          applyPendingWrite(pending)
+          return true
+        },
+        approveCommand: async (pending) => {
+          const tier = classifyCommand(pending.command, nodeCommandContext({
+            cwd: pending.cwd,
+            roots: [workspace],
+            builtInSafe: true,
+            projectChecks: true,
+            background: pending.background === true,
+            packageJsonBeforeRun: (file) => before.get(file.toLowerCase()) ?? null,
+          }))
+          if (tier.tier === 'C') {
+            record.commandPrompts++
+            log(`  would ask: ${pending.command} (${tier.reason})`)
           }
-        }
-        const run = await runCommandLine({ command: pending.command, cwd: pending.cwd, ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}), signal: controller.signal })
-        return { text: formatCommandRun(run), isError: runFailed(run) }
-      },
-      ask: {
-        user: async (_request: AskRequest) => {
-          questions++
-          return answers.shift() ?? null
+          if (pending.background) return startInBackground(processes, pending.command, pending.cwd)
+          const run = await runCommandLine({ command: pending.command, cwd: pending.cwd, ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}), signal: controller.signal })
+          return { text: formatCommandRun(run), isError: runFailed(run), exitCode: run.exitCode }
         },
-      },
-      plan: { get: () => plan, save: (steps) => void (plan = steps.map((s) => ({ ...s }))) },
-      // The bench measures one allowance of turns; it never says "keep going".
-      askContinue: async () => false,
-      handlers: {
-        onToolCall: (call, recovered) => log(`  call ${call.function.name}${recovered ? ' [recovered]' : ''} ${call.function.arguments.slice(0, 120)}`),
-        onContextTrimmed: (report: FitReport) => {
-          trims++
-          log(`  context trimmed ~${report.before} → ~${report.after} of ${report.usable}`)
+        ask: {
+          user: async (_request: AskRequest) => {
+            questions++
+            return answers.shift() ?? null
+          },
         },
-      },
-    })
-    record.stopReason = controller.signal.aborted ? 'timeout' : result.stopReason
+        plan: { get: () => plan, save: (steps) => void (plan = steps.map((s) => ({ ...s }))) },
+        // The bench measures one allowance of turns; it never says "keep going".
+        askContinue: async () => false,
+        handlers: {
+          onToolCall: (call, recovered) => log(`  call ${call.function.name}${recovered ? ' [recovered]' : ''} ${call.function.arguments.slice(0, 120)}`),
+          onContextTrimmed: (report: FitReport) => {
+            trims++
+            log(`  context trimmed ~${report.before} → ~${report.after} of ${report.usable}`)
+          },
+        },
+      })
+      runs.push(result)
+      record.stopReason = controller.signal.aborted ? 'timeout' : result.stopReason
+      if (record.stopReason !== 'complete') break
+      // The answer, then what the run did: what the chat sends on the next message.
+      const effects = result.toolRuns.map((r) => r.result.effect).filter((e): e is ToolEffect => e !== undefined)
+      const runLog = formatRunLog(effects)
+      messages.push({ role: 'assistant', content: [result.content, runLog].filter(Boolean).join('\n\n') })
+    }
   } catch (err) {
     record.stopReason = controller.signal.aborted ? 'timeout' : 'error'
     record.error = err instanceof Error ? err.message : String(err)
@@ -217,19 +272,22 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     processes.stopAll()
   }
 
+  const allRuns = runs.flatMap((r) => r.toolRuns)
   if (result) {
     record.model = result.model ?? null
-    record.iterations = result.iterations
+    record.iterations = runs.reduce((n, r) => n + r.iterations, 0) || result.iterations
     record.answer = result.content.slice(0, 2_000)
-    for (const run of result.toolRuns) {
+    for (const run of allRuns) {
       record.toolCalls++
       if (run.result.isError) record.toolErrors++
       if (run.recovered) record.recovered++
       if (/were not valid JSON/.test(run.result.content)) record.invalidArgs++
+      if (run.result.argumentsRepaired?.length) record.repairedArgs++
       if (run.result.summary === 'Not run: repeated call') record.repeats++
     }
   }
   record.trims = trims
+  record.promptTokens = promptTokens
   record.questions = questions
   record.nCtx = tracker?.contextSize ?? null
 
@@ -245,11 +303,9 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
         plan,
         stopReason: record.stopReason,
         questions,
-        calls: (result?.toolRuns ?? []).map((r) => ({
-          name: r.call.function.name,
-          args: r.call.function.arguments.slice(0, 500),
-          isError: r.result.isError,
-        })),
+        calls: allRuns.map(callRecord),
+        // One entry per message (the prompt and any follow-ups), with its own calls.
+        messages: runs.map((r) => ({ calls: r.toolRuns.map(callRecord) })),
       },
       null,
       2,
@@ -267,6 +323,11 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
   return { ...record, workspace }
 }
 
+/** A call as the check sees it. */
+function callRecord(run: AgentResult['toolRuns'][number]): { name: string; args: string; isError: boolean } {
+  return { name: run.call.function.name, args: run.call.function.arguments.slice(0, 500), isError: run.result.isError }
+}
+
 // ---------------------------------------------------------------------------
 // The summary.
 // ---------------------------------------------------------------------------
@@ -279,6 +340,8 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
   const calls = records.reduce((a, r) => a + r.toolCalls, 0)
   const errors = records.reduce((a, r) => a + r.toolErrors, 0)
   const invalid = records.reduce((a, r) => a + r.invalidArgs, 0)
+  const repaired = records.reduce((a, r) => a + (r.repairedArgs ?? 0), 0)
+  const prompts = records.reduce((a, r) => a + (r.commandPrompts ?? 0), 0)
   const recovered = records.reduce((a, r) => a + r.recovered, 0)
   const turns = records.reduce((a, r) => a + r.iterations, 0)
   const limits = records.filter((r) => r.stopReason === 'turn-cap' || r.stopReason === 'timeout').length
@@ -293,17 +356,17 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
     '',
     `**${passed}/${records.length} passed.**`,
     '',
-    '| Task | Result | Stop | Turns | Calls | Errors | Trims | Time | Check |',
-    '|---|---|---|---|---|---|---|---|---|',
+    '| Task | Result | Stop | Turns | Calls | Errors | Prompts | Trims | Prompt tokens | Time | Check |',
+    '|---|---|---|---|---|---|---|---|---|---|---|',
     ...records.map((r) =>
-      `| ${r.task} | ${r.pass ? 'PASS' : 'FAIL'} | ${r.stopReason} | ${r.iterations} | ${r.toolCalls} | ${r.toolErrors} | ${r.trims} | ${(r.durationMs / 1000).toFixed(0)}s | ${r.check.split('\n')[0]!.replace(/\|/g, '\\|').slice(0, 80)} |`,
+      `| ${r.task} | ${r.pass ? 'PASS' : 'FAIL'} | ${r.stopReason} | ${r.iterations} | ${r.toolCalls} | ${r.toolErrors} | ${r.commandPrompts ?? 0} | ${r.trims} | ${r.promptTokens?.toLocaleString('en-US') ?? '–'} | ${(r.durationMs / 1000).toFixed(0)}s | ${r.check.split('\n')[0]!.replace(/\|/g, '\\|').slice(0, 80)} |`,
     ),
     '',
     'Row for docs/bench-results.md:',
     '',
-    '| Date | Label | Model | Pass | Tool success | Invalid args | Recovered | Turns/task | Hit a limit | Trimmed |',
-    '|---|---|---|---|---|---|---|---|---|---|',
-    `| ${date.toISOString().slice(0, 10)} | ${label} | ${models} | ${passed}/${records.length} (${pct(passed, records.length)}) | ${pct(calls - errors, calls)} | ${pct(invalid, calls)} | ${pct(recovered, calls)} | ${records.length ? (turns / records.length).toFixed(1) : '–'} | ${limits} | ${trimmed} |`,
+    '| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Command prompts | Hit a limit | Trimmed |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|',
+    `| ${date.toISOString().slice(0, 10)} | ${label} | ${models} | ${passed}/${records.length} (${pct(passed, records.length)}) | ${pct(calls - errors, calls)} | ${pct(invalid, calls)} | ${pct(repaired, calls)} | ${pct(recovered, calls)} | ${records.length ? (turns / records.length).toFixed(1) : '–'} | ${prompts} | ${limits} | ${trimmed} |`,
     '',
   ]
   return lines.join('\n')

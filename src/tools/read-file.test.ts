@@ -105,7 +105,7 @@ describe('ys_read_file — ranges', () => {
   })
 
   test('the default line limit binds when lines are short', async () => {
-    const result = await run({ path: 'short.txt' })
+    const result = await run({ path: 'short.txt', offset: 1 })
     assert.match(result.content, new RegExp(`lines 1-${DEFAULT_LINE_LIMIT} of 3000`))
     assert.equal(result.truncated, true)
   })
@@ -115,7 +115,7 @@ describe('ys_read_file — ranges', () => {
     // output short, the header still claimed the full requested range and the
     // "read more" hint pointed past the gap — so the model would compute its
     // next offset from a number covering lines it never saw.
-    const result = await run({ path: 'many.txt' })
+    const result = await run({ path: 'many.txt', offset: 1 })
     assert.equal(result.truncated, true)
 
     const header = /lines 1-(\d+) of 5000/.exec(result.content)

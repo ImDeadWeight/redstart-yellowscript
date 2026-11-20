@@ -74,17 +74,16 @@ export function createReplaceTool(fs: WriteFs): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_replace'),
       description:
-        'Propose replacing exact text in a file: give old_string exactly as it appears (including ' +
-        'indentation) and new_string to put there. old_string must appear exactly once unless replace_all ' +
-        'is true; include a few surrounding lines to make it unique. Prefer this over ys_edit_file for ' +
-        'changing part of a file. Read the file first. Applied only after review.',
+        'Propose replacing exact text in a file. old_string must match exactly, indentation included, ' +
+        'and only once unless replace_all; add surrounding lines to make it unique. Read the file first. ' +
+        'Applied after review.',
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Workspace-relative file path.' },
-          old_string: { type: 'string', description: 'The exact text to replace.' },
-          new_string: { type: 'string', description: 'The text to put in its place.' },
-          replace_all: { type: 'boolean', description: 'Replace every occurrence instead of exactly one.' },
+          path: { type: 'string', description: 'Workspace-relative path.' },
+          old_string: { type: 'string' },
+          new_string: { type: 'string' },
+          replace_all: { type: 'boolean', description: 'Replace every occurrence.' },
         },
         required: ['path', 'old_string', 'new_string'],
         additionalProperties: false,
@@ -156,11 +155,10 @@ export function createDeleteFileTool(fs: WriteFs): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_delete_file'),
       description:
-        'Propose deleting a file from the workspace. Always shown for review, never auto-approved; ' +
-        'it can be undone with Revert Last Write.',
+        'Propose deleting a file. Always reviewed; undone with Revert Last Write.',
       inputSchema: {
         type: 'object',
-        properties: { path: { type: 'string', description: 'Workspace-relative file path.' } },
+        properties: { path: { type: 'string', description: 'Workspace-relative path.' } },
         required: ['path'],
         additionalProperties: false,
       },
@@ -199,13 +197,13 @@ export function createMoveFileTool(fs: WriteFs): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_move_file'),
       description:
-        'Propose moving or renaming a file inside the workspace. Missing folders are created. The ' +
-        'destination must not exist. Applied only after review. Update imports with ys_replace afterwards.',
+        'Propose moving or renaming a file; folders are created, the destination must not exist. ' +
+        'Applied after review. Fix imports with ys_replace.',
       inputSchema: {
         type: 'object',
         properties: {
-          from: { type: 'string', description: 'Workspace-relative path of the existing file.' },
-          to: { type: 'string', description: 'Workspace-relative destination path.' },
+          from: { type: 'string', description: 'Workspace-relative path.' },
+          to: { type: 'string', description: 'Workspace-relative path.' },
         },
         required: ['from', 'to'],
         additionalProperties: false,

@@ -17,6 +17,7 @@ import {
   PROTOCOL_VERSION,
   parseWebviewMessage,
   type AnswerView,
+  type AttachmentView,
   type ChatMessageView,
   type ConversationState,
   type HostMessage,
@@ -26,7 +27,8 @@ import {
 } from '../chat/protocol.ts'
 
 export interface ChatViewHandlers {
-  onSend: (text: string) => void
+  onSend: (text: string, attachments?: AttachmentView[]) => void
+  onSearchFiles: (query: string) => void
   onAbort: () => void
   onNewConversation: () => void
   onListConversations: () => void
@@ -53,6 +55,10 @@ export interface ChatViewHandlers {
   onOpenApprovalDiff: (id: string, index: number) => void
   onClearPlan: () => void
   onContinueAtLimit: (go: boolean) => void
+  onOpenTaskDiff: (turnId: string, path: string) => void
+  onRevertTask: (turnId: string) => void
+  onResumeTask: (restart: boolean) => void
+  onDismissInterrupted: () => void
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.WebviewPanelSerializer {
@@ -159,7 +165,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
         this.handlers.onReady()
         break
       case 'send':
-        this.handlers.onSend(message.text)
+        this.handlers.onSend(message.text, message.attachments)
+        break
+      case 'searchFiles':
+        this.handlers.onSearchFiles(message.query)
         break
       case 'abort':
         this.handlers.onAbort()
@@ -227,6 +236,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       case 'continueAtLimit':
         this.handlers.onContinueAtLimit(message.go)
         break
+      case 'openTaskDiff':
+        this.handlers.onOpenTaskDiff(message.turnId, message.path)
+        break
+      case 'revertTask':
+        this.handlers.onRevertTask(message.turnId)
+        break
+      case 'resumeTask':
+        this.handlers.onResumeTask(message.restart)
+        break
+      case 'dismissInterrupted':
+        this.handlers.onDismissInterrupted()
+        break
     }
   }
 
@@ -281,6 +302,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       `style-src ${webview.cspSource}`,
       `script-src 'nonce-${nonce}'`,
       `font-src ${webview.cspSource}`,
+      // Attached images are data: URLs, made in the webview itself.
+      'img-src data:',
     ].join('; ')
 
     return `<!DOCTYPE html>

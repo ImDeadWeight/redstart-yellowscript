@@ -11,7 +11,7 @@
 // =============================================================================
 
 import * as vscode from 'vscode'
-import { hostname } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 
 import { ConnectionManager, describeState, type ConnectionState } from './connection.ts'
 import {
@@ -46,15 +46,27 @@ import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
 import {
   diagnosticsAfterWrite,
   diagnosticsProvider,
+  symbolProvider,
   editorStateProvider,
   resolveRipgrep,
   workspaceRoots,
   approvalStore,
 } from './ui/tool-providers.ts'
-import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
+import { makeApprovalGate, checkpointForWorkspace, shadowKey } from './ui/write-approval.ts'
+import { fileBaseline, revertSteps } from './chat/run-log.ts'
+import type { PendingCommand, ToolEffect } from './tools/types.ts'
+import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
+import { nodeCommandContext } from './tools/command-context.ts'
+import { usableReadRoots } from './tools/read-scope.ts'
+import { AttentionTracker, LONG_RUN_MS } from './chat/attention.ts'
+import { MAX_FILE_LINES, attachmentLabel } from './chat/attachments.ts'
+import { formatOutline, outlineOf } from './tools/symbols.ts'
+import { secretReason } from './tools/protected-paths.ts'
+import { resolveWithinWorkspace } from './tools/workspace-path.ts'
+import type { AttachmentView } from './chat/protocol.ts'
 import { makeCommandGate } from './ui/run-command.ts'
-import { BackgroundProcesses } from './tools/process-runner.ts'
-import { McpHost, type McpTool } from './nest/mcp-host.ts'
+import { BackgroundProcesses, describeRunning } from './tools/process-runner.ts'
+import { McpHost, withProjectMeta, type McpTool } from './nest/mcp-host.ts'
 import { approvalInfo, callWithApproval } from './nest/approval.ts'
 import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
@@ -165,8 +177,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   tools = createToolRegistry({
     ripgrepPath,
     diagnostics: diagnosticsProvider,
+    symbols: symbolProvider,
     editorState: editorStateProvider,
     processes: backgroundProcesses,
+    unifiedDiff: vscode.workspace.getConfiguration('redstartYellowscript').get<boolean>('tools.unifiedDiff') === true,
     browser: {
       // Looked up on use, so a browser installed later is found.
       browser: () => findBrowser(),
@@ -199,7 +213,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // here — the tab strip is the source of truth for which conversations exist.
 
   chatView = new ChatViewProvider(context.extensionUri, {
-    onSend: (text) => sendToActive(text),
+    onSend: (text, attachments) => {
+      void resolveAttachments(attachments ?? []).then((resolved) => sendToActive(text, undefined, resolved))
+    },
+    onSearchFiles: (query) => {
+      void searchWorkspaceFiles(query).then((paths) => chatView?.post({ type: 'fileMatches', query, paths }))
+    },
     onAbort: () => {
       if (activeConversationId) getSession(activeConversationId).abort()
       pushSession()
@@ -300,7 +319,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const session = getSession(activeConversationId)
         // If the active conversation has a saved transcript and nothing is
         // streaming, seed the session so the panel opens on the right chat.
-        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null)
+        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
         chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId, session.state())
       } else {
         chatView?.sendInit(snapshot(null), [], null, EMPTY_CONVERSATION_STATE)
@@ -337,6 +356,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onContinueAtLimit: (go) => {
       if (activeConversationId) getSession(activeConversationId).continueAtLimit(go)
     },
+    onResumeTask: (restart) => {
+      if (!activeConversationId) return
+      const session = getSession(activeConversationId)
+      // Clicking "Restart and continue" is the person's go-ahead for them.
+      const resumed = session.resumeInterrupted()
+      if (!resumed) return
+      if (restart && backgroundProcesses) {
+        for (const p of resumed.processes) {
+          try {
+            const started = backgroundProcesses.start(p.command, p.cwd)
+            commandChannel?.appendLine(`\n$ ${p.command}    (restarted for an interrupted task as ${started.id})`)
+          } catch (err) {
+            output?.warn(`could not restart ${p.command}: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+      }
+      void resumed.sent
+    },
+    onDismissInterrupted: () => {
+      if (activeConversationId) getSession(activeConversationId).dismissInterrupted()
+    },
+    onOpenTaskDiff: (turnId, file) => {
+      if (activeConversationId) void openTaskDiff(getSession(activeConversationId).runOf(turnId) ?? [], file)
+    },
+    onRevertTask: (turnId) => {
+      if (activeConversationId) void revertTask(getSession(activeConversationId).runOf(turnId) ?? [])
+    },
     onSearchHistory: (query) => {
       if (!currentAccountId) {
         chatView?.post({ type: 'historyList', conversations: [] })
@@ -370,7 +416,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       conversations.unarchive(id)
       activeConversationId = id
       const session = getSession(id)
-      session.load(conv.messages, conv.plan ?? null)
+      session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
       pushConversations()
       pushActiveConversation()
       postConversation(id)
@@ -411,6 +457,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastTask', revertLastTaskCommand),
+    vscode.commands.registerCommand('redstartYellowscript.addSelection', addSelectionToChat),
+    vscode.commands.registerCommand('redstartYellowscript.fixDiagnostic', fixDiagnostic),
+    vscode.languages.registerCodeActionsProvider(
+      { scheme: 'file' },
+      {
+        provideCodeActions: (document, _range, context) =>
+          context.diagnostics
+            .filter((d) => d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning)
+            .slice(0, 1)
+            .map((d) => {
+              const action = new vscode.CodeAction('Fix with Yellowscript', vscode.CodeActionKind.QuickFix)
+              action.command = { command: 'redstartYellowscript.fixDiagnostic', title: 'Fix with Yellowscript', arguments: [document.uri, d] }
+              action.diagnostics = [d]
+              return action
+            }),
+      },
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
+    ),
+    vscode.commands.registerCommand('redstartYellowscript.showWaiting', () => {
+      const id = attention.firstWaiting()
+      return id ? showConversation(id) : chatView?.reveal()
+    }),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
@@ -461,6 +529,8 @@ function contextFor(client: NestClient | null): ContextTracker | null {
     tracker = new ContextTracker(client)
     contextTrackers.set(client, tracker)
     void tracker.ready().then(() => {
+      // Now known whether the model reads images: the composer says so.
+      pushSession()
       output?.info(`context: n_ctx ${tracker!.contextSize ?? 'unknown (learned from the first refusal)'}`)
     })
   }
@@ -566,6 +636,7 @@ function getSession(id: string): ChatSession {
         const root = workspaceRoots()[0]
         return root ? buildWorkspaceContext(root) : null
       },
+      liveState: () => (backgroundProcesses ? describeRunning(backgroundProcesses.list()) : null),
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
       onContextTrimmed: (report) => {
         output?.info(
@@ -576,7 +647,30 @@ function getSession(id: string): ChatSession {
       },
       onUnauthorized: () => manager?.handleUnauthorized(),
       tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
-      toolContext: () => ({ workspaceRoots: workspaceRoots() }),
+      toolContext: () => ({
+        workspaceRoots: workspaceRoots(),
+        readRoots: extraReadRoots(),
+        askRead: async (request) => {
+          const outside = request.outsideFolder
+          const choice = await getSession(id).askApproval({
+            kind: 'tool',
+            title: outside ? 'Read outside the workspace' : 'Read a file that may hold secrets',
+            subject: request.label,
+            detail: outside
+              ? `It is outside the workspace. Reading only; nothing there is ever written. "Always" allows reading ${outside}.`
+              : `${request.reason}. What it says goes to the model and is saved with this chat.`,
+            options: [
+              { id: 'read', label: 'Allow this time', kind: 'allow' },
+              ...(outside ? [{ id: 'always', label: 'Always for this folder', kind: 'always' as const }] : []),
+              { id: 'deny', label: 'Deny', kind: 'deny' },
+            ],
+          })
+          if (choice === 'always' && outside) {
+            await config().update('extraReadRoots', [...new Set([...extraReadRoots(), outside])], vscode.ConfigurationTarget.Workspace)
+          }
+          return choice === 'read' || choice === 'always'
+        },
+      }),
       approveChange: (pending) => {
         const roots = workspaceRoots()
         if (roots.length === 0) {
@@ -586,6 +680,7 @@ function getSession(id: string): ChatSession {
         const gate = makeApprovalGate({
           ask: (request) => getSession(id).askApproval(request),
           checkpoints: checkpointForWorkspace(roots[0]!),
+          root: roots[0]!,
           store: approvalStore(),
           recordCheckpoint: (checkpoint, files) => {
             lastCheckpoint.set(roots[0]!, { checkpoint, files })
@@ -607,6 +702,7 @@ function getSession(id: string): ChatSession {
               channel: commandChannel,
               processes: backgroundProcesses,
               ask: (request) => getSession(id).askApproval(request),
+              classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
             })(pending)
           : Promise.resolve(null),
       conversationId: id,
@@ -618,8 +714,15 @@ function getSession(id: string): ChatSession {
         // task" lasts until then; its checkpoints stay for Revert Last Task.
         if (message.type === 'message' && message.message.role === 'user' && !message.message.pending) {
           tasks.set(id, { trusted: false, checkpoints: [] })
+          attention.runStarted(id)
         } else if (message.type === 'turn/completed' || message.type === 'turn/failed') {
           taskFor(id).trusted = false
+          const took = attention.runEnded(id)
+          if (took !== null && took > LONG_RUN_MS) notifyUnwatched(id, `finished after ${Math.round(took / 60_000)} min`)
+        } else if (message.type === 'conversationState') {
+          const news = attention.update(id, message.state)
+          statusBar?.setWaiting(attention.count)
+          if (news) notifyUnwatched(id, `is waiting for ${news}`)
         }
         chatView?.post(message)
         if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
@@ -635,7 +738,7 @@ function getSession(id: string): ChatSession {
     // every other tab the user opens later.
     const conv = conversations.get(id)
     if (conv && (conv.messages.length > 0 || conv.plan)) {
-      session.load(conv.messages, conv.plan ?? null)
+      session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
     } else {
       // A fresh conversation carries on the workspace's plan while steps are
       // open (.yellowscript/PLAN.md, kept by onPlanChanged).
@@ -653,7 +756,7 @@ function getSession(id: string): ChatSession {
  * Send to the active conversation (creating one if no tab is open), and title
  * a new chat from its first prompt, or from the workflow it ran.
  */
-function sendToActive(text: string, workflow?: { name: string; title: string }): void {
+function sendToActive(text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): void {
   let id = activeConversationId
   if (!id) {
     const created = conversations.create('New chat', [], currentAccountId ?? undefined)
@@ -672,7 +775,7 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
     conversations.save(conv)
     pushConversations()
   }
-  const finished = getSession(conversationId).send(text, workflow)
+  const finished = getSession(conversationId).send(text, workflow, attachments)
   pushSession()
   // Title a still-untitled chat once its turn (or its queue) is underway.
   void finished.then(() => {
@@ -682,7 +785,7 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
     if (current && current.title === 'New chat') {
       const firstUser = getSession(conversationId).transcript.find((m) => m.role === 'user')
       if (firstUser) {
-        current.title = titleFor(firstUser.content)
+        current.title = titleFor(firstUser.content || (firstUser.attachments?.[0] ? attachmentLabel(firstUser.attachments[0]) : 'New chat'))
         conversations.save(current)
         pushConversations()
       }
@@ -700,6 +803,9 @@ function persistConversation(id: string): void {
   const plan = session.planSnapshot()
   if (plan) conv.plan = plan
   else delete conv.plan
+  const inFlight = session.inFlightSnapshot()
+  if (inFlight) conv.inFlight = inFlight
+  else delete conv.inFlight
   conversations.save(conv)
 }
 
@@ -735,6 +841,8 @@ function snapshot(id: string | null): SessionSnapshot {
   if (model) base.model = model
   const project = connected ? linkedProject() : null
   if (project) base.project = { id: project.id, name: project.name }
+  const tracker = connected ? contextFor(manager?.activeClient ?? null) : null
+  if (tracker) base.vision = tracker.vision
   return base
 }
 
@@ -1299,6 +1407,58 @@ async function revertLastTaskCommand(): Promise<void> {
   }
 }
 
+/**
+ * The task summary's file link: the file now, against its state before the
+ * run first wrote it (from the checkpoint stored with the run, so it works
+ * after a reload too).
+ */
+async function openTaskDiff(run: readonly ToolEffect[], file: string): Promise<void> {
+  const base = fileBaseline(run, file)
+  if (!base) {
+    vscode.window.showInformationMessage(`Yellowscript: there is no checkpoint for ${file} in this task.`)
+    return
+  }
+  try {
+    const before = base.wasAbsent ? '' : await checkpointForWorkspace(base.root).show(base.revision, shadowKey(base.absolutePath))
+    const beforeFile = nodePath.join(tmpdir(), `ys-before-${Date.now()}-${nodePath.basename(base.absolutePath)}`)
+    await nodeFs.promises.writeFile(beforeFile, before, 'utf8')
+    const now = nodeFs.existsSync(base.absolutePath) ? vscode.Uri.file(base.absolutePath) : vscode.Uri.parse(`untitled:${file} (deleted)`)
+    await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(beforeFile), now, `Yellowscript: ${file} since the task`, { preview: true })
+  } catch (err) {
+    vscode.window.showErrorMessage(`Could not open the diff for ${file}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** The task summary's Revert: undo the run's writes, newest first. */
+async function revertTask(run: readonly ToolEffect[]): Promise<void> {
+  const steps = revertSteps(run)
+  if (steps.length === 0) {
+    vscode.window.showInformationMessage('Yellowscript: this task made no checkpointed writes, so there is nothing to revert.')
+    return
+  }
+  const files = [...new Set(steps.flatMap((s) => s.files.map((f) => f.absolutePath)))]
+  const choice = await vscode.window.showWarningMessage(
+    `Revert this Yellowscript task? ${files.length} file${files.length === 1 ? '' : 's'} go back to how they were before it ` +
+      '(files it created are deleted). Later changes to these files are lost too.',
+    { modal: true, detail: files.join('\n') },
+    'Revert task',
+  )
+  if (choice !== 'Revert task') return
+  try {
+    for (const step of steps) {
+      await checkpointForWorkspace(step.root).revert(
+        { revision: step.revision, label: '' },
+        step.files.map((f) => ({ workspaceAbsolute: f.absolutePath, relativePath: shadowKey(f.absolutePath), content: '', wasAbsent: f.wasAbsent })),
+      )
+    }
+    output?.info(`revert: undid ${steps.length} write(s) of a task (${files.length} file(s))`)
+    vscode.window.showInformationMessage(`Yellowscript: reverted the task (${files.length} file${files.length === 1 ? '' : 's'}).`)
+  } catch (err) {
+    vscode.window.showErrorMessage(`Could not revert the task: ${err instanceof Error ? err.message : String(err)}`)
+    output?.error('task revert failed', err)
+  }
+}
+
 /** Manual fallback for a Nest discovery can't see (different subnet, VPN). */
 async function promptForServerUrl(): Promise<void> {
   const entered = await vscode.window.showInputBox({
@@ -1339,6 +1499,143 @@ async function promptForServerUrl(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * A message's @file attachments, read now: the content (up to 300 lines) or
+ * the outline of a longer file. Files outside the workspace or that may hold
+ * secrets are not attached; a notice says so.
+ */
+async function resolveAttachments(list: readonly AttachmentView[]): Promise<AttachmentView[]> {
+  const roots = workspaceRoots()
+  const out: AttachmentView[] = []
+  for (const a of list) {
+    if (a.kind !== 'file') {
+      out.push(a)
+      continue
+    }
+    let absolute: string
+    try {
+      absolute = resolveWithinWorkspace(roots, a.path)
+    } catch {
+      chatView?.post({ type: 'notice', level: 'warning', message: `${a.path} is outside the workspace, so it was not attached.` })
+      continue
+    }
+    if (secretReason(absolute)) {
+      chatView?.post({ type: 'notice', level: 'warning', message: `${a.path} may hold secrets, so it was not attached.` })
+      continue
+    }
+    try {
+      const text = (await nodeFs.promises.readFile(absolute, 'utf8')).replace(/\r\n/g, '\n')
+      const lines = text.split('\n')
+      if (lines.length <= MAX_FILE_LINES) {
+        out.push({ kind: 'file', path: a.path, content: text.trimEnd(), lines: lines.length })
+      } else {
+        const { symbols } = await outlineOf(symbolProvider, absolute, text)
+        out.push({ kind: 'file', path: a.path, content: formatOutline(symbols, 150).text || '(no symbols found)', lines: lines.length, outline: true })
+      }
+    } catch {
+      out.push({ kind: 'file', path: a.path })
+    }
+  }
+  return out
+}
+
+/** The @ picker: workspace files whose path contains `query`, shortest first. */
+async function searchWorkspaceFiles(query: string): Promise<string[]> {
+  const cleaned = query.replace(/[\\*?{}[\]]/g, '').trim()
+  const pattern = cleaned ? `**/*${cleaned}*` : '**/*'
+  const found = await vscode.workspace.findFiles(pattern, '{**/node_modules/**,**/.git/**,**/.yellowscript/**,**/dist/**,**/out/**}', 200)
+  return found
+    .map((uri) => vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/'))
+    .filter((p) => !secretReason(p))
+    .sort((a, b) => a.length - b.length || a.localeCompare(b))
+    .slice(0, 30)
+}
+
+/** The editor's selection, as a chip in the composer. */
+async function addSelectionToChat(): Promise<void> {
+  const editor = vscode.window.activeTextEditor
+  if (!editor || editor.document.uri.scheme !== 'file') return
+  const selection = editor.selection.isEmpty ? editor.document.lineAt(editor.selection.active.line).range : editor.selection
+  const startLine = selection.start.line + 1
+  const endLine = selection.end.character === 0 && selection.end.line > selection.start.line ? selection.end.line : selection.end.line + 1
+  const range = new vscode.Range(startLine - 1, 0, endLine - 1, editor.document.lineAt(endLine - 1).text.length)
+  await chatView?.reveal()
+  chatView?.post({
+    type: 'addAttachment',
+    attachment: { kind: 'selection', path: vscode.workspace.asRelativePath(editor.document.uri, false).replace(/\\/g, '/'), startLine, endLine, text: editor.document.getText(range) },
+  })
+}
+
+/** "Fix with Yellowscript" on a diagnostic: the problem, and the lines around it. */
+async function fixDiagnostic(uri: vscode.Uri, diagnostic: vscode.Diagnostic): Promise<void> {
+  const document = await vscode.workspace.openTextDocument(uri)
+  const first = Math.max(0, diagnostic.range.start.line - 8)
+  const last = Math.min(document.lineCount - 1, diagnostic.range.end.line + 8)
+  const path = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/')
+  const source = diagnostic.source ? ` (${diagnostic.source}${diagnostic.code !== undefined ? ` ${typeof diagnostic.code === 'object' ? diagnostic.code.value : diagnostic.code}` : ''})` : ''
+  const text = document.getText(new vscode.Range(first, 0, last, document.lineAt(last).text.length))
+  await chatView?.reveal()
+  sendToActive(`Fix this problem in ${path} at line ${diagnostic.range.start.line + 1}: ${diagnostic.message}${source}`, undefined, [
+    { kind: 'selection', path, startLine: first + 1, endLine: last + 1, text },
+  ])
+}
+
+/** Which conversations wait on the person, and how long runs take. */
+const attention = new AttentionTracker()
+
+/**
+ * Say so when a run needs the person, or a long one finished, and the window
+ * is not focused (when it is, the card is already on screen). Show brings
+ * that conversation to the front.
+ */
+function notifyUnwatched(conversationId: string, what: string): void {
+  if (vscode.window.state.focused) return
+  if (config().get<boolean>('notifyWhenWaiting') === false) return
+  const title = conversations.get(conversationId)?.title ?? 'A chat'
+  void vscode.window.showInformationMessage(`Yellowscript: "${title}" ${what}.`, 'Show').then((choice) => {
+    if (choice === 'Show') void showConversation(conversationId)
+  })
+}
+
+/** Reveal the chat with this conversation in front. */
+async function showConversation(conversationId: string): Promise<void> {
+  await chatView?.reveal()
+  switchConversation(conversationId)
+}
+
+/** What the command classifier needs to know about this workspace and run. */
+function commandContextFor(conversationId: string, pending: PendingCommand): CommandContext {
+  return nodeCommandContext({
+    cwd: pending.cwd,
+    roots: workspaceRoots().map((root) => {
+      try {
+        return nodeFs.realpathSync.native(root)
+      } catch {
+        return root
+      }
+    }),
+    readRoots: usableReadRoots(extraReadRoots()),
+    builtInSafe: config().get<boolean>('commands.builtInSafe') !== false,
+    projectChecks: config().get<boolean>('commands.autoRunProjectChecks') !== false,
+    background: pending.background === true,
+    // package.json as this run's first checkpoint of it holds it.
+    packageJsonBeforeRun: (file) => {
+      const key = file.toLowerCase()
+      for (const entry of tasks.get(conversationId)?.checkpoints ?? []) {
+        const staged = entry.files.find((f) => f.workspaceAbsolute.toLowerCase() === key)
+        if (staged) return staged.wasAbsent ? '' : staged.content
+      }
+      return null
+    },
+  })
+}
+
+/** Folders outside the workspace the person allowed the read tools. */
+function extraReadRoots(): string[] {
+  const value = config().get<string[]>('extraReadRoots')
+  return Array.isArray(value) ? value.filter((v) => typeof v === 'string' && v.trim() !== '') : []
+}
 
 function config(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(CONFIG_SECTION)
@@ -1424,7 +1721,7 @@ function connectMcpHost(): void {
                   await callWithApproval(t.name, args, approvalInfo(t.meta), {
                     ...approvals,
                     ...(asker ? { prompt: (request) => promptInChat(request, asker.askApproval) } : {}),
-                    call: (meta) => host.callToolResult(t.name, args, meta),
+                    call: (meta) => host.callToolResult(t.name, args, withProjectMeta(meta, linkedProject()?.id)),
                   })
                 ).text
               },

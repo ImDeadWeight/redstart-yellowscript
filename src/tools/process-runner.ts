@@ -21,7 +21,7 @@
 //
 // A long-running command (npm run dev) is a background process instead: it
 // keeps running, its output is kept in a bounded buffer, and the model reads
-// what is new with ys_process_output and ends it with ys_process_stop. Every
+// what is new with ys_process "output" and ends it with "stop". Every
 // background process dies with the window.
 //
 // The line runs only after the person approved it (or it matched their
@@ -29,6 +29,7 @@
 // =============================================================================
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { redactUrlCredentials } from './safe-commands.ts'
 
 /** Default and maximum time a one-shot command may take. */
 export const DEFAULT_TIMEOUT_MS = 120_000
@@ -65,13 +66,14 @@ export function formatCommandRun(run: CommandRun): string {
   const seconds = (run.durationMs / 1000).toFixed(1)
   let head: string
   if (run.spawnError) head = `Could not start the command: ${run.spawnError}`
-  else if (run.timedOut) head = `Timed out after ${seconds}s and was stopped (exit code ${run.exitCode ?? 'none'}). For a server or watcher, use ys_process_start.`
+  else if (run.timedOut) head = `Timed out after ${seconds}s and was stopped (exit code ${run.exitCode ?? 'none'}). For a server or watcher, use ys_process (action "start").`
   else if (run.exitCode === null) head = `Ended by signal ${run.signal ?? 'unknown'} · ${seconds}s`
   else head = `Exit code ${run.exitCode} · ${seconds}s`
 
   const parts = [head]
-  const stdout = run.stdout.trimEnd()
-  const stderr = run.stderr.trimEnd()
+  // `git remote -v` and `npm view` can print a token inside a URL.
+  const stdout = redactUrlCredentials(run.stdout.trimEnd())
+  const stderr = redactUrlCredentials(run.stderr.trimEnd())
   if (stdout) parts.push(`--- stdout ---\n${capHeadTail(stdout)}`)
   if (stderr) parts.push(`--- stderr ---\n${capHeadTail(stderr)}`)
   if (!stdout && !stderr && !run.spawnError) parts.push('(no output)')
@@ -105,17 +107,19 @@ export function killTree(child: ChildProcess): void {
 export interface RunOptions {
   command: string
   cwd: string
+  /** Added to the environment (a hardened git line's GIT_TERMINAL_PROMPT=0). */
+  env?: Record<string, string>
   timeoutMs?: number
   signal?: AbortSignal
   /** Every chunk as it arrives, for a live view. */
   onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void
 }
 
-function spawnShell(command: string, cwd: string): ChildProcess {
+function spawnShell(command: string, cwd: string, env?: Record<string, string>): ChildProcess {
   return spawn(command, {
     cwd,
     shell: true,
-    env: process.env,
+    env: env ? { ...process.env, ...env } : process.env,
     windowsHide: true,
     // Its own process group on POSIX, so killTree can end the whole tree.
     detached: process.platform !== 'win32',
@@ -130,7 +134,7 @@ export function runCommandLine(options: RunOptions): Promise<CommandRun> {
   return new Promise((resolve) => {
     let child: ChildProcess
     try {
-      child = spawnShell(options.command, options.cwd)
+      child = spawnShell(options.command, options.cwd, options.env)
     } catch (err) {
       resolve({ exitCode: null, signal: null, stdout: '', stderr: '', durationMs: 0, timedOut: false, spawnError: err instanceof Error ? err.message : String(err) })
       return
@@ -186,6 +190,89 @@ export interface BackgroundProcess {
   /** null while running. */
   exitCode: number | null
   running: boolean
+  /** The first local address it printed (a dev server's banner), if any. */
+  url?: string
+}
+
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007/g
+const LOCAL_URL = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):\d{2,5}(?:\/[^\s'"()<>\]]*)?/i
+
+/**
+ * The first local address in a process's output: the line a dev server prints
+ * when it is ready. Colour codes are stripped first (Vite bolds the port), and
+ * 0.0.0.0 and [::] become localhost, which is where ys_check_page looks.
+ */
+export function detectServerUrl(text: string): string | null {
+  const match = LOCAL_URL.exec(text.replace(ANSI, ''))
+  if (!match) return null
+  return match[0].replace(/[.,;:]+$/, '').replace(/\/\/(?:0\.0\.0\.0|\[::\])(?=:)/, '//localhost')
+}
+
+/** What starting a background command produced, for the model and the log. */
+export interface BackgroundStart {
+  text: string
+  isError: boolean
+  exitCode: number | null
+  processId: string
+  url?: string
+}
+
+/** How long a start waits for an address or an exit before answering. */
+export const START_WAIT_MS = 5_000
+
+/**
+ * Start an approved background command and wait up to `waitMs` for it to
+ * print a local address or exit, so the model is told which instead of
+ * polling and parsing a banner. Throws as `start` does when too many run.
+ */
+export async function startInBackground(processes: BackgroundProcesses, command: string, cwd: string, waitMs = START_WAIT_MS): Promise<BackgroundStart> {
+  const started = processes.start(command, cwd)
+  const settled = await processes.waitForStart(started.id, waitMs)
+  const first = await processes.output(started.id)
+  const output = redactUrlCredentials(first?.text.trimEnd() ?? '')
+  const tail = output ? `\n--- output ---\n${output.slice(-4_000)}` : ''
+  const id = started.id
+  const more = `Read more with ys_process {"action":"output","id":"${id}"}; end it with "action":"stop".`
+
+  if (!settled.running) {
+    const code = settled.exitCode
+    return {
+      text: `${id} exited with code ${code ?? 'none'}: ${command}${tail || '\n(no output)'}`,
+      isError: code !== 0,
+      exitCode: code,
+      processId: id,
+    }
+  }
+  if (settled.url) {
+    return {
+      text: `${id} is serving ${settled.url} (${command}). Check it with ys_check_page.${tail}\n${more}`,
+      isError: false,
+      exitCode: null,
+      processId: id,
+      url: settled.url,
+    }
+  }
+  return {
+    text: `${id} is running (${command}); no address seen in its first ${Math.round(waitMs / 1000)}s.${tail || '\n(no output yet)'}\n${more}`,
+    isError: false,
+    exitCode: null,
+    processId: id,
+  }
+}
+
+/**
+ * The live line for the workspace message: what is running now, so a new
+ * message knows the dev server is up. Null when nothing runs.
+ */
+export function describeRunning(list: readonly BackgroundProcess[], now = Date.now()): string | null {
+  const running = list.filter((p) => p.running)
+  if (running.length === 0) return null
+  const parts = running.map((p) => {
+    const minutes = Math.max(0, Math.round((now - p.startedAt) / 60_000))
+    const age = minutes < 1 ? 'just started' : `started ${minutes} min ago`
+    return `${p.id} "${p.command}"${p.url ? ` → ${p.url}` : ''} (${age})`
+  })
+  return `Running now: ${parts.join('; ')}`
 }
 
 interface Entry extends BackgroundProcess {
@@ -212,7 +299,7 @@ export class BackgroundProcesses {
     const running = [...this.entries.values()].filter((e) => e.running)
     if (running.length >= MAX_BACKGROUND) {
       throw new Error(
-        `${running.length} background processes are already running (${running.map((e) => e.id).join(', ')}). Stop one with ys_process_stop first.`,
+        `${running.length} background processes are already running (${running.map((e) => e.id).join(', ')}). Stop one with ys_process (action "stop") first.`,
       )
     }
     const id = `p${this.next++}`
@@ -220,6 +307,11 @@ export class BackgroundProcesses {
     const entry: Entry = { id, command, cwd, startedAt: Date.now(), exitCode: null, running: true, child, buffer: '', dropped: 0, readTo: 0 }
     const append = (chunk: string) => {
       entry.buffer += chunk
+      // Look at the tail, so a banner split across two chunks is still seen.
+      if (!entry.url) {
+        const url = detectServerUrl(entry.buffer.slice(-(chunk.length + 400)))
+        if (url) entry.url = url
+      }
       if (entry.buffer.length > BACKGROUND_BUFFER_CHARS) {
         const over = entry.buffer.length - BACKGROUND_BUFFER_CHARS
         entry.buffer = entry.buffer.slice(over)
@@ -259,6 +351,20 @@ export class BackgroundProcesses {
     return { process: this.view(entry), text: entry.buffer.slice(from - entry.dropped), missed }
   }
 
+  /**
+   * Wait up to `waitMs` for the process to print a local address or to exit,
+   * whichever comes first.
+   */
+  async waitForStart(id: string, waitMs = START_WAIT_MS): Promise<BackgroundProcess> {
+    const entry = this.entries.get(id)
+    if (!entry) throw new Error(`There is no background process "${id}".`)
+    const deadline = Date.now() + waitMs
+    while (Date.now() < deadline && entry.running && !entry.url) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return this.view(entry)
+  }
+
   stop(id: string): BackgroundProcess | null {
     const entry = this.entries.get(id)
     if (!entry) return null
@@ -283,7 +389,9 @@ export class BackgroundProcesses {
   }
 
   private view(e: Entry): BackgroundProcess {
-    return { id: e.id, command: e.command, cwd: e.cwd, startedAt: e.startedAt, exitCode: e.exitCode, running: e.running }
+    const view: BackgroundProcess = { id: e.id, command: e.command, cwd: e.cwd, startedAt: e.startedAt, exitCode: e.exitCode, running: e.running }
+    if (e.url) view.url = e.url
+    return view
   }
 }
 
@@ -296,10 +404,16 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
   if (platform === 'win32') {
     const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
     return (
-      `Commands (ys_run_command, ys_process_start) run in Windows ${shell}, not bash: use dir, type, ` +
-      'copy, move, del, mkdir, findstr, cd (no ls, cat, rm, pwd, grep, true). Chain with &&. ' +
-      'Node, npm and npx work as usual.'
+      `Commands (ys_run_command, ys_process) run in Windows ${shell}, not bash: use dir, type, ` +
+      'findstr, cd (no ls, cat, rm, pwd, grep, true). Node, npm and npx work as usual. ' +
+      FILES_NOTE
     )
   }
-  return 'Commands (ys_run_command, ys_process_start) run in /bin/sh (POSIX shell).'
+  return `Commands (ys_run_command, ys_process) run in /bin/sh (POSIX shell). ${FILES_NOTE}`
 }
+
+/** Said with the shell: read-only and check commands run without asking;
+ *  changing files belongs to the ys_ tools, which checkpoint. */
+const FILES_NOTE =
+  'Read-only commands and the project\'s test, build and lint scripts run without asking; a chained or piped ' +
+  'line asks. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir.'

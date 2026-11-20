@@ -19,7 +19,7 @@ costs there, and phase 0 makes room first.
 
 | # | Item | Phase | Where | State |
 |---|---|---|---|---|
-| 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core | Done: 11,120 → 6,674 characters; repair in Yellowscript until agent-core takes it |
+| 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core | Done: 11,120 → 6,674 characters, and 8,951 with the 4 tools phases 2–4 added (budget 9,000, so phase 6 has to make room); repair in Yellowscript until agent-core takes it |
 | 1 | Run log carried into the next message | 1 | Yellowscript | Done; live line on the newest message (see item) |
 | 2 | Task summary card | 1 | Yellowscript | Done; shows processes as started, not whether they still run |
 | 3 | Dev-server URL detection | 1 | Yellowscript | Done |
@@ -34,8 +34,8 @@ costs there, and phase 0 makes room first.
 | 10 | Attention when a run waits on you | 5 | Yellowscript | Done |
 | 11 | Resume an interrupted task | 5 | Yellowscript | Done; a turn saved mid-stream no longer spins after a reload |
 | 12 | Images, `@file` and selections in the composer | 5 | Yellowscript | Done; seen rendered in a headless preview of the webview, not yet in VS Code |
-| 13 | Assets: sprites and sounds | 6 | Yellowscript | |
-| 14 | Site check and importing content | 6 | Yellowscript (+ Nest's web fetch) | |
+| 13 | Assets: sprites and sounds | 6 | Yellowscript | Not started: waits for milestone 3, as planned |
+| 14 | Site check and importing content | 6 | Yellowscript (+ Nest's web fetch) | Not started: waits for milestone 4 and the site's stack |
 
 Phases are an order, not a schedule: 1 helps every multi-message task at once
 and removes most of the prompts a long run stops on; 2 has to land before the

@@ -7,6 +7,7 @@
 //
 // - The project's instructions: AGENTS.md (the cross-agent convention Nest's
 //   projects also import and export), or CLAUDE.md when there is no AGENTS.md.
+// - The model's own notes on the project, .yellowscript/NOTES.md (ys_note).
 // - A two-level file tree, skipping what search skips (node_modules, dist…).
 //
 // Both are capped so a large repo costs a few hundred tokens, not thousands.
@@ -18,6 +19,7 @@ import * as nodePath from 'node:path'
 
 import { SKIPPED_DIRECTORIES } from './fallback-search.ts'
 import { shellNote } from './process-runner.ts'
+import { NOTES_FILE, notesForContext } from './notes.ts'
 
 /** Instruction files, first found wins. */
 export const INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'] as const
@@ -90,6 +92,9 @@ export function buildWorkspaceContext(root: string, fs: ContextFs = nodeContextF
     parts.push(`The project's instructions, from ${name}. Follow them:\n\n${body}`)
     break
   }
+
+  const notes = notesForContext(fs.readFile(nodePath.join(root, NOTES_FILE)))
+  if (notes) parts.push(notes)
 
   const tree = workspaceTree(root, fs)
   if (tree.length > 0) parts.push(`Files (top two levels):\n${tree.join('\n')}`)

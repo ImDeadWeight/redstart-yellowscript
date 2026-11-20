@@ -25,6 +25,7 @@ time limit; runs where the context budget had to trim.
 | `fix-crash` | A wrong import path and name; the report's exact output |
 | `follow-up-edit` | Two messages: the second edits the file the first made, without searching for it (the run log) |
 | `navigate-large` | A bug in an 8-file, 3,000-line game; compare prompt tokens with `--withhold ys_outline,ys_find_symbol,ys_references` |
+| `notes-carry` | Session 1 records an unusual test command with `ys_note`; session 2, a new conversation, runs it without looking it up |
 | `long-context-reads` | 30 files (~50k tokens) read one by one on a 32k window: the context budget |
 | `ask-before-guessing` | An ambiguous request: must ask (`ask_user`), then follow the answer |
 | `play-check` | Space does not jump: fix it, and prove it with `ys_check_page` steps and `eval` on `index.html?test` |

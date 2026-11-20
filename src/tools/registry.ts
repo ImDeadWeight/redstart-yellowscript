@@ -24,6 +24,7 @@
 import { toolError, toolOk, type JsonSchema, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { migrateToolName } from './approval.ts'
 import { createReadFileTool } from './read-file.ts'
+import { createNoteTool } from './notes.ts'
 import { createFindSymbolTool, createOutlineTool, createReferencesTool, type SymbolProvider } from './symbols.ts'
 import { listDirectoryTool } from './list-directory.ts'
 import { createGlobTool } from './glob.ts'
@@ -107,6 +108,7 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     createWriteFileTool(writeFs),
     createDeleteFileTool(writeFs),
     createMoveFileTool(writeFs),
+    createNoteTool(writeFs),
     runCommandTool,
     ...(options.processes
       ? [createProcessTool(options.processes)]

@@ -49,8 +49,10 @@ export interface BenchTask {
   /** Tools left out of this task's run (names), e.g. to measure what one saves. */
   withholdTools?: string[]
   /** Later messages, each sent after the previous run ends, with that run's
-   *  log on its answer as the chat sends it (chat/run-log.ts). */
-  followUps?: string[]
+   *  log on its answer as the chat sends it (chat/run-log.ts). One marked
+   *  newSession starts a fresh conversation in the same workspace: only what
+   *  is on disk (the notes, the plan) carries over. */
+  followUps?: Array<string | { prompt: string; newSession?: boolean }>
   /** Answers given to ask_user, in order; past the end, the question is dismissed. */
   answers?: AskAnswer[]
   tags?: string[]
@@ -167,9 +169,14 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     withhold: [...(task.withholdTools ?? []), ...(options.withhold ?? [])],
   })
 
-  const context = buildWorkspaceContext(workspace)
-  const messages: ChatCompletionRequest['messages'] = context ? [{ role: 'system', content: context }] : []
-  const prompts = [task.prompt, ...(task.followUps ?? [])]
+  // Rebuilt for each message, as the chat does: notes written by one run are
+  // in the next one's workspace message.
+  const systemMessage = (): ChatCompletionRequest['messages'] => {
+    const context = buildWorkspaceContext(workspace)
+    return context ? [{ role: 'system', content: context }] : []
+  }
+  let messages: ChatCompletionRequest['messages'] = []
+  const prompts = [{ prompt: task.prompt, newSession: true }, ...(task.followUps ?? []).map((f) => (typeof f === 'string' ? { prompt: f, newSession: false } : { newSession: false, ...f }))]
   const answers = [...(task.answers ?? [])]
   let plan: PlanStep[] | null = null
   let trims = 0
@@ -199,9 +206,9 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
   /** Every message's run, in order: the check can look at one message's calls. */
   const runs: AgentResult[] = []
   try {
-    for (const [index, prompt] of prompts.entries()) {
-      if (index > 0) log(`  message ${index + 1}: ${prompt.slice(0, 80)}`)
-      messages.push({ role: 'user', content: prompt })
+    for (const [index, { prompt, newSession }] of prompts.entries()) {
+      if (index > 0) log(`  message ${index + 1}${newSession ? ' (new session)' : ''}: ${prompt.slice(0, 80)}`)
+      messages = [...systemMessage(), ...(newSession ? [] : messages.filter((m) => m.role !== 'system')), { role: 'user', content: prompt }]
       result = await runAgentLoop({
         client: counting,
         request: { messages: [...messages] },

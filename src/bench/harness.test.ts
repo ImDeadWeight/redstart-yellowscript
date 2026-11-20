@@ -129,6 +129,21 @@ describe('runTask', () => {
     assert.match(String(second.at(-1)!.content), /optional second parameter/)
   })
 
+  test('a new session starts clean, and its workspace message carries the notes', async () => {
+    const notesCarry = tasks.find((t) => t.id === 'notes-carry')!
+    const client = scripted([
+      call('c1', 'ys_note', { section: 'How to test', text: 'node tools/check.mjs --suite unit' }),
+      { content: 'Recorded.' },
+      call('c2', 'ys_run_command', { command: 'node tools/check.mjs --suite unit' }),
+      { content: '4 passed.' },
+    ])
+    const record = await runTask(notesCarry, { client, label: 'scripted' })
+    assert.equal(record.pass, true, record.check)
+    const second = client.requests[2]!.messages
+    assert.deepEqual(second.map((m) => m.role), ['system', 'user'], 'nothing from session 1 but the workspace')
+    assert.match(String(second[0]!.content), /## How to test\nnode tools\/check\.mjs --suite unit/)
+  })
+
   test('a model that gives up fails, with the check saying why', async () => {
     const record = await runTask(fixCrash, { client: scripted([{ content: 'I cannot fix this.' }]), label: 'scripted' })
     assert.equal(record.pass, false)

@@ -37,6 +37,7 @@ describe('createToolRegistry', () => {
       'ys_grep',
       'ys_list_directory',
       'ys_move_file',
+      'ys_note',
       'ys_outline',
       'ys_read_file',
       'ys_replace',

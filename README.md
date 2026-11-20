@@ -171,7 +171,8 @@ as too large anyway, Yellowscript trims harder and retries once. Each trim is
 logged to the output channel.
 
 Every request with tools also starts with a short note about the workspace:
-its `AGENTS.md` (or `CLAUDE.md`) and a two-level file tree.
+its `AGENTS.md` (or `CLAUDE.md`), the model's own notes
+(`.yellowscript/NOTES.md`, kept with `ys_note`), and a two-level file tree.
 
 Across messages, only your words and the assistant's answers are sent, so
 each answer also carries a short log of what its run did: files created,
@@ -215,6 +216,7 @@ string → `{}`, malformed JSON → descriptive error).
 | `ys_edit_file` | Propose editing a file via unified diff. Offered only with `tools.unifiedDiff`; small models get diffs wrong. |
 | `ys_delete_file` | Propose deleting a file. Always reviewed, whatever has been allowed. |
 | `ys_move_file` | Propose moving or renaming a file. |
+| `ys_note` | Propose replacing one `## section` of `.yellowscript/NOTES.md`, the model's notes on the project (how to run and check it, where things live, decisions, known problems). The notes go with every request, after `AGENTS.md`, up to 1,500 characters; the sections left out are named. |
 
 An applied write's result ends with the errors and warnings the language
 server now reports in the files it wrote.

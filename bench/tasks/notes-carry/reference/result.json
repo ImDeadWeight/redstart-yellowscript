@@ -1,0 +1,10 @@
+{
+  "answer": "4 passed, 0 failed.",
+  "stopReason": "complete",
+  "questions": 0,
+  "calls": [],
+  "messages": [
+    { "calls": [{ "name": "ys_read_file", "args": "{\"path\":\"docs/CONTRIBUTING.md\"}", "isError": false }, { "name": "ys_run_command", "args": "{\"command\":\"node tools/check.mjs --suite unit\"}", "isError": false }, { "name": "ys_note", "args": "{\"section\":\"How to test\"}", "isError": false }] },
+    { "calls": [{ "name": "ys_run_command", "args": "{\"command\":\"node tools/check.mjs --suite unit\"}", "isError": false }] }
+  ]
+}

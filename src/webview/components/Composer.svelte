@@ -1,10 +1,11 @@
 <script lang="ts">
-  import type { SessionSnapshot, WorkflowView } from '../../chat/protocol.ts'
+  import type { AttachmentView, SessionSnapshot, WorkflowView } from '../../chat/protocol.ts'
+  import { MAX_IMAGES, attachmentLabel } from '../../chat/attachments.ts'
   import { untrack } from 'svelte'
   import { post } from '../host.ts'
   import { draftFor, flushDraft, hasLocalDraft, setDraft } from '../drafts.ts'
   import { view } from '../store.svelte.ts'
-  import { composerPlaceholder, matchWorkflows, slashQuery, type ViewState } from '../view-model.ts'
+  import { atQuery, composerPlaceholder, fitWithin, matchWorkflows, slashQuery, type ViewState } from '../view-model.ts'
   import Icon from './Icon.svelte'
 
   let { session, viewState }: { session: SessionSnapshot; viewState: ViewState } = $props()
@@ -13,6 +14,12 @@
   let box: HTMLTextAreaElement | undefined = $state()
   let highlighted = $state(0)
   let dismissed = $state(false)
+  /** Images, @files and selections going with the next message. */
+  let attachments = $state<AttachmentView[]>([])
+  /** Where the caret is, for the @ picker. */
+  let caret = $state(0)
+  let fileHighlighted = $state(0)
+  let fileDismissed = $state(false)
 
   const placeholder = $derived(composerPlaceholder(viewState))
 
@@ -62,6 +69,100 @@
     if (query === null) dismissed = false
   })
 
+  // Chips the host sent (the editor's "Add to Yellowscript").
+  $effect(() => {
+    if (viewState.inbox.length === 0) return
+    untrack(() => {
+      attachments = [...attachments, ...view.takeInbox()]
+    })
+  })
+
+  // `@` then part of a path: workspace files to attach.
+  const fileQuery = $derived(query === null ? atQuery(text.slice(0, caret)) : null)
+  const fileMatches = $derived(fileQuery !== null && viewState.fileMatches?.query === fileQuery ? viewState.fileMatches.paths : null)
+  const fileMenuOpen = $derived(fileQuery !== null && !fileDismissed)
+  $effect(() => {
+    if (fileQuery !== null) post({ type: 'searchFiles', query: fileQuery })
+  })
+  $effect(() => {
+    void fileQuery
+    fileHighlighted = 0
+  })
+  $effect(() => {
+    if (fileQuery === null) fileDismissed = false
+  })
+
+  function chooseFile(path: string) {
+    // The typed "@query" becomes the chip.
+    const before = text.slice(0, caret).replace(/@[^\s@]*$/, '')
+    text = before + text.slice(caret)
+    caret = before.length
+    if (!attachments.some((a) => a.kind === 'file' && a.path === path)) attachments = [...attachments, { kind: 'file', path }]
+    void Promise.resolve().then(() => {
+      box?.focus()
+      box?.setSelectionRange(caret, caret)
+    })
+  }
+
+  function removeAttachment(index: number) {
+    attachments = attachments.filter((_, i) => i !== index)
+  }
+
+  const imageCount = $derived(attachments.filter((a) => a.kind === 'image').length)
+  /** The model cannot read images: say so instead of sending them. */
+  const imagesBlocked = $derived(session.vision === false && imageCount > 0)
+
+  /** An image file, downscaled to 1,280px at most, as a data URL. */
+  async function readImage(file: File): Promise<AttachmentView | null> {
+    const url = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(file)
+    })
+    const img = new Image()
+    await new Promise((resolve, reject) => {
+      img.onload = resolve
+      img.onerror = reject
+      img.src = url
+    })
+    const { width, height } = fitWithin(img.naturalWidth, img.naturalHeight)
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    canvas.getContext('2d')?.drawImage(img, 0, 0, width, height)
+    // PNG keeps a small screenshot sharp; anything bigger goes as JPEG.
+    const dataUrl = file.type === 'image/png' && width * height <= 600_000 ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.85)
+    return { kind: 'image', name: file.name || 'pasted image', dataUrl }
+  }
+
+  async function addImages(files: readonly File[]) {
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) continue
+      if (attachments.filter((a) => a.kind === 'image').length >= MAX_IMAGES) break
+      const image = await readImage(file).catch(() => null)
+      if (image) attachments = [...attachments, image]
+    }
+  }
+
+  function onPaste(event: ClipboardEvent) {
+    const files = [...(event.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) return
+    event.preventDefault()
+    void addImages(files)
+  }
+
+  function onDrop(event: DragEvent) {
+    const files = [...(event.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) return
+    event.preventDefault()
+    void addImages(files)
+  }
+
+  function trackCaret() {
+    if (box) caret = box.selectionStart ?? text.length
+  }
+
   function choose(workflow: WorkflowView) {
     text = ''
     if (workflow.arguments.length === 0) {
@@ -75,13 +176,32 @@
 
   function submit() {
     const value = text.trim()
-    if (!value || !session.canSend) return
-    post({ type: 'send', text: value })
+    if ((!value && attachments.length === 0) || !session.canSend || imagesBlocked) return
+    post(attachments.length ? { type: 'send', text: value, attachments: $state.snapshot(attachments) } : { type: 'send', text: value })
     text = ''
+    attachments = []
     void Promise.resolve().then(resize)
   }
 
   function onKeydown(event: KeyboardEvent) {
+    if (fileMenuOpen && fileMatches && fileMatches.length > 0) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        fileHighlighted = (fileHighlighted + (event.key === 'ArrowDown' ? 1 : -1) + fileMatches.length) % fileMatches.length
+        return
+      }
+      if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
+        event.preventDefault()
+        const pick = fileMatches[fileHighlighted]
+        if (pick) chooseFile(pick)
+        return
+      }
+    }
+    if (fileMenuOpen && event.key === 'Escape') {
+      event.preventDefault()
+      fileDismissed = true
+      return
+    }
     if (menuOpen && matches.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -126,8 +246,30 @@
   }
 </script>
 
-<div class="composer">
-  {#if menuOpen}
+<div class="composer" role="group" aria-label="Compose a message" ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
+  {#if fileMenuOpen}
+    <div class="menu" role="listbox" aria-label="Files">
+      {#if fileMatches === null}
+        <div class="menu-note"><Icon name="spinner" size={12} /> Finding files…</div>
+      {:else if fileMatches.length === 0}
+        <div class="menu-note">No file matches.</div>
+      {:else}
+        {#each fileMatches as path, i (path)}
+          <button
+            type="button"
+            class="option"
+            class:active={i === fileHighlighted}
+            role="option"
+            aria-selected={i === fileHighlighted}
+            onmouseenter={() => (fileHighlighted = i)}
+            onclick={() => chooseFile(path)}
+          >
+            <span class="slash">@{path}</span>
+          </button>
+        {/each}
+      {/if}
+    </div>
+  {:else if menuOpen}
     <div class="menu" role="listbox" aria-label="Workflows">
       {#if workflows === null}
         <div class="menu-note"><Icon name="spinner" size={12} /> Loading workflows…</div>
@@ -153,6 +295,26 @@
       {/if}
     </div>
   {/if}
+  {#if attachments.length}
+    <div class="attachments">
+      {#each attachments as attachment, i (i)}
+        <span class="attachment" title={attachment.kind === 'selection' ? attachment.text.slice(0, 400) : attachmentLabel(attachment)}>
+          {#if attachment.kind === 'image'}
+            <img src={attachment.dataUrl} alt={attachment.name} />
+          {:else}
+            <Icon name="file" size={12} />
+          {/if}
+          <span class="label">{attachmentLabel(attachment)}</span>
+          <button type="button" class="remove" aria-label="Remove {attachmentLabel(attachment)}" onclick={() => removeAttachment(i)}>
+            <Icon name="x" size={10} />
+          </button>
+        </span>
+      {/each}
+    </div>
+    {#if imagesBlocked}
+      <div class="note">This model cannot read images. Remove them to send, or load a model that can.</div>
+    {/if}
+  {/if}
   <textarea
     bind:this={box}
     bind:value={text}
@@ -160,8 +322,14 @@
     {placeholder}
     disabled={!session.canSend}
     aria-label="Message"
-    oninput={resize}
+    oninput={() => {
+      resize()
+      trackCaret()
+    }}
+    onkeyup={trackCaret}
+    onclick={trackCaret}
     onkeydown={onKeydown}
+    onpaste={onPaste}
   ></textarea>
   <div class="bar">
     <button
@@ -180,7 +348,7 @@
         <Icon name="stop" size={12} />Stop
       </button>
     {/if}
-    <button type="button" class="primary" disabled={!session.canSend || !text.trim() || query !== null} onclick={submit}>
+    <button type="button" class="primary" disabled={!session.canSend || (!text.trim() && attachments.length === 0) || query !== null || imagesBlocked} onclick={submit}>
       <Icon name="send" size={12} />Send
     </button>
   </div>
@@ -210,6 +378,23 @@
     outline: none;
   }
   textarea:disabled { opacity: 0.6; }
+  .attachments { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 6px 0; }
+  .attachment {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 2px 4px 2px 6px;
+    font-size: 0.8em;
+    border: 1px solid var(--ys-card-border);
+    border-radius: 10px;
+    background: var(--ys-card);
+  }
+  .attachment img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+  .attachment .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .remove { display: flex; padding: 2px; color: inherit; background: none; border: none; border-radius: 50%; cursor: pointer; opacity: 0.6; }
+  .remove:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+  .note { padding: 4px 8px 0; font-size: 0.8em; color: var(--vscode-editorWarning-foreground); }
   .bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px; }
   .chip {
     display: flex;

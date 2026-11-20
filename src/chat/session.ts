@@ -23,6 +23,7 @@ import type {
   ConversationState,
   HostMessage,
   PlanStepView,
+  AttachmentView,
   InFlightRun,
   QuestionItemView,
   QuestionView,
@@ -36,6 +37,7 @@ import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext, ToolEffect } from '../tools/types.ts'
 import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
+import { userContent } from './attachments.ts'
 
 /** Outbound protocol messages, before the owning conversation's id is tagged
  *  on. Distributes the `conversationId` omission across the union so callers can
@@ -121,7 +123,7 @@ export class ChatSession {
   private model: string | null = null
   /** Prompts waiting behind a turn that is still streaming. Drained in order
    *  when the turn finishes, so a user can line up several asks per tab. */
-  private pending: { id: string; prompt: string; workflow?: { name: string; title: string } }[] = []
+  private pending: { id: string; prompt: string; workflow?: { name: string; title: string }; attachments?: AttachmentView[] }[] = []
   /** The conversation's update_plan checklist. Kept by the model through the
    *  loop's plan port; saved with the conversation; cleared by the person. */
   private plan: PlanStepView[] | null = null
@@ -326,14 +328,19 @@ export class ChatSession {
    * a user can start a long ask and line up the next one in another tab or
    * below. Queued prompts drain in order as each turn finishes.
    */
-  async send(text: string, workflow?: { name: string; title: string }): Promise<void> {
+  async send(text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): Promise<void> {
     const prompt = text.trim()
-    if (!prompt) return
-    const extra = workflow ? { workflow: { ...workflow } } : {}
+    const attached = attachments?.length ? attachments.map((a) => ({ ...a })) : null
+    if (!prompt && !attached) return
+    const extra = {
+      ...(workflow ? { workflow: { ...workflow } } : {}),
+      ...(attached ? { attachments: attached } : {}),
+    }
 
     // A message typed while the assistant waits on a question IS the answer
     // (agent-core's contract): it goes to the question, not into the queue.
-    if (this.question && !workflow) {
+    // One with attachments is a new message: an answer has nowhere to put them.
+    if (this.question && !workflow && !attached) {
       // On a several-question card it is one reply to all of them.
       this.answer(this.question.view.id, { text: prompt })
       return
@@ -355,7 +362,10 @@ export class ChatSession {
       // Flip the queued user message to active: same id, pending cleared. The
       // webview updates the existing (greyed) bubble rather than adding a new
       // one.
-      const nextExtra = next.workflow ? { workflow: next.workflow } : {}
+      const nextExtra = {
+        ...(next.workflow ? { workflow: next.workflow } : {}),
+        ...(next.attachments ? { attachments: next.attachments } : {}),
+      }
       this.emit({ type: 'message', message: { id: next.id, role: 'user', content: next.prompt, pending: false, ...nextExtra } })
       await this.runTurn({ id: next.id, role: 'user', content: next.prompt, ...nextExtra })
     }
@@ -641,6 +651,8 @@ export class ChatSession {
     // one line. Decided by position, so a message's log stays the same text
     // until FULL_LOGS_KEPT newer ones push it out, and the cache holds.
     const assistants = this.messages.filter((m) => m.role === 'assistant' && !m.streaming)
+    // Images go as image parts only to a model that reads them.
+    const vision = this.deps.context?.()?.vision === true
     const fullFrom = assistants.length - FULL_LOGS_KEPT
     let assistantIndex = -1
 
@@ -666,7 +678,7 @@ export class ChatSession {
         }
         messages.push(entry)
       } else {
-        messages.push({ role: 'user', content: message.content })
+        messages.push({ role: 'user', content: userContent(message.content, message.attachments, vision) })
       }
     }
 
@@ -675,8 +687,9 @@ export class ChatSession {
     // of the request would cost the whole prompt cache.
     const live = registry ? (this.deps.liveState?.() ?? null) : null
     const newest = messages.at(-1)
-    if (live && newest?.role === 'user' && typeof newest.content === 'string') {
-      newest.content = `[${live}]\n\n${newest.content}`
+    if (live && newest?.role === 'user') {
+      if (typeof newest.content === 'string') newest.content = `[${live}]\n\n${newest.content}`
+      else newest.content = newest.content.map((part, i) => (i === 0 && part.type === 'text' ? { ...part, text: `[${live}]\n\n${part.text}` } : part))
     }
 
     // No `tools` in Phase 1. That is load-bearing, not an omission: the gateway

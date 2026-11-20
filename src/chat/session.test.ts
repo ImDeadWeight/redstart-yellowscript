@@ -757,7 +757,7 @@ describe('ChatSession — projects and workflows', () => {
     await h.session.send('Turn these notes into the weekly report: …', { name: 'weekly', title: 'Weekly report' })
     const user = h.session.transcript[0]
     assert.equal(user?.workflow?.title, 'Weekly report')
-    assert.match(h.lastRequest.messages[0]?.content ?? '', /weekly report/)
+    assert.match(String(h.lastRequest.messages[0]?.content ?? ''), /weekly report/)
   })
 })
 
@@ -973,5 +973,25 @@ describe('ChatSession interrupted runs', () => {
     h.session.load([], null, run)
     await h.session.send('something else')
     assert.equal(h.session.state().interrupted, null)
+  })
+})
+
+describe('ChatSession attachments', () => {
+  test('a file and a selection are read by the model after the text; the bubble keeps the chips', async () => {
+    const h = new Harness()
+    await h.session.send('why does this fail?', undefined, [
+      { kind: 'file', path: 'src/a.js', content: 'throw 1', lines: 1 },
+      { kind: 'selection', path: 'src/b.js', startLine: 4, endLine: 4, text: 'a()' },
+    ])
+    const content = String(h.lastRequest.messages.at(-1)!.content)
+    assert.match(content, /^why does this fail\?\n\n\[Attached: src\/a\.js \(1 lines\)\]\n```\nthrow 1\n```\n\n\[Selected: src\/b\.js lines 4-4\]/)
+    assert.equal(h.session.transcript[0]!.content, 'why does this fail?')
+    assert.equal(h.session.transcript[0]!.attachments?.length, 2)
+  })
+
+  test('attachments alone are a message', async () => {
+    const h = new Harness()
+    await h.session.send('', undefined, [{ kind: 'file', path: 'a.js', content: 'x', lines: 1 }])
+    assert.equal(h.requests.length, 1)
   })
 })

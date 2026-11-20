@@ -62,6 +62,7 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Inspect Workspace Tools` | Run all `ys_*` tools with probe args and dump results to the output channel |
 | `Yellowscript: Revert Last Write` | Restore files from the most recent approved write via the shadow checkpoint |
 | `Yellowscript: Show the Chat Waiting for You` | Bring the chat that waits on an approval or a question to the front (also the status bar's bell) |
+| `Yellowscript: Add to Yellowscript` | The editor's selection (or the current line) as a chip in the composer; also in the editor's context menu |
 | `Yellowscript: Revert Last Task` | Undo every write of the last task, newest first; files it created are removed |
 | `Yellowscript: Open Settings` | Open the Redstart Yellowscript settings page |
 
@@ -160,6 +161,18 @@ so the model is offered both (agent-core runs them; see below).
 - **The turn limit** (`agent.maxTurns`, 40 by default) asks before going on,
   instead of stopping silently. A tool call repeated with identical arguments
   a fourth time is not run; the model is told to change approach.
+
+### Images, files and selections
+
+- **Images:** paste or drop them into the composer (up to 4 a message,
+  downscaled to 1,280px). They go to the model only when it reads images
+  (llama-server's `/props`); otherwise the composer says so.
+- **`@file`:** type `@` and part of a path to pick a workspace file. It
+  goes with the message as its content, or as its outline when it is over
+  300 lines; the bubble shows a chip. Secrets files are not offered.
+- **Selections:** **Add to Yellowscript** in the editor's context menu adds
+  the selected lines as a chip. **Fix with Yellowscript**, a quick fix on an
+  error or warning, sends the problem with the lines around it.
 
 ### When a run needs you, or was cut off
 

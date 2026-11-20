@@ -17,6 +17,7 @@ import {
   PROTOCOL_VERSION,
   parseWebviewMessage,
   type AnswerView,
+  type AttachmentView,
   type ChatMessageView,
   type ConversationState,
   type HostMessage,
@@ -26,7 +27,8 @@ import {
 } from '../chat/protocol.ts'
 
 export interface ChatViewHandlers {
-  onSend: (text: string) => void
+  onSend: (text: string, attachments?: AttachmentView[]) => void
+  onSearchFiles: (query: string) => void
   onAbort: () => void
   onNewConversation: () => void
   onListConversations: () => void
@@ -163,7 +165,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
         this.handlers.onReady()
         break
       case 'send':
-        this.handlers.onSend(message.text)
+        this.handlers.onSend(message.text, message.attachments)
+        break
+      case 'searchFiles':
+        this.handlers.onSearchFiles(message.query)
         break
       case 'abort':
         this.handlers.onAbort()
@@ -297,6 +302,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       `style-src ${webview.cspSource}`,
       `script-src 'nonce-${nonce}'`,
       `font-src ${webview.cspSource}`,
+      // Attached images are data: URLs, made in the webview itself.
+      'img-src data:',
     ].join('; ')
 
     return `<!DOCTYPE html>

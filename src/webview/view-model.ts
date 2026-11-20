@@ -14,6 +14,7 @@
 import {
   EMPTY_CONVERSATION_STATE,
   PROTOCOL_VERSION,
+  type AttachmentView,
   type ChatMessageView,
   type ConversationState,
   type ConversationView,
@@ -59,6 +60,10 @@ export interface ViewState {
   /** Bumped when the whole transcript is replaced, so the view can jump to the
    *  end instead of following. */
   generation: number
+  /** The @ picker's last answer from the host. */
+  fileMatches: { query: string; paths: string[] } | null
+  /** Chips the host asked the composer to add (Add to Yellowscript), not yet taken. */
+  inbox: AttachmentView[]
 }
 
 export function initialViewState(): ViewState {
@@ -75,6 +80,8 @@ export function initialViewState(): ViewState {
     workflows: { items: null },
     stale: false,
     generation: 0,
+    fileMatches: null,
+    inbox: [],
   }
 }
 
@@ -228,6 +235,12 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
     case 'workflows':
       return { ...state, workflows: { items: message.workflows, ...(message.error ? { error: message.error } : {}) } }
 
+    case 'fileMatches':
+      return { ...state, fileMatches: { query: message.query, paths: message.paths } }
+
+    case 'addAttachment':
+      return { ...state, inbox: [...state.inbox, message.attachment] }
+
     case 'showPage':
       return { ...state, page: message.page, history: { ...state.history, open: false } }
   }
@@ -306,4 +319,19 @@ export function latestTaskId(messages: readonly ChatMessageView[]): string | nul
     if (m.role === 'assistant' && m.run?.some((e) => e.kind === 'write' && e.applied && e.checkpoint)) return m.id
   }
   return null
+}
+
+/**
+ * The @ query being typed at the end of `beforeCaret` ("look at @src/ga" →
+ * "src/ga"), or null when the caret is not in one.
+ */
+export function atQuery(beforeCaret: string): string | null {
+  const m = /(^|\s)@([^\s@]*)$/.exec(beforeCaret)
+  return m ? m[2]! : null
+}
+
+/** The size to draw an image at so its longer edge is at most `max`. */
+export function fitWithin(width: number, height: number, max = 1_280): { width: number; height: number } {
+  const scale = Math.min(1, max / Math.max(width, height))
+  return { width: Math.round(width * scale), height: Math.round(height * scale) }
 }

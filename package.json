@@ -59,6 +59,12 @@
           "group": "navigation"
         }
       ],
+      "editor/context": [
+        {
+          "command": "redstartYellowscript.addSelection",
+          "group": "yellowscript@1"
+        }
+      ],
       "editor/title": [
         {
           "command": "redstartYellowscript.openInEditor",
@@ -146,6 +152,17 @@
         "command": "redstartYellowscript.showWaiting",
         "title": "Show the Chat Waiting for You",
         "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.addSelection",
+        "title": "Add to Yellowscript",
+        "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.fixDiagnostic",
+        "title": "Fix with Yellowscript",
+        "category": "Yellowscript",
+        "enablement": "false"
       }
     ],
     "configuration": {

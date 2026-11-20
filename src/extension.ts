@@ -59,6 +59,11 @@ import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
 import { nodeCommandContext } from './tools/command-context.ts'
 import { usableReadRoots } from './tools/read-scope.ts'
 import { AttentionTracker, LONG_RUN_MS } from './chat/attention.ts'
+import { MAX_FILE_LINES, attachmentLabel } from './chat/attachments.ts'
+import { formatOutline, outlineOf } from './tools/symbols.ts'
+import { secretReason } from './tools/protected-paths.ts'
+import { resolveWithinWorkspace } from './tools/workspace-path.ts'
+import type { AttachmentView } from './chat/protocol.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { BackgroundProcesses, describeRunning } from './tools/process-runner.ts'
 import { McpHost, withProjectMeta, type McpTool } from './nest/mcp-host.ts'
@@ -208,7 +213,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // here — the tab strip is the source of truth for which conversations exist.
 
   chatView = new ChatViewProvider(context.extensionUri, {
-    onSend: (text) => sendToActive(text),
+    onSend: (text, attachments) => {
+      void resolveAttachments(attachments ?? []).then((resolved) => sendToActive(text, undefined, resolved))
+    },
+    onSearchFiles: (query) => {
+      void searchWorkspaceFiles(query).then((paths) => chatView?.post({ type: 'fileMatches', query, paths }))
+    },
     onAbort: () => {
       if (activeConversationId) getSession(activeConversationId).abort()
       pushSession()
@@ -447,6 +457,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastTask', revertLastTaskCommand),
+    vscode.commands.registerCommand('redstartYellowscript.addSelection', addSelectionToChat),
+    vscode.commands.registerCommand('redstartYellowscript.fixDiagnostic', fixDiagnostic),
+    vscode.languages.registerCodeActionsProvider(
+      { scheme: 'file' },
+      {
+        provideCodeActions: (document, _range, context) =>
+          context.diagnostics
+            .filter((d) => d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning)
+            .slice(0, 1)
+            .map((d) => {
+              const action = new vscode.CodeAction('Fix with Yellowscript', vscode.CodeActionKind.QuickFix)
+              action.command = { command: 'redstartYellowscript.fixDiagnostic', title: 'Fix with Yellowscript', arguments: [document.uri, d] }
+              action.diagnostics = [d]
+              return action
+            }),
+      },
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
+    ),
     vscode.commands.registerCommand('redstartYellowscript.showWaiting', () => {
       const id = attention.firstWaiting()
       return id ? showConversation(id) : chatView?.reveal()
@@ -501,6 +529,8 @@ function contextFor(client: NestClient | null): ContextTracker | null {
     tracker = new ContextTracker(client)
     contextTrackers.set(client, tracker)
     void tracker.ready().then(() => {
+      // Now known whether the model reads images: the composer says so.
+      pushSession()
       output?.info(`context: n_ctx ${tracker!.contextSize ?? 'unknown (learned from the first refusal)'}`)
     })
   }
@@ -726,7 +756,7 @@ function getSession(id: string): ChatSession {
  * Send to the active conversation (creating one if no tab is open), and title
  * a new chat from its first prompt, or from the workflow it ran.
  */
-function sendToActive(text: string, workflow?: { name: string; title: string }): void {
+function sendToActive(text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): void {
   let id = activeConversationId
   if (!id) {
     const created = conversations.create('New chat', [], currentAccountId ?? undefined)
@@ -745,7 +775,7 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
     conversations.save(conv)
     pushConversations()
   }
-  const finished = getSession(conversationId).send(text, workflow)
+  const finished = getSession(conversationId).send(text, workflow, attachments)
   pushSession()
   // Title a still-untitled chat once its turn (or its queue) is underway.
   void finished.then(() => {
@@ -755,7 +785,7 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
     if (current && current.title === 'New chat') {
       const firstUser = getSession(conversationId).transcript.find((m) => m.role === 'user')
       if (firstUser) {
-        current.title = titleFor(firstUser.content)
+        current.title = titleFor(firstUser.content || (firstUser.attachments?.[0] ? attachmentLabel(firstUser.attachments[0]) : 'New chat'))
         conversations.save(current)
         pushConversations()
       }
@@ -811,6 +841,8 @@ function snapshot(id: string | null): SessionSnapshot {
   if (model) base.model = model
   const project = connected ? linkedProject() : null
   if (project) base.project = { id: project.id, name: project.name }
+  const tracker = connected ? contextFor(manager?.activeClient ?? null) : null
+  if (tracker) base.vision = tracker.vision
   return base
 }
 
@@ -1467,6 +1499,87 @@ async function promptForServerUrl(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * A message's @file attachments, read now: the content (up to 300 lines) or
+ * the outline of a longer file. Files outside the workspace or that may hold
+ * secrets are not attached; a notice says so.
+ */
+async function resolveAttachments(list: readonly AttachmentView[]): Promise<AttachmentView[]> {
+  const roots = workspaceRoots()
+  const out: AttachmentView[] = []
+  for (const a of list) {
+    if (a.kind !== 'file') {
+      out.push(a)
+      continue
+    }
+    let absolute: string
+    try {
+      absolute = resolveWithinWorkspace(roots, a.path)
+    } catch {
+      chatView?.post({ type: 'notice', level: 'warning', message: `${a.path} is outside the workspace, so it was not attached.` })
+      continue
+    }
+    if (secretReason(absolute)) {
+      chatView?.post({ type: 'notice', level: 'warning', message: `${a.path} may hold secrets, so it was not attached.` })
+      continue
+    }
+    try {
+      const text = (await nodeFs.promises.readFile(absolute, 'utf8')).replace(/\r\n/g, '\n')
+      const lines = text.split('\n')
+      if (lines.length <= MAX_FILE_LINES) {
+        out.push({ kind: 'file', path: a.path, content: text.trimEnd(), lines: lines.length })
+      } else {
+        const { symbols } = await outlineOf(symbolProvider, absolute, text)
+        out.push({ kind: 'file', path: a.path, content: formatOutline(symbols, 150).text || '(no symbols found)', lines: lines.length, outline: true })
+      }
+    } catch {
+      out.push({ kind: 'file', path: a.path })
+    }
+  }
+  return out
+}
+
+/** The @ picker: workspace files whose path contains `query`, shortest first. */
+async function searchWorkspaceFiles(query: string): Promise<string[]> {
+  const cleaned = query.replace(/[\\*?{}[\]]/g, '').trim()
+  const pattern = cleaned ? `**/*${cleaned}*` : '**/*'
+  const found = await vscode.workspace.findFiles(pattern, '{**/node_modules/**,**/.git/**,**/.yellowscript/**,**/dist/**,**/out/**}', 200)
+  return found
+    .map((uri) => vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/'))
+    .filter((p) => !secretReason(p))
+    .sort((a, b) => a.length - b.length || a.localeCompare(b))
+    .slice(0, 30)
+}
+
+/** The editor's selection, as a chip in the composer. */
+async function addSelectionToChat(): Promise<void> {
+  const editor = vscode.window.activeTextEditor
+  if (!editor || editor.document.uri.scheme !== 'file') return
+  const selection = editor.selection.isEmpty ? editor.document.lineAt(editor.selection.active.line).range : editor.selection
+  const startLine = selection.start.line + 1
+  const endLine = selection.end.character === 0 && selection.end.line > selection.start.line ? selection.end.line : selection.end.line + 1
+  const range = new vscode.Range(startLine - 1, 0, endLine - 1, editor.document.lineAt(endLine - 1).text.length)
+  await chatView?.reveal()
+  chatView?.post({
+    type: 'addAttachment',
+    attachment: { kind: 'selection', path: vscode.workspace.asRelativePath(editor.document.uri, false).replace(/\\/g, '/'), startLine, endLine, text: editor.document.getText(range) },
+  })
+}
+
+/** "Fix with Yellowscript" on a diagnostic: the problem, and the lines around it. */
+async function fixDiagnostic(uri: vscode.Uri, diagnostic: vscode.Diagnostic): Promise<void> {
+  const document = await vscode.workspace.openTextDocument(uri)
+  const first = Math.max(0, diagnostic.range.start.line - 8)
+  const last = Math.min(document.lineCount - 1, diagnostic.range.end.line + 8)
+  const path = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/')
+  const source = diagnostic.source ? ` (${diagnostic.source}${diagnostic.code !== undefined ? ` ${typeof diagnostic.code === 'object' ? diagnostic.code.value : diagnostic.code}` : ''})` : ''
+  const text = document.getText(new vscode.Range(first, 0, last, document.lineAt(last).text.length))
+  await chatView?.reveal()
+  sendToActive(`Fix this problem in ${path} at line ${diagnostic.range.start.line + 1}: ${diagnostic.message}${source}`, undefined, [
+    { kind: 'selection', path, startLine: first + 1, endLine: last + 1, text },
+  ])
+}
 
 /** Which conversations wait on the person, and how long runs take. */
 const attention = new AttentionTracker()

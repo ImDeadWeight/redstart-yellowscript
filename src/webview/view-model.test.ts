@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { EMPTY_CONVERSATION_STATE, PROTOCOL_VERSION, type HostMessage } from '../chat/protocol.ts'
 import {
   applyHostMessage,
+  atQuery,
+  fitWithin,
   argumentsPreview,
   buildAnswer,
   composerPlaceholder,
@@ -180,5 +182,29 @@ describe('projects, workflows and pages', () => {
     const list = [w('notes-to-report', 'Turn notes into a report'), w('report', 'Weekly report'), w('standup', 'Daily standup')]
     assert.deepEqual(matchWorkflows(list, 'rep').map((x) => x.name), ['report', 'notes-to-report'])
     assert.equal(matchWorkflows(list, '').length, 3)
+  })
+})
+
+describe('attachments in the composer', () => {
+  test('the @ query at the caret', () => {
+    assert.equal(atQuery('look at @src/ga'), 'src/ga')
+    assert.equal(atQuery('@'), '')
+    assert.equal(atQuery('mail me@example.com'), null, 'not inside a word')
+    assert.equal(atQuery('look at @src/game.js now'), null)
+  })
+
+  test('downscaled to 1,280px on the longer edge', () => {
+    assert.deepEqual(fitWithin(2560, 1440), { width: 1280, height: 720 })
+    assert.deepEqual(fitWithin(800, 600), { width: 800, height: 600 })
+  })
+
+  test('file matches and chips from the host land in the view state', () => {
+    const s = run(
+      init(),
+      { type: 'fileMatches', query: 'ga', paths: ['src/game.js'] },
+      { type: 'addAttachment', attachment: { kind: 'selection', path: 'a.js', startLine: 1, endLine: 2, text: 'x' } },
+    )
+    assert.deepEqual(s.fileMatches, { query: 'ga', paths: ['src/game.js'] })
+    assert.equal(s.inbox.length, 1)
   })
 })

@@ -167,6 +167,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnostics: diagnosticsProvider,
     editorState: editorStateProvider,
     processes: backgroundProcesses,
+    unifiedDiff: vscode.workspace.getConfiguration('redstartYellowscript').get<boolean>('tools.unifiedDiff') === true,
     browser: {
       // Looked up on use, so a browser installed later is found.
       browser: () => findBrowser(),

@@ -45,13 +45,10 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_grep'),
       description: degraded
-        ? 'Search the text of workspace files for a LITERAL substring. Regular expressions are ' +
-          'not available in this workspace, so the pattern is matched exactly as written. ' +
-          'Returns matching lines grouped by file. Note: .gitignore is not applied.'
-        : 'Search the text of workspace files with a regular expression, and return matching ' +
-          'lines grouped by file. Respects .gitignore. The syntax is Rust regex: character ' +
-          'classes, groups, alternation and anchors all work, but lookaround and backreferences ' +
-          'are not supported. Set "literal" to true to search for the pattern verbatim instead.',
+        ? 'Search workspace files for a LITERAL substring (no regular expressions here). ' +
+          'Matching lines, grouped by file. .gitignore is not applied.'
+        : 'Search workspace files with a regular expression (Rust syntax: no lookaround or ' +
+          'backreferences). Matching lines, grouped by file. Respects .gitignore.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -59,27 +56,27 @@ export function createGrepTool(ripgrepPath: string | null): Tool {
             type: 'string',
             description: degraded
               ? 'Literal text to find.'
-              : 'Regular expression to search for (Rust regex syntax).',
+              : 'The regular expression.',
           },
           path: {
             type: 'string',
-            description: 'Optional workspace-relative directory to search under.',
+            description: 'Optional directory to search under.',
           },
           glob: {
             type: 'string',
-            description: 'Optional file filter, e.g. "*.ts" — only matching files are searched.',
+            description: 'Optional file filter, e.g. "*.ts".',
           },
           caseSensitive: {
             type: 'boolean',
-            description: 'Match case exactly. Defaults to false (case-insensitive).',
+            description: 'Default false.',
           },
           literal: {
             type: 'boolean',
-            description: 'Treat the pattern as literal text rather than a regular expression.',
+            description: 'Match the pattern verbatim.',
           },
           maxResults: {
             type: 'integer',
-            description: `Cap on matches returned. Defaults to ${MAX_MATCHES}.`,
+            description: `Default ${MAX_MATCHES}.`,
             minimum: 1,
           },
         },

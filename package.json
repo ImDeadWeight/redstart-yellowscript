@@ -175,6 +175,11 @@
           "maximum": 500,
           "markdownDescription": "Model round trips one message may run before Yellowscript asks whether to keep going. **Continue** grants as many again. A repeated identical tool call is stopped sooner, whatever this says."
         },
+        "redstartYellowscript.tools.unifiedDiff": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Offer the model `ys_edit_file`, which edits with a unified diff. Off by default: small models get diffs wrong, and `ys_replace` covers the same edits. Takes effect in a new window."
+        },
         "redstartYellowscript.allowedCommands": {
           "type": "array",
           "default": [],

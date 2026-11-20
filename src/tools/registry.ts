@@ -10,9 +10,10 @@
 // 1. ARGUMENTS ARRIVE AS A STRING AND ARE OFTEN MALFORMED. A local model emits
 //    `arguments` as JSON text, and a 3B-active MoE gets that wrong regularly.
 //    Parsing is centralised here so every tool gets the same treatment: an
-//    empty string is "no arguments", and anything JSON.parse rejects gets one
-//    correctable error message. Nothing is repaired yet (trailing commas,
-//    single quotes, raw newlines in strings); see PLAN-long-tasks.md item 0.
+//    empty string is "no arguments"; text JSON.parse rejects is repaired when
+//    the mistake is mechanical (raw newlines in a string, a stray backslash,
+//    single quotes, a trailing comma, a code fence; argument-repair.ts), and
+//    otherwise gets one correctable error message.
 //
 // 2. DUPLICATE NAMES MUST BE LOUD. A tools array carrying two entries with one
 //    name silently drops one of them, and the symptom is a tool that "sometimes
@@ -31,7 +32,8 @@ import { createEditorContextTool, type EditorStateProvider } from './editor-cont
 import { createEditFileTool, createWriteFileTool, nodeWriteFs, type WriteFs } from './write-file.ts'
 import { runCommandTool } from './run-command.ts'
 import { createDeleteFileTool, createMoveFileTool, createReplaceTool } from './file-ops.ts'
-import { createProcessOutputTool, createProcessStopTool, processStartTool } from './process-tools.ts'
+import { createProcessTool, legacyProcessCall } from './process-tools.ts'
+import { repairJson, type RepairKind } from './argument-repair.ts'
 import type { BackgroundProcesses } from './process-runner.ts'
 import { createCheckPageTool, type CheckPageDeps } from './browser-check.ts'
 
@@ -52,10 +54,14 @@ export interface ToolRegistryOptions {
   editorState: EditorStateProvider
   /** Read-only fs for the write tools' planning phase. Defaults to node:fs. */
   writeFs?: WriteFs
-  /** The window's background processes. Absent: no ys_process_* tools. */
+  /** The window's background processes. Absent: no ys_process tool. */
   processes?: BackgroundProcesses
   /** The headless browser for ys_check_page. Absent: no such tool. */
   browser?: CheckPageDeps
+  /** Offer ys_edit_file (unified diffs) to the model. Off by default: small
+   *  models get diffs wrong, and ys_replace covers the case. A call to it
+   *  still runs either way, since old transcripts and habits carry it. */
+  unifiedDiff?: boolean
 }
 
 export interface ToolRegistry {
@@ -66,6 +72,9 @@ export interface ToolRegistry {
    *  capabilities when a request carries tools (HANDOFF.md correction 5). */
   payload(): ToolPayloadEntry[]
   get(name: string): Tool | undefined
+  /** Tools that run when called by name but are not offered (ys_edit_file
+   *  unless `unifiedDiff`). */
+  readonly hidden: readonly Tool[]
   /** Execute by name with the raw `arguments` string from the model. */
   execute(name: string, rawArguments: string, context: ToolContext): Promise<ToolResult>
 }
@@ -73,6 +82,7 @@ export interface ToolRegistry {
 export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
   const writeFs = options.writeFs ?? nodeWriteFs
 
+  const editFile = createEditFileTool(writeFs)
   const tools: Tool[] = [
     readFileTool,
     listDirectoryTool,
@@ -81,13 +91,13 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     createDiagnosticsTool(options.diagnostics),
     createEditorContextTool(options.editorState),
     createReplaceTool(writeFs),
-    createEditFileTool(writeFs),
+    ...(options.unifiedDiff ? [editFile] : []),
     createWriteFileTool(writeFs),
     createDeleteFileTool(writeFs),
     createMoveFileTool(writeFs),
     runCommandTool,
     ...(options.processes
-      ? [processStartTool, createProcessOutputTool(options.processes), createProcessStopTool(options.processes)]
+      ? [createProcessTool(options.processes)]
       : []),
     ...(options.browser ? [createCheckPageTool(options.browser)] : []),
   ]
@@ -101,8 +111,20 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     byName.set(name, tool)
   }
 
+  return registryOver(tools, byName, options.unifiedDiff ? [] : [editFile])
+}
+
+/**
+ * The registry over a tool set. `hidden` tools are not offered to the model
+ * but still run when called by name.
+ */
+function registryOver(tools: readonly Tool[], byName: ReadonlyMap<string, Tool>, hidden: readonly Tool[]): ToolRegistry {
+  const runnable = new Map(byName)
+  for (const tool of hidden) if (!runnable.has(tool.definition.name)) runnable.set(tool.definition.name, tool)
+
   return {
     tools,
+    hidden,
     names: tools.map((tool) => tool.definition.name),
 
     payload(): ToolPayloadEntry[] {
@@ -121,16 +143,6 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     },
 
     async execute(name: string, rawArguments: string, context: ToolContext): Promise<ToolResult> {
-      // Old transcripts replay pre-rename ws_* calls; route them to ys_*.
-      const tool = byName.get(name) ?? byName.get(migrateToolName(name))
-      if (!tool) {
-        // Name the alternatives: a model that invented `read_file` can correct
-        // itself to `ys_read_file` if told what exists.
-        return toolError(
-          `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,
-        )
-      }
-
       const parsed = parseToolArguments(rawArguments)
       if (!parsed.ok) {
         return toolError(
@@ -139,7 +151,24 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
         )
       }
 
-      return tool.execute(parsed.value, context)
+      // Old transcripts replay pre-rename ws_* calls; route them to ys_*. The
+      // three ys_process_* tools are now one, with an action.
+      const legacy = legacyProcessCall(name, parsed.value)
+      const target = legacy?.name ?? name
+      const args = legacy?.args ?? parsed.value
+      const tool = runnable.get(target) ?? runnable.get(migrateToolName(target))
+      if (!tool) {
+        // Name the alternatives: a model that invented `read_file` can correct
+        // itself to `ys_read_file` if told what exists.
+        return toolError(
+          `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,
+        )
+      }
+
+      // The caller's context, roots and all: a local ys_* tool handed empty
+      // roots would refuse every path once Nest's tools were merged in.
+      const result = await tool.execute(args, context)
+      return parsed.repairs?.length ? { ...result, argumentsRepaired: parsed.repairs } : result
     },
   }
 }
@@ -214,47 +243,10 @@ export function mergeNestTools(
     byName.set(nest.name, wrapped)
   }
 
-  return {
-    tools: merged,
-    names: merged.map((t) => t.definition.name),
-    payload() {
-      return merged.map((tool) => ({
-        type: 'function' as const,
-        function: {
-          name: tool.definition.name,
-          description: tool.definition.description,
-          parameters: tool.definition.inputSchema,
-        },
-      }))
-    },
-    get(name: string) {
-      return byName.get(name)
-    },
-    async execute(name: string, rawArguments: string, context: ToolContext): Promise<ToolResult> {
-      // Old transcripts replay pre-rename ws_* calls; route them to ys_*.
-      const tool = byName.get(name) ?? byName.get(migrateToolName(name))
-      if (!tool) {
-        return toolError(
-          `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,
-        )
-      }
-
-      const parsed = parseToolArguments(rawArguments)
-      if (!parsed.ok) {
-        return toolError(
-          `The arguments for ${name} were not valid JSON (${parsed.reason}). ` +
-            `Send them as a JSON object, e.g. {"path": "src/index.ts"}.`,
-        )
-      }
-
-      // The caller's context, roots and all: a local ys_* tool handed empty
-      // roots would refuse every path once Nest's tools were merged in.
-      return tool.execute(parsed.value, context)
-    },
-  }
+  return registryOver(merged, byName, local.hidden)
 }
 
-export type ParsedArguments = { ok: true; value: unknown } | { ok: false; reason: string }
+export type ParsedArguments = { ok: true; value: unknown; repairs?: RepairKind[] } | { ok: false; reason: string }
 
 /**
  * Read the model's `arguments` string.
@@ -264,15 +256,26 @@ export type ParsedArguments = { ok: true; value: unknown } | { ok: false; reason
  * JSON value is passed through for the tool's own validation to reject with a
  * message about the missing field. Only genuinely unparseable text is an error
  * here — the tools themselves are better placed to say what was wrong.
+ * Text JSON.parse rejects is tried once more after `repairJson`, and the
+ * repairs made are returned so the bench can count them.
  */
 export function parseToolArguments(raw: string): ParsedArguments {
   const trimmed = typeof raw === 'string' ? raw.trim() : ''
   // A tool with no required arguments is called with "" or "{}" constantly.
   if (trimmed === '') return { ok: true, value: {} }
 
+  let reason: string
   try {
     return { ok: true, value: JSON.parse(trimmed) }
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : 'unparseable' }
+    reason = err instanceof Error ? err.message : 'unparseable'
+  }
+
+  const repaired = repairJson(trimmed)
+  if (repaired.repairs.length === 0) return { ok: false, reason }
+  try {
+    return { ok: true, value: JSON.parse(repaired.text), repairs: repaired.repairs }
+  } catch {
+    return { ok: false, reason }
   }
 }

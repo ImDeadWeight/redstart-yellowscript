@@ -63,11 +63,9 @@ export function createEditorContextTool(provider: EditorStateProvider): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_editor_context'),
       description:
-        'Find out what the user currently has open and selected in the editor: the active file, ' +
-        'cursor position, selected text, and the list of open files. Call this when the user ' +
-        'says "this", "here", or "the current file" so you know what they mean, rather than ' +
-        'asking them.',
-      inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        'What the user has open in the editor: active file, cursor, selection, open files. ' +
+        'Use it when they say "this" or "the current file".',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
 
     async execute(_args: unknown, context: ToolContext): Promise<ToolResult> {

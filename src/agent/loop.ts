@@ -36,6 +36,7 @@ import type { ChatCompletionRequest, StreamHandlers, StreamResult } from '../nes
 import { NestHttpError, type ToolCall } from '../nest/types.ts'
 import type { ToolCallDelta, StreamTimings } from '../nest/streaming.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
+import { isProcessStart } from '../tools/process-tools.ts'
 import type { PendingCommand, PendingWrite, ToolContext, ToolResult } from '../tools/types.ts'
 import {
   FALLBACK_ID_PREFIX,
@@ -588,6 +589,6 @@ export function withHostTools(payload: ToolPayloadEntry[], options: Pick<AgentLo
  * check). Reads keep exact arguments: level-01 … level-30 are different work.
  */
 export function callSignature(name: string, args: string): string {
-  const loose = name === 'ys_run_command' || name === 'ys_process_start'
+  const loose = name === 'ys_run_command' || name === 'ys_process_start' || (name === 'ys_process' && isProcessStart(args))
   return `${name}\u0000${(loose ? args.replace(/\d+/g, '#') : args).trim()}`
 }

@@ -107,6 +107,9 @@ export interface ToolResult {
    * the model reads back, so the card shows the command exactly as it will run.
    */
   pendingCommand?: PendingCommand
+  /** Set by the registry when the call's arguments were malformed JSON that
+   *  it repaired (argument-repair.ts). Counted by the bench; not shown. */
+  argumentsRepaired?: readonly string[]
 }
 
 /** A shell command the model proposes to run, for always-ask approval. */
@@ -119,7 +122,7 @@ export interface PendingCommand {
   label: string
   /** One-shot time limit; the runner's default when absent. */
   timeoutMs?: number
-  /** Start it as a background process (ys_process_start) instead of waiting. */
+  /** Start it as a background process (ys_process start) instead of waiting. */
   background?: boolean
 }
 

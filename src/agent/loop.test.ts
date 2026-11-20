@@ -756,6 +756,9 @@ describe('runAgentLoop — a model that cannot stop (2026-11-19)', () => {
   test('reads of different files are never a repeat', () => {
     assert.notEqual(callSignature('ys_read_file', '{"path":"data/level-01.txt"}'), callSignature('ys_read_file', '{"path":"data/level-02.txt"}'))
     assert.equal(callSignature('ys_run_command', '{"command":"echo break2"}'), callSignature('ys_run_command', '{"command":"echo break3"}'))
+    // A start is a command; reading two processes' output is not one call.
+    assert.equal(callSignature('ys_process', '{"action":"start","command":"node s1.js"}'), callSignature('ys_process', '{"action":"start","command":"node s2.js"}'))
+    assert.notEqual(callSignature('ys_process', '{"action":"output","id":"p1"}'), callSignature('ys_process', '{"action":"output","id":"p2"}'))
   })
 
   test('ask_user and update_plan are offered even when Nest offers nothing', async () => {

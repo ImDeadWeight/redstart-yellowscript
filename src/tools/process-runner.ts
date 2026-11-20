@@ -21,7 +21,7 @@
 //
 // A long-running command (npm run dev) is a background process instead: it
 // keeps running, its output is kept in a bounded buffer, and the model reads
-// what is new with ys_process_output and ends it with ys_process_stop. Every
+// what is new with ys_process "output" and ends it with "stop". Every
 // background process dies with the window.
 //
 // The line runs only after the person approved it (or it matched their
@@ -65,7 +65,7 @@ export function formatCommandRun(run: CommandRun): string {
   const seconds = (run.durationMs / 1000).toFixed(1)
   let head: string
   if (run.spawnError) head = `Could not start the command: ${run.spawnError}`
-  else if (run.timedOut) head = `Timed out after ${seconds}s and was stopped (exit code ${run.exitCode ?? 'none'}). For a server or watcher, use ys_process_start.`
+  else if (run.timedOut) head = `Timed out after ${seconds}s and was stopped (exit code ${run.exitCode ?? 'none'}). For a server or watcher, use ys_process (action "start").`
   else if (run.exitCode === null) head = `Ended by signal ${run.signal ?? 'unknown'} · ${seconds}s`
   else head = `Exit code ${run.exitCode} · ${seconds}s`
 
@@ -212,7 +212,7 @@ export class BackgroundProcesses {
     const running = [...this.entries.values()].filter((e) => e.running)
     if (running.length >= MAX_BACKGROUND) {
       throw new Error(
-        `${running.length} background processes are already running (${running.map((e) => e.id).join(', ')}). Stop one with ys_process_stop first.`,
+        `${running.length} background processes are already running (${running.map((e) => e.id).join(', ')}). Stop one with ys_process (action "stop") first.`,
       )
     }
     const id = `p${this.next++}`
@@ -296,10 +296,10 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
   if (platform === 'win32') {
     const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
     return (
-      `Commands (ys_run_command, ys_process_start) run in Windows ${shell}, not bash: use dir, type, ` +
+      `Commands (ys_run_command, ys_process) run in Windows ${shell}, not bash: use dir, type, ` +
       'copy, move, del, mkdir, findstr, cd (no ls, cat, rm, pwd, grep, true). Chain with &&. ' +
       'Node, npm and npx work as usual.'
     )
   }
-  return 'Commands (ys_run_command, ys_process_start) run in /bin/sh (POSIX shell).'
+  return 'Commands (ys_run_command, ys_process) run in /bin/sh (POSIX shell).'
 }

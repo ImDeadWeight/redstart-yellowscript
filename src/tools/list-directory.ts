@@ -28,17 +28,14 @@ export const listDirectoryTool: Tool = {
   definition: {
     name: assertWorkspaceToolName('ys_list_directory'),
     description:
-      'List the contents of a workspace directory, one entry per line, directories first. ' +
-      'Directories are shown with a trailing slash and files with their size. ' +
-      'Does not recurse — use ys_glob to match files across a tree. ' +
-      'Nothing outside the workspace can be listed.',
+      'List one workspace directory: folders first (trailing /), files with their size. ' +
+      'Not recursive; use ys_glob across a tree.',
     inputSchema: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description:
-            'Workspace-relative directory, e.g. "src". Omit or pass "." for the workspace root.',
+          description: 'Workspace-relative directory; omit for the root.',
         },
       },
       required: [],

@@ -206,14 +206,13 @@ export function createWriteFileTool(fs: WriteFs): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_write_file'),
       description:
-        'Propose writing a complete file. Provide the full new content — for changing part of an existing ' +
-        'file, prefer ys_edit_file with a diff. The write is previewed and applied only after approval. ' +
-        'New files are created; existing files are replaced entirely. Paths are workspace-relative.',
+        'Propose writing a whole file, new or replaced. To change part of a file, use ys_replace. ' +
+        'Applied after review.',
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Workspace-relative file path, e.g. "src/index.ts".' },
-          content: { type: 'string', description: 'The complete new content of the file.' },
+          path: { type: 'string', description: 'Workspace-relative, e.g. "src/index.ts".' },
+          content: { type: 'string', description: 'The complete file.' },
         },
         required: ['path', 'content'],
         additionalProperties: false,

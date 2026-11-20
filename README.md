@@ -78,6 +78,7 @@ to open settings directly.
 | `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
 | `redstartYellowscript.agent.maxTurns` | `40` | Model round trips per message before asking whether to keep going (5–500). A repeated identical tool call is stopped sooner. |
 | `redstartYellowscript.allowedCommands` | `[]` | Command prefixes that run without asking in this workspace (`npm test`). Chained, piped or redirected lines always ask. |
+| `redstartYellowscript.tools.unifiedDiff` | `false` | Offer `ys_edit_file` (unified diffs) to the model. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ys_write_file`, `ys_edit_file`). |
 
 A password is used once: Yellowscript signs in, has Nest issue a key for this
@@ -197,7 +198,7 @@ string → `{}`, malformed JSON → descriptive error).
 |---|---|
 | `ys_replace` | Propose replacing exact text (`old_string` → `new_string`), unique unless `replace_all`. The edit local models get right. |
 | `ys_write_file` | Propose writing a complete file (new or full replacement). Checkpointed for revert. |
-| `ys_edit_file` | Propose editing a file via unified diff. Diff must match current content; mismatches rejected. |
+| `ys_edit_file` | Propose editing a file via unified diff. Offered only with `tools.unifiedDiff`; small models get diffs wrong. |
 | `ys_delete_file` | Propose deleting a file. Always reviewed, whatever has been allowed. |
 | `ys_move_file` | Propose moving or renaming a file. |
 
@@ -209,9 +210,7 @@ server now reports in the files it wrote.
 | Tool | Description |
 |---|---|
 | `ys_run_command` | Propose a shell command; it runs after approval and the result starts with its exit code, then stdout and stderr. `timeout_s` (default 120, max 900). |
-| `ys_process_start` | Propose a long-running command (a dev server, a watcher) in the background. Same approval. |
-| `ys_process_output` | Read what a background process printed since the last read (`wait_s` to wait for a server to come up). |
-| `ys_process_stop` | Stop a background process. All of them stop when the window closes. |
+| `ys_process` | Background commands (a dev server, a watcher). `action: "start"` proposes one, with the same approval; `"output"` reads what it printed since the last read (`wait_s` to wait for a server); `"stop"` ends it. All of them stop when the window closes. |
 
 Commands run with your shell and environment; their output streams into the
 **Yellowscript Commands** output channel. **Always allow** on the prompt adds

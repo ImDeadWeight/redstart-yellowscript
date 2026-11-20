@@ -35,25 +35,23 @@ export const readFileTool: Tool = {
   definition: {
     name: assertWorkspaceToolName('ys_read_file'),
     description:
-      'Read a text file from the workspace. Returns the file with 1-based line numbers. ' +
-      'Output is truncated if the file is large, so pass `offset` and `limit` to page through ' +
-      'a big file rather than re-reading it whole. Paths are relative to the workspace folder. ' +
-      'Refuses binary files and anything outside the workspace.',
+      'Read a workspace text file, with 1-based line numbers. A large file is truncated: page ' +
+      'through it with offset and limit instead of re-reading it whole.',
     inputSchema: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'Workspace-relative path to the file, e.g. "src/index.ts".',
+          description: 'Workspace-relative, e.g. "src/index.ts".',
         },
         offset: {
           type: 'integer',
-          description: 'First line to return, 1-based. Omit to start at the beginning.',
+          description: 'First line, 1-based.',
           minimum: 1,
         },
         limit: {
           type: 'integer',
-          description: `Maximum number of lines to return. Defaults to ${DEFAULT_LINE_LIMIT}.`,
+          description: `Lines to return (default ${DEFAULT_LINE_LIMIT}).`,
           minimum: 1,
         },
       },

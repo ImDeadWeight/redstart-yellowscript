@@ -60,8 +60,10 @@ export interface RunRecord {
   iterations: number
   toolCalls: number
   toolErrors: number
-  /** Calls whose arguments were not valid JSON. */
+  /** Calls whose arguments were not valid JSON and could not be repaired. */
   invalidArgs: number
+  /** Calls whose malformed arguments the registry repaired and ran. */
+  repairedArgs: number
   /** Calls recovered from the model's text, not tool_calls. */
   recovered: number
   /** Calls refused as identical repeats. */
@@ -161,7 +163,7 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
 
   const record: RunRecord = {
     task: task.id, label: options.label, model: null, pass: false, check: '', stopReason: 'error',
-    iterations: 0, toolCalls: 0, toolErrors: 0, invalidArgs: 0, recovered: 0, repeats: 0, trims: 0,
+    iterations: 0, toolCalls: 0, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, trims: 0,
     questions: 0, nCtx: null, durationMs: 0, answer: '',
   }
 
@@ -226,6 +228,7 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
       if (run.result.isError) record.toolErrors++
       if (run.recovered) record.recovered++
       if (/were not valid JSON/.test(run.result.content)) record.invalidArgs++
+      if (run.result.argumentsRepaired?.length) record.repairedArgs++
       if (run.result.summary === 'Not run: repeated call') record.repeats++
     }
   }
@@ -279,6 +282,7 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
   const calls = records.reduce((a, r) => a + r.toolCalls, 0)
   const errors = records.reduce((a, r) => a + r.toolErrors, 0)
   const invalid = records.reduce((a, r) => a + r.invalidArgs, 0)
+  const repaired = records.reduce((a, r) => a + (r.repairedArgs ?? 0), 0)
   const recovered = records.reduce((a, r) => a + r.recovered, 0)
   const turns = records.reduce((a, r) => a + r.iterations, 0)
   const limits = records.filter((r) => r.stopReason === 'turn-cap' || r.stopReason === 'timeout').length
@@ -301,9 +305,9 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
     '',
     'Row for docs/bench-results.md:',
     '',
-    '| Date | Label | Model | Pass | Tool success | Invalid args | Recovered | Turns/task | Hit a limit | Trimmed |',
-    '|---|---|---|---|---|---|---|---|---|---|',
-    `| ${date.toISOString().slice(0, 10)} | ${label} | ${models} | ${passed}/${records.length} (${pct(passed, records.length)}) | ${pct(calls - errors, calls)} | ${pct(invalid, calls)} | ${pct(recovered, calls)} | ${records.length ? (turns / records.length).toFixed(1) : '–'} | ${limits} | ${trimmed} |`,
+    '| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Hit a limit | Trimmed |',
+    '|---|---|---|---|---|---|---|---|---|---|---|',
+    `| ${date.toISOString().slice(0, 10)} | ${label} | ${models} | ${passed}/${records.length} (${pct(passed, records.length)}) | ${pct(calls - errors, calls)} | ${pct(invalid, calls)} | ${pct(repaired, calls)} | ${pct(recovered, calls)} | ${records.length ? (turns / records.length).toFixed(1) : '–'} | ${limits} | ${trimmed} |`,
     '',
   ]
   return lines.join('\n')

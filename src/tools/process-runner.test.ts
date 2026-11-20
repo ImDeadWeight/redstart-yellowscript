@@ -11,7 +11,7 @@ import * as path from 'node:path'
 import { after, describe, it } from 'node:test'
 
 import { BackgroundProcesses, capHeadTail, formatCommandRun, runCommandLine, runFailed } from './process-runner.ts'
-import { createProcessOutputTool, createProcessStopTool, processStartTool } from './process-tools.ts'
+import { createProcessTool, legacyProcessCall } from './process-tools.ts'
 import { allowPrefixFor, isCommandAllowed } from './approval.ts'
 
 const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-proc-')))
@@ -41,7 +41,7 @@ describe('runCommandLine', () => {
     const run = await runCommandLine({ command: nodeLine('setInterval(() => {}, 1000)'), cwd, timeoutMs: 1_000 })
     assert.equal(run.timedOut, true)
     assert.equal(runFailed(run), true)
-    assert.match(formatCommandRun(run), /Timed out after .* use ys_process_start/)
+    assert.match(formatCommandRun(run), /Timed out after .* use ys_process \(action "start"\)/)
   })
 
   it('streams output as it arrives', async () => {
@@ -70,14 +70,14 @@ describe('BackgroundProcesses and the process tools', () => {
       assert.match(first!.text, /ready/)
       assert.equal(first!.process.running, true)
 
-      const read = createProcessOutputTool(processes)
-      const later = await read.execute({ id: started.id, wait_s: 2 }, { workspaceRoots: [cwd] })
+      const tool = createProcessTool(processes)
+      const later = await tool.execute({ action: 'output', id: started.id, wait_s: 2 }, { workspaceRoots: [cwd] })
       assert.match(later.content, /is running/)
       const newOutput = later.content.split('--- output ---')[1] ?? ''
       assert.match(newOutput, /tick/)
       assert.doesNotMatch(newOutput, /ready/, 'only output since the last read')
 
-      const stop = await createProcessStopTool(processes).execute({ id: started.id }, { workspaceRoots: [cwd] })
+      const stop = await tool.execute({ action: 'stop', id: started.id }, { workspaceRoots: [cwd] })
       assert.match(stop.content, /Stopping p1/)
       for (let i = 0; i < 50 && processes.list()[0]!.running; i++) await new Promise((r) => setTimeout(r, 100))
       assert.equal(processes.list()[0]!.running, false)
@@ -88,15 +88,31 @@ describe('BackgroundProcesses and the process tools', () => {
 
   it('an unknown id names the known ones', async () => {
     const processes = new BackgroundProcesses()
-    const result = await createProcessOutputTool(processes).execute({ id: 'p9' }, { workspaceRoots: [cwd] })
+    const result = await createProcessTool(processes).execute({ action: 'output', id: 'p9' }, { workspaceRoots: [cwd] })
     assert.equal(result.isError, true)
     assert.match(result.content, /None has been started/)
   })
 
-  it('ys_process_start only plans: a background PendingCommand, nothing spawned', async () => {
-    const result = await processStartTool.execute({ command: 'npm run dev' }, { workspaceRoots: [cwd] })
+  it('start only plans: a background PendingCommand, nothing spawned', async () => {
+    const processes = new BackgroundProcesses()
+    const result = await createProcessTool(processes).execute({ action: 'start', command: 'npm run dev' }, { workspaceRoots: [cwd] })
     assert.equal(result.pendingCommand?.background, true)
     assert.equal(result.pendingCommand?.command, 'npm run dev')
+    assert.equal(processes.list().length, 0)
+  })
+
+  it('a missing or unknown action names the three', async () => {
+    const result = await createProcessTool(new BackgroundProcesses()).execute({ id: 'p1' }, { workspaceRoots: [cwd] })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /"start", "output", "stop"/)
+  })
+
+  it('maps the three old tools onto an action', () => {
+    assert.deepEqual(legacyProcessCall('ys_process_start', { command: 'npm run dev' }), { name: 'ys_process', args: { command: 'npm run dev', action: 'start' } })
+    assert.deepEqual(legacyProcessCall('ys_process_output', { id: 'p1' }), { name: 'ys_process', args: { id: 'p1', action: 'output' } })
+    assert.deepEqual(legacyProcessCall('ws_process_stop', { id: 'p1' }), { name: 'ys_process', args: { id: 'p1', action: 'stop' } })
+    assert.equal(legacyProcessCall('ys_process', {}), null)
+    assert.equal(legacyProcessCall('ys_read_file', {}), null)
   })
 })
 

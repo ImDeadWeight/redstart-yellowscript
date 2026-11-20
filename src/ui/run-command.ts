@@ -1,5 +1,5 @@
 // =============================================================================
-// Host-side command approval for ys_run_command and ys_process_start.
+// Host-side command approval for ys_run_command and ys_process start.
 // =============================================================================
 // Implements the `CommandApprovalGate` port. The model only ever proposes a
 // command; this is where it runs, and only after the person has seen it
@@ -12,8 +12,8 @@
 // timeout. Output streams live into the "Yellowscript Commands" output
 // channel, which is where the person watches it.
 //
-// A background command (ys_process_start) is started and left running; the
-// model reads it with ys_process_output.
+// A background command (ys_process start) is started and left running; the
+// model reads it with ys_process output.
 // =============================================================================
 
 import * as vscode from 'vscode'
@@ -84,7 +84,7 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
           text:
             `Started ${started.id}: ${pending.command} — it ${state}.\n` +
             (text ? `--- first output ---\n${text.slice(-4_000)}\n` : '(no output yet)\n') +
-            `Read more with ys_process_output {"id":"${started.id}"}; end it with ys_process_stop.`,
+            `Read more with ys_process {"action":"output","id":"${started.id}"}; end it with "action":"stop".`,
           isError: first ? !first.process.running && first.process.exitCode !== 0 : false,
         }
       } catch (err) {

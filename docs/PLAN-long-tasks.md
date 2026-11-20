@@ -1,7 +1,8 @@
 # Plan: long web-development tasks
 
 *As of 2026-11-19. Follows [PLAN-complex-tasks.md](PLAN-complex-tasks.md),
-whose items 1–14 are built. Nothing here is started.*
+whose items 1–14 are built. Work is on `feat/long-tasks`; the State column
+says how far it has got.*
 
 **Goal.** The milestone ladder from the earlier plan (Pong → platformer → the
 full game with levels, art, sound and a title screen → the Redstart website),
@@ -16,25 +17,25 @@ costs there, and phase 0 makes room first.
 
 ## Status
 
-| # | Item | Phase | Where |
-|---|---|---|---|
-| 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core |
-| 1 | Run log carried into the next message | 1 | Yellowscript |
-| 2 | Task summary card | 1 | Yellowscript |
-| 3 | Dev-server URL detection | 1 | Yellowscript |
-| 16 | Protected paths (before 15) | 1 | Yellowscript |
-| 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript |
-| 4 | Outline, symbols, references | 2 | Yellowscript |
-| 5 | Big files read as an outline | 2 | Yellowscript |
-| 6 | Page steps, `eval`, viewport | 3 | Yellowscript |
-| 7 | The game test hook convention | 3 | Templates, `AGENTS.md` |
-| 8 | Workspace notes (`ys_note`) | 4 | Yellowscript |
-| 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript |
-| 10 | Attention when a run waits on you | 5 | Yellowscript |
-| 11 | Resume an interrupted task | 5 | Yellowscript |
-| 12 | Images, `@file` and selections in the composer | 5 | Yellowscript |
-| 13 | Assets: sprites and sounds | 6 | Yellowscript |
-| 14 | Site check and importing content | 6 | Yellowscript (+ Nest's web fetch) |
+| # | Item | Phase | Where | State |
+|---|---|---|---|---|
+| 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core | Done: 11,120 → 6,674 characters; repair in Yellowscript until agent-core takes it |
+| 1 | Run log carried into the next message | 1 | Yellowscript | |
+| 2 | Task summary card | 1 | Yellowscript | |
+| 3 | Dev-server URL detection | 1 | Yellowscript | |
+| 16 | Protected paths (before 15) | 1 | Yellowscript | |
+| 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | |
+| 4 | Outline, symbols, references | 2 | Yellowscript | |
+| 5 | Big files read as an outline | 2 | Yellowscript | |
+| 6 | Page steps, `eval`, viewport | 3 | Yellowscript | |
+| 7 | The game test hook convention | 3 | Templates, `AGENTS.md` | |
+| 8 | Workspace notes (`ys_note`) | 4 | Yellowscript | |
+| 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript | |
+| 10 | Attention when a run waits on you | 5 | Yellowscript | |
+| 11 | Resume an interrupted task | 5 | Yellowscript | |
+| 12 | Images, `@file` and selections in the composer | 5 | Yellowscript | |
+| 13 | Assets: sprites and sounds | 6 | Yellowscript | |
+| 14 | Site check and importing content | 6 | Yellowscript (+ Nest's web fetch) | |
 
 Phases are an order, not a schedule: 1 helps every multi-message task at once
 and removes most of the prompts a long run stops on; 2 has to land before the

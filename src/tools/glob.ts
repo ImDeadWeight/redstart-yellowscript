@@ -38,23 +38,19 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_glob'),
       description:
-        'Find files in the workspace by glob pattern, e.g. "**/*.ts" or "src/**/test-*.js". ' +
-        'Returns workspace-relative paths, not file contents. ' +
-        (degraded
-          ? 'Note: .gitignore is not being applied (a fixed list of heavy directories is skipped instead).'
-          : 'Respects .gitignore, so generated and vendored files are not returned.') +
-        ` At most ${MAX_GLOB_RESULTS} paths are returned; narrow the pattern if you hit that.`,
+        'Find workspace files by glob pattern; returns paths, not contents. ' +
+        (degraded ? '.gitignore is not being applied.' : 'Respects .gitignore.') +
+        ` At most ${MAX_GLOB_RESULTS} paths.`,
       inputSchema: {
         type: 'object',
         properties: {
           pattern: {
             type: 'string',
-            description: 'Glob pattern, e.g. "**/*.ts". Use ** to cross directory boundaries.',
+            description: 'e.g. "src/**/*.ts".',
           },
           path: {
             type: 'string',
-            description:
-              'Optional workspace-relative directory to search under. Omit to search the whole workspace.',
+            description: 'Optional directory to search under.',
           },
         },
         required: ['pattern'],

@@ -330,16 +330,13 @@ export function createCheckPageTool(deps: CheckPageDeps): Tool {
     definition: {
       name: assertWorkspaceToolName('ys_check_page'),
       description:
-        'Load a page in a headless browser and report uncaught exceptions, console errors and warnings, ' +
-        'failed requests, and what the page shows (title, canvases, visible text), plus a screenshot. Use it ' +
-        'after changing a web page or a canvas game, with a dev server URL on this machine ' +
-        '(http://localhost:5173) or a workspace HTML file (index.html). wait_s lets it run that long after ' +
-        'load (default 2, max 15) so errors in a game loop show up.',
+        'Load a page headless and report exceptions, console errors, failed requests and what it shows ' +
+        '(title, canvases, text), with a screenshot. Use it after changing a page or a canvas game.',
       inputSchema: {
         type: 'object',
         properties: {
-          target: { type: 'string', description: 'http://localhost… URL, or a workspace-relative .html path.' },
-          wait_s: { type: 'number', description: 'Seconds to let the page run after it loads (0–15).' },
+          target: { type: 'string', description: 'http://localhost:… URL, or a workspace .html path.' },
+          wait_s: { type: 'number', description: "Seconds to run after load, so a game loop's errors show (default 2, max 15)." },
         },
         required: ['target'],
         additionalProperties: false,

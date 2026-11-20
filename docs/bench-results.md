@@ -5,12 +5,14 @@ Name the label with the model and quantization (e.g. `qwen3.6-35b Q4_K_XL`),
 and say below the table what changed since the previous row.
 
 Columns: tasks passed; tool-call success (calls that did not error);
-invalid arguments (not valid JSON); calls recovered from the model's text
+invalid arguments (not valid JSON, even after repair); repaired arguments
+(malformed JSON fixed and run: raw newlines, stray backslashes, single
+quotes, trailing commas, a code fence); calls recovered from the model's text
 rather than `tool_calls`; model round trips per task; runs that hit the turn
 or time limit; runs where the context budget had to trim.
 
-| Date | Label | Model | Pass | Tool success | Invalid args | Recovered | Turns/task | Hit a limit | Trimmed |
-|---|---|---|---|---|---|---|---|---|---|
+| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Hit a limit | Trimmed |
+|---|---|---|---|---|---|---|---|---|---|---|
 
 ## Tasks
 

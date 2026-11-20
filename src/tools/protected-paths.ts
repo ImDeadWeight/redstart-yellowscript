@@ -35,8 +35,10 @@ export function workspaceRelative(roots: readonly string[], absolutePath: string
   for (const root of roots) {
     const base = path.resolve(root).toLowerCase()
     if (target === base) return ''
-    if (target.startsWith(base + path.sep) || target.startsWith(`${base}/`)) {
-      return target.slice(base.length + 1).replace(/\\/g, '/')
+    // A drive or filesystem root (E:\, /) already ends in a separator.
+    const prefix = /[\\/]$/.test(base) ? base : base + path.sep
+    if (target.startsWith(prefix) || target.startsWith(`${base}/`)) {
+      return target.slice(prefix.length).replace(/\\/g, '/')
     }
   }
   return null

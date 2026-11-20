@@ -77,6 +77,9 @@ to open settings directly.
 | `redstartYellowscript.autoConnect` | `true` | Reconnect to the last-used Nest when a window opens. |
 | `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
 | `redstartYellowscript.agent.maxTurns` | `40` | Model round trips per message before asking whether to keep going (5–500). A repeated identical tool call is stopped sooner. |
+| `redstartYellowscript.commands.builtInSafe` | `true` | Run read-only commands (`git status`, `cat`, `rg`) without asking. |
+| `redstartYellowscript.commands.autoRunProjectChecks` | `true` | Run the project's test, build and lint scripts and a dev server without asking. |
+| `redstartYellowscript.extraReadRoots` | `[]` | Folders outside the workspace the read tools may read. |
 | `redstartYellowscript.allowedCommands` | `[]` | Command prefixes that run without asking in this workspace (`npm test`). Chained, piped or redirected lines always ask. |
 | `redstartYellowscript.tools.unifiedDiff` | `false` | Offer `ys_edit_file` (unified diffs) to the model. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ys_write_file`, `ys_edit_file`). |
@@ -221,9 +224,37 @@ server now reports in the files it wrote.
 | `ys_process` | Background commands (a dev server, a watcher). `action: "start"` proposes one, with the same approval, and waits up to 5s for the address it prints (`p1 is serving http://localhost:5173`) or for it to exit; `"output"` reads what it printed since the last read (`wait_s` to wait); `"stop"` ends it. All of them stop when the window closes. |
 
 Commands run with your shell and environment; their output streams into the
-**Yellowscript Commands** output channel. **Always allow** on the prompt adds
-the command's prefix (`npm test`, `npm run build`) to `allowedCommands` for
-this workspace. A line that chains, pipes or redirects always asks.
+**Yellowscript Commands** output channel. Some run without asking:
+
+- **Read-only** (`commands.builtInSafe`): listing and reading workspace
+  files (`ls`, `dir`, `cat`, `type`, `head`), searching (`grep`, `rg`,
+  `findstr`, `find` without `-exec` or `-delete`), versions, package facts
+  (`npm ls`, `npm view`), read-only git (`status`, `diff`, `log`, `show`,
+  `blame`, listing branches), `node --check` and `npx tsc --noEmit`. Git
+  runs with hooks, fsmonitor, external diffs and the pager turned off.
+- **The project's own checks** (`commands.autoRunProjectChecks`): the
+  `test`, `build`, `lint`, `typecheck`, `check` and `format:check` scripts
+  that exist in `package.json` (unless this run changed them), a `dev`,
+  `start`, `serve` or `preview` script in the background, locally installed
+  `vitest run`, `jest`, `eslint`, `prettier --check` and `playwright test`,
+  and `pytest`, `ruff check`, `mypy`, `cargo` and `go` checks.
+
+Everything else asks. A line that chains, pipes, redirects or expands a
+variable (`$HOME`, `%USERPROFILE%`, `~`) always asks, and so does one that
+names a path outside the workspace, inside `.git`, or a secrets file, or
+searches a folder that holds one. Such a command's card and its output-channel
+line name the rule that let it run. **Always allow** on the prompt adds the
+command's prefix (`npm test`, `npm run build`) to `allowedCommands` for this
+workspace; it is not offered for `git push`, `git reset --hard`,
+`git clean`, `git restore` or a recursive delete, which ask every time.
+Credentials in URLs (`https://user:token@host`) are masked in what the model
+reads.
+
+The read tools can read outside the workspace after asking: **Allow this
+time**, **Always for this folder** (kept in `extraReadRoots`), or **Deny**.
+Never writing there, and never the home folder itself, the folders above it,
+`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker` or the system
+folders.
 
 ## Write approval & shadow checkpoints
 

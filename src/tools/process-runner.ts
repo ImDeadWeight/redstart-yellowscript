@@ -29,6 +29,7 @@
 // =============================================================================
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { redactUrlCredentials } from './safe-commands.ts'
 
 /** Default and maximum time a one-shot command may take. */
 export const DEFAULT_TIMEOUT_MS = 120_000
@@ -70,8 +71,9 @@ export function formatCommandRun(run: CommandRun): string {
   else head = `Exit code ${run.exitCode} · ${seconds}s`
 
   const parts = [head]
-  const stdout = run.stdout.trimEnd()
-  const stderr = run.stderr.trimEnd()
+  // `git remote -v` and `npm view` can print a token inside a URL.
+  const stdout = redactUrlCredentials(run.stdout.trimEnd())
+  const stderr = redactUrlCredentials(run.stderr.trimEnd())
   if (stdout) parts.push(`--- stdout ---\n${capHeadTail(stdout)}`)
   if (stderr) parts.push(`--- stderr ---\n${capHeadTail(stderr)}`)
   if (!stdout && !stderr && !run.spawnError) parts.push('(no output)')
@@ -105,17 +107,19 @@ export function killTree(child: ChildProcess): void {
 export interface RunOptions {
   command: string
   cwd: string
+  /** Added to the environment (a hardened git line's GIT_TERMINAL_PROMPT=0). */
+  env?: Record<string, string>
   timeoutMs?: number
   signal?: AbortSignal
   /** Every chunk as it arrives, for a live view. */
   onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void
 }
 
-function spawnShell(command: string, cwd: string): ChildProcess {
+function spawnShell(command: string, cwd: string, env?: Record<string, string>): ChildProcess {
   return spawn(command, {
     cwd,
     shell: true,
-    env: process.env,
+    env: env ? { ...process.env, ...env } : process.env,
     windowsHide: true,
     // Its own process group on POSIX, so killTree can end the whole tree.
     detached: process.platform !== 'win32',
@@ -130,7 +134,7 @@ export function runCommandLine(options: RunOptions): Promise<CommandRun> {
   return new Promise((resolve) => {
     let child: ChildProcess
     try {
-      child = spawnShell(options.command, options.cwd)
+      child = spawnShell(options.command, options.cwd, options.env)
     } catch (err) {
       resolve({ exitCode: null, signal: null, stdout: '', stderr: '', durationMs: 0, timedOut: false, spawnError: err instanceof Error ? err.message : String(err) })
       return
@@ -225,7 +229,7 @@ export async function startInBackground(processes: BackgroundProcesses, command:
   const started = processes.start(command, cwd)
   const settled = await processes.waitForStart(started.id, waitMs)
   const first = await processes.output(started.id)
-  const output = first?.text.trimEnd() ?? ''
+  const output = redactUrlCredentials(first?.text.trimEnd() ?? '')
   const tail = output ? `\n--- output ---\n${output.slice(-4_000)}` : ''
   const id = started.id
   const more = `Read more with ys_process {"action":"output","id":"${id}"}; end it with "action":"stop".`
@@ -401,9 +405,15 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
     const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
     return (
       `Commands (ys_run_command, ys_process) run in Windows ${shell}, not bash: use dir, type, ` +
-      'copy, move, del, mkdir, findstr, cd (no ls, cat, rm, pwd, grep, true). Chain with &&. ' +
-      'Node, npm and npx work as usual.'
+      'findstr, cd (no ls, cat, rm, pwd, grep, true). Node, npm and npx work as usual. ' +
+      FILES_NOTE
     )
   }
-  return 'Commands (ys_run_command, ys_process) run in /bin/sh (POSIX shell).'
+  return `Commands (ys_run_command, ys_process) run in /bin/sh (POSIX shell). ${FILES_NOTE}`
 }
+
+/** Said with the shell: read-only and check commands run without asking;
+ *  changing files belongs to the ys_ tools, which checkpoint. */
+const FILES_NOTE =
+  'Read-only commands and the project\'s test, build and lint scripts run without asking; a chained or piped ' +
+  'line asks. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir.'

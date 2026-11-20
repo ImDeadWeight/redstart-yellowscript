@@ -16,7 +16,8 @@ import {
   type ToolContext,
   type ToolResult,
 } from './types.ts'
-import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
+import { PathScopeError, describeWorkspacePath } from './workspace-path.ts'
+import { resolveReadPath } from './read-scope.ts'
 import { secretReason } from './protected-paths.ts'
 
 /** Lines returned when the model doesn't ask for a range. Large enough for
@@ -69,7 +70,7 @@ export const readFileTool: Tool = {
 
     let absolute: string
     try {
-      absolute = resolveWithinWorkspace(context.workspaceRoots, requested)
+      absolute = await resolveReadPath(context, requested)
     } catch (err) {
       return pathFailure(err, requested)
     }

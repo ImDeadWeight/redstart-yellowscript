@@ -171,6 +171,8 @@ export interface CommandOutcome {
   processId?: string
   /** The address the background process said it serves. */
   url?: string
+  /** It ran without asking, under this rule (safe-commands.ts). */
+  autoRule?: string
 }
 
 export interface AgentLoopOptions {
@@ -534,6 +536,7 @@ function commandEffect(pending: PendingCommand, outcome: CommandOutcome | string
   const output = typeof outcome === 'string' ? { text: outcome, isError: false } : outcome
   const effect: ToolEffect = { kind: 'command', command: pending.command, ran: true, exitCode: output.exitCode ?? null }
   if (output.processId) effect.processId = output.processId
+  if (output.autoRule) effect.autoRule = output.autoRule
   if (output.url) effect.url = output.url
   if (output.isError) {
     effect.failed = true
@@ -597,7 +600,7 @@ function withCommandNote(result: ToolResult, outcome: CommandOutcome | string | 
   const next: ToolResult = {
     ...result,
     content: output.text,
-    summary: `${result.summary.replace(/ \(pending approval\)$/, '')} — ${output.isError ? 'failed' : 'ran'}`,
+    summary: `${result.summary.replace(/ \(pending approval\)$/, '')} — ${output.isError ? 'failed' : 'ran'}${output.autoRule ? ` without asking (${output.autoRule})` : ''}`,
     isError: output.isError,
   }
   delete next.pendingCommand

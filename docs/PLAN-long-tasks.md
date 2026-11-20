@@ -24,7 +24,7 @@ costs there, and phase 0 makes room first.
 | 2 | Task summary card | 1 | Yellowscript | Done; shows processes as started, not whether they still run |
 | 3 | Dev-server URL detection | 1 | Yellowscript | Done |
 | 16 | Protected paths (before 15) | 1 | Yellowscript | Done; checked in the registry, so every write tool is covered |
-| 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | |
+| 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | Done; the recorded `dev-server-fix` run is still to do |
 | 4 | Outline, symbols, references | 2 | Yellowscript | |
 | 5 | Big files read as an outline | 2 | Yellowscript | |
 | 6 | Page steps, `eval`, viewport | 3 | Yellowscript | |

@@ -53,7 +53,10 @@ import {
 } from './ui/tool-providers.ts'
 import { makeApprovalGate, checkpointForWorkspace, shadowKey } from './ui/write-approval.ts'
 import { fileBaseline, revertSteps } from './chat/run-log.ts'
-import type { ToolEffect } from './tools/types.ts'
+import type { PendingCommand, ToolEffect } from './tools/types.ts'
+import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
+import { nodeCommandContext } from './tools/command-context.ts'
+import { usableReadRoots } from './tools/read-scope.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { BackgroundProcesses, describeRunning } from './tools/process-runner.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
@@ -588,17 +591,27 @@ function getSession(id: string): ChatSession {
       tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
       toolContext: () => ({
         workspaceRoots: workspaceRoots(),
-        askRead: async (request) =>
-          (await getSession(id).askApproval({
+        readRoots: extraReadRoots(),
+        askRead: async (request) => {
+          const outside = request.outsideFolder
+          const choice = await getSession(id).askApproval({
             kind: 'tool',
-            title: 'Read a file that may hold secrets',
+            title: outside ? 'Read outside the workspace' : 'Read a file that may hold secrets',
             subject: request.label,
-            detail: `${request.reason}. What it says goes to the model and is saved with this chat.`,
+            detail: outside
+              ? `It is outside the workspace. Reading only; nothing there is ever written. "Always" allows reading ${outside}.`
+              : `${request.reason}. What it says goes to the model and is saved with this chat.`,
             options: [
               { id: 'read', label: 'Allow this time', kind: 'allow' },
+              ...(outside ? [{ id: 'always', label: 'Always for this folder', kind: 'always' as const }] : []),
               { id: 'deny', label: 'Deny', kind: 'deny' },
             ],
-          })) === 'read',
+          })
+          if (choice === 'always' && outside) {
+            await config().update('extraReadRoots', [...new Set([...extraReadRoots(), outside])], vscode.ConfigurationTarget.Workspace)
+          }
+          return choice === 'read' || choice === 'always'
+        },
       }),
       approveChange: (pending) => {
         const roots = workspaceRoots()
@@ -631,6 +644,7 @@ function getSession(id: string): ChatSession {
               channel: commandChannel,
               processes: backgroundProcesses,
               ask: (request) => getSession(id).askApproval(request),
+              classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
             })(pending)
           : Promise.resolve(null),
       conversationId: id,
@@ -1415,6 +1429,39 @@ async function promptForServerUrl(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** What the command classifier needs to know about this workspace and run. */
+function commandContextFor(conversationId: string, pending: PendingCommand): CommandContext {
+  return nodeCommandContext({
+    cwd: pending.cwd,
+    roots: workspaceRoots().map((root) => {
+      try {
+        return nodeFs.realpathSync.native(root)
+      } catch {
+        return root
+      }
+    }),
+    readRoots: usableReadRoots(extraReadRoots()),
+    builtInSafe: config().get<boolean>('commands.builtInSafe') !== false,
+    projectChecks: config().get<boolean>('commands.autoRunProjectChecks') !== false,
+    background: pending.background === true,
+    // package.json as this run's first checkpoint of it holds it.
+    packageJsonBeforeRun: (file) => {
+      const key = file.toLowerCase()
+      for (const entry of tasks.get(conversationId)?.checkpoints ?? []) {
+        const staged = entry.files.find((f) => f.workspaceAbsolute.toLowerCase() === key)
+        if (staged) return staged.wasAbsent ? '' : staged.content
+      }
+      return null
+    },
+  })
+}
+
+/** Folders outside the workspace the person allowed the read tools. */
+function extraReadRoots(): string[] {
+  const value = config().get<string[]>('extraReadRoots')
+  return Array.isArray(value) ? value.filter((v) => typeof v === 'string' && v.trim() !== '') : []
+}
 
 function config(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(CONFIG_SECTION)

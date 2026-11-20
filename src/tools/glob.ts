@@ -20,7 +20,8 @@ import {
   type ToolContext,
   type ToolResult,
 } from './types.ts'
-import { PathScopeError, resolveWithinWorkspace } from './workspace-path.ts'
+import { PathScopeError } from './workspace-path.ts'
+import { resolveReadPath } from './read-scope.ts'
 import { runRipgrep } from './ripgrep.ts'
 import { globToRegExp, walkFiles } from './fallback-search.ts'
 
@@ -75,7 +76,7 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
         roots =
           scope === null
             ? [...context.workspaceRoots]
-            : [resolveWithinWorkspace(context.workspaceRoots, scope)]
+            : [await resolveReadPath(context, scope)]
       } catch (err) {
         if (err instanceof PathScopeError) {
           return err.reason === 'no-workspace'

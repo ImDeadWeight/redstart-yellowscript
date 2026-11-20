@@ -109,6 +109,7 @@ describe('runTask', () => {
     assert.equal(record.toolErrors, 0)
     assert.equal(record.model, 'scripted')
     assert.equal(record.nCtx, 32_768)
+    assert.equal(record.commandPrompts, 1, 'node src/main.js runs code, so it would have asked')
     // The model was told about the workspace before it started.
     assert.match(String(client.requests[0]!.messages[0]!.content), /The workspace is ys-bench-fix-crash-/)
   })
@@ -143,9 +144,9 @@ describe('runTask', () => {
   })
 
   test('the summary ends with one row for the results log', () => {
-    const base = { label: 'x', model: 'm', check: 'ok', stopReason: 'complete' as const, iterations: 4, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, trims: 0, questions: 0, nCtx: 32768, durationMs: 1000, answer: '' }
+    const base = { label: 'x', model: 'm', check: 'ok', stopReason: 'complete' as const, iterations: 4, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, commandPrompts: 0, trims: 0, questions: 0, nCtx: 32768, durationMs: 1000, answer: '' }
     const text = summarize([{ ...base, task: 'a', pass: true, toolCalls: 4 }, { ...base, task: 'b', pass: false, toolCalls: 6, toolErrors: 3, trims: 2 }], 'x', new Date('2026-11-19T12:00:00Z'))
     assert.match(text, /\*\*1\/2 passed\.\*\*/)
-    assert.match(text.trim().split('\n').at(-1)!, /^\| 2026-11-19 \| x \| m \| 1\/2 \(50%\) \| 70% \| 0% \| 0% \| 0% \| 4\.0 \| 0 \| 1 \|$/)
+    assert.match(text.trim().split('\n').at(-1)!, /^\| 2026-11-19 \| x \| m \| 1\/2 \(50%\) \| 70% \| 0% \| 0% \| 0% \| 4\.0 \| 0 \| 0 \| 1 \|$/)
   })
 })

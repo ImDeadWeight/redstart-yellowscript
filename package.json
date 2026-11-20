@@ -180,6 +180,22 @@
           "default": false,
           "markdownDescription": "Offer the model `ys_edit_file`, which edits with a unified diff. Off by default: small models get diffs wrong, and `ys_replace` covers the same edits. Takes effect in a new window."
         },
+        "redstartYellowscript.commands.builtInSafe": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run read-only commands without asking: listing and reading workspace files (`ls`, `cat`, `type`), searching (`grep`, `rg`), versions, package facts (`npm ls`), read-only git (`git status`, `git diff`, `git log`), and `tsc --noEmit`. A line that chains, pipes, redirects, expands a variable, or reaches outside the workspace or into a secrets file always asks."
+        },
+        "redstartYellowscript.commands.autoRunProjectChecks": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run the project's own checks without asking: its `test`, `build`, `lint`, `typecheck`, `check` and `format:check` scripts, a dev server (`dev`, `start`, `serve`, `preview`) in the background, and locally installed `vitest run`, `jest`, `eslint`, `prettier --check`, `playwright test`, `pytest`, `ruff check`, `mypy`, `cargo` and `go` checks. They run the workspace's code; a script this run changed asks."
+        },
+        "redstartYellowscript.extraReadRoots": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "markdownDescription": "Folders outside the workspace that the read tools and read-only commands may read (never write). Added by **Always for this folder** when the model asks to read outside the workspace."
+        },
         "redstartYellowscript.allowedCommands": {
           "type": "array",
           "default": [],

@@ -18,6 +18,7 @@
 import { assertWorkspaceToolName, stringArg, toolError, toolOk, type PendingCommand, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
 import { capHeadTail, type BackgroundProcesses } from './process-runner.ts'
+import { redactUrlCredentials } from './safe-commands.ts'
 
 /** What an "output" read shows of new output at most. */
 export const OUTPUT_CAP_CHARS = 12_000
@@ -88,7 +89,7 @@ async function readOutput(processes: BackgroundProcesses, args: unknown): Promis
   }
   const state = read.process.running ? 'running' : `exited with code ${read.process.exitCode ?? 'none'}`
   const missed = read.missed > 0 ? `\n[${read.missed.toLocaleString('en-US')} older characters were no longer kept]` : ''
-  const text = read.text.trimEnd()
+  const text = redactUrlCredentials(read.text.trimEnd())
   return toolOk(
     `${id} (${read.process.command}) is ${state}.${missed}\n${text ? `--- output ---\n${capHeadTail(text, OUTPUT_CAP_CHARS)}` : '(no new output)'}`,
     `ys_process output — ${id} ${state}`,

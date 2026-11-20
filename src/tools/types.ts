@@ -81,6 +81,9 @@ export interface ToolContext {
    * Absent (the bench, tests): such reads are refused.
    */
   askRead?: (request: ReadRequest) => Promise<boolean>
+  /** Folders outside the workspace the person allowed reading
+   *  (redstartYellowscript.extraReadRoots; read-scope.ts). */
+  readRoots?: readonly string[]
 }
 
 /** A read that waits for the person. */
@@ -90,6 +93,9 @@ export interface ReadRequest {
   label: string
   /** Why it asks, e.g. ".env usually holds secrets". */
   reason: string
+  /** Set for a read outside the workspace: the folder "Always for this
+   *  folder" would add to the extra read roots. */
+  outsideFolder?: string
 }
 
 export interface ToolResult {
@@ -160,6 +166,8 @@ export type ToolEffect =
       failed?: boolean
       /** A failed run's last line of output, for the log. */
       lastLine?: string
+      /** It ran without asking, under this rule (safe-commands.ts). */
+      autoRule?: string
     }
   | { kind: 'stop'; processId: string }
   | {

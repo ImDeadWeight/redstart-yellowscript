@@ -33,6 +33,8 @@ import { findBrowser } from '../tools/browser-check.ts'
 import { buildWorkspaceContext } from '../tools/workspace-context.ts'
 import type { PendingWrite, ToolEffect } from '../tools/types.ts'
 import { formatRunLog } from '../chat/run-log.ts'
+import { classifyCommand } from '../tools/safe-commands.ts'
+import { nodeCommandContext } from '../tools/command-context.ts'
 
 /** One task, as `bench/tasks/<id>/task.json` describes it. */
 export interface BenchTask {
@@ -72,6 +74,9 @@ export interface RunRecord {
   recovered: number
   /** Calls refused as identical repeats. */
   repeats: number
+  /** Commands that would have asked the person (tier C, safe-commands.ts):
+   *  the bench approves everything, so this is how the friction shows. */
+  commandPrompts: number
   /** Context trims during the run. */
   trims: number
   questions: number
@@ -166,10 +171,12 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
 
   const record: RunRecord = {
     task: task.id, label: options.label, model: null, pass: false, check: '', stopReason: 'error',
-    iterations: 0, toolCalls: 0, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, trims: 0,
+    iterations: 0, toolCalls: 0, toolErrors: 0, invalidArgs: 0, repairedArgs: 0, recovered: 0, repeats: 0, commandPrompts: 0, trims: 0,
     questions: 0, nCtx: null, durationMs: 0, answer: '',
   }
 
+  /** Each file's content before the task first wrote it, for "this run changed the scripts". */
+  const before = new Map<string, string>()
   let result: AgentResult | undefined
   /** Every message's run, in order: the check can look at one message's calls. */
   const runs: AgentResult[] = []
@@ -186,10 +193,23 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
         maxIterations: task.maxTurns ?? 40,
         context: tracker,
         approveChange: async (pending) => {
+          for (const c of pending.changes) if (!before.has(c.absolutePath.toLowerCase())) before.set(c.absolutePath.toLowerCase(), c.before)
           applyPendingWrite(pending)
           return true
         },
         approveCommand: async (pending) => {
+          const tier = classifyCommand(pending.command, nodeCommandContext({
+            cwd: pending.cwd,
+            roots: [workspace],
+            builtInSafe: true,
+            projectChecks: true,
+            background: pending.background === true,
+            packageJsonBeforeRun: (file) => before.get(file.toLowerCase()) ?? null,
+          }))
+          if (tier.tier === 'C') {
+            record.commandPrompts++
+            log(`  would ask: ${pending.command} (${tier.reason})`)
+          }
           if (pending.background) return startInBackground(processes, pending.command, pending.cwd)
           const run = await runCommandLine({ command: pending.command, cwd: pending.cwd, ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}), signal: controller.signal })
           return { text: formatCommandRun(run), isError: runFailed(run), exitCode: run.exitCode }
@@ -295,6 +315,7 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
   const errors = records.reduce((a, r) => a + r.toolErrors, 0)
   const invalid = records.reduce((a, r) => a + r.invalidArgs, 0)
   const repaired = records.reduce((a, r) => a + (r.repairedArgs ?? 0), 0)
+  const prompts = records.reduce((a, r) => a + (r.commandPrompts ?? 0), 0)
   const recovered = records.reduce((a, r) => a + r.recovered, 0)
   const turns = records.reduce((a, r) => a + r.iterations, 0)
   const limits = records.filter((r) => r.stopReason === 'turn-cap' || r.stopReason === 'timeout').length
@@ -309,17 +330,17 @@ export function summarize(records: readonly RunRecord[], label: string, date = n
     '',
     `**${passed}/${records.length} passed.**`,
     '',
-    '| Task | Result | Stop | Turns | Calls | Errors | Trims | Time | Check |',
-    '|---|---|---|---|---|---|---|---|---|',
+    '| Task | Result | Stop | Turns | Calls | Errors | Prompts | Trims | Time | Check |',
+    '|---|---|---|---|---|---|---|---|---|---|',
     ...records.map((r) =>
-      `| ${r.task} | ${r.pass ? 'PASS' : 'FAIL'} | ${r.stopReason} | ${r.iterations} | ${r.toolCalls} | ${r.toolErrors} | ${r.trims} | ${(r.durationMs / 1000).toFixed(0)}s | ${r.check.split('\n')[0]!.replace(/\|/g, '\\|').slice(0, 80)} |`,
+      `| ${r.task} | ${r.pass ? 'PASS' : 'FAIL'} | ${r.stopReason} | ${r.iterations} | ${r.toolCalls} | ${r.toolErrors} | ${r.commandPrompts ?? 0} | ${r.trims} | ${(r.durationMs / 1000).toFixed(0)}s | ${r.check.split('\n')[0]!.replace(/\|/g, '\\|').slice(0, 80)} |`,
     ),
     '',
     'Row for docs/bench-results.md:',
     '',
-    '| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Hit a limit | Trimmed |',
-    '|---|---|---|---|---|---|---|---|---|---|---|',
-    `| ${date.toISOString().slice(0, 10)} | ${label} | ${models} | ${passed}/${records.length} (${pct(passed, records.length)}) | ${pct(calls - errors, calls)} | ${pct(invalid, calls)} | ${pct(repaired, calls)} | ${pct(recovered, calls)} | ${records.length ? (turns / records.length).toFixed(1) : '–'} | ${limits} | ${trimmed} |`,
+    '| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Command prompts | Hit a limit | Trimmed |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|',
+    `| ${date.toISOString().slice(0, 10)} | ${label} | ${models} | ${passed}/${records.length} (${pct(passed, records.length)}) | ${pct(calls - errors, calls)} | ${pct(invalid, calls)} | ${pct(repaired, calls)} | ${pct(recovered, calls)} | ${records.length ? (turns / records.length).toFixed(1) : '–'} | ${prompts} | ${limits} | ${trimmed} |`,
     '',
   ]
   return lines.join('\n')

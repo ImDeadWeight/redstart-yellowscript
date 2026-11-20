@@ -8,11 +8,13 @@ Columns: tasks passed; tool-call success (calls that did not error);
 invalid arguments (not valid JSON, even after repair); repaired arguments
 (malformed JSON fixed and run: raw newlines, stray backslashes, single
 quotes, trailing commas, a code fence); calls recovered from the model's text
-rather than `tool_calls`; model round trips per task; runs that hit the turn
-or time limit; runs where the context budget had to trim.
+rather than `tool_calls`; model round trips per task; commands that would
+have asked the person (the bench approves everything; the rest ran without
+asking, as read-only or the project's own checks); runs that hit the turn or
+time limit; runs where the context budget had to trim.
 
-| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Hit a limit | Trimmed |
-|---|---|---|---|---|---|---|---|---|---|---|
+| Date | Label | Model | Pass | Tool success | Invalid args | Repaired args | Recovered | Turns/task | Command prompts | Hit a limit | Trimmed |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 
 ## Tasks
 

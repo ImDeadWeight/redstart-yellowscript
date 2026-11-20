@@ -115,7 +115,7 @@ export interface TaskTrust {
  * pipes, redirection, substitution, a second line. A line with any of it never
  * matches an allowed prefix, so "npm test && rm -rf ~" is not "npm test".
  */
-const SHELL_COMPOSITION = /&&|\|\||[;|&<>`\n\r]|\$\(|\$\{/
+export const SHELL_COMPOSITION = /&&|\|\||[;|&<>`\n\r]|\$\(|\$\{/
 
 /** True when `command` may run without a prompt under `allowed` prefixes. */
 export function isCommandAllowed(command: string, allowed: readonly string[]): boolean {

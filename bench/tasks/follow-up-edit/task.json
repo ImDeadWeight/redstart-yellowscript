@@ -1,0 +1,10 @@
+{
+  "title": "Edit, in a second message, the file the first one made",
+  "prompt": "Add a function `greet(name)` that returns `Hello, <name>!` (so greet(\"Ann\") is \"Hello, Ann!\"). Put it in a new file of your choosing somewhere under src/, and export it as a named export. Don't change the other files.",
+  "followUps": [
+    "Now give that function an optional second parameter, `greeting`, defaulting to \"Hello\", so greet(\"Ann\", \"Hi\") returns \"Hi, Ann!\"."
+  ],
+  "maxTurns": 15,
+  "timeoutS": 600,
+  "tags": ["core"]
+}

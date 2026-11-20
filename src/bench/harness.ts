@@ -28,10 +28,11 @@ import { ContextTracker, type ContextSource, type FitReport } from '../agent/con
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ChatCompletionRequest } from '../nest/client.ts'
 import { createToolRegistry } from '../tools/registry.ts'
-import { BackgroundProcesses, formatCommandRun, runCommandLine, runFailed } from '../tools/process-runner.ts'
+import { BackgroundProcesses, formatCommandRun, runCommandLine, runFailed, startInBackground } from '../tools/process-runner.ts'
 import { findBrowser } from '../tools/browser-check.ts'
 import { buildWorkspaceContext } from '../tools/workspace-context.ts'
-import type { PendingWrite } from '../tools/types.ts'
+import type { PendingWrite, ToolEffect } from '../tools/types.ts'
+import { formatRunLog } from '../chat/run-log.ts'
 
 /** One task, as `bench/tasks/<id>/task.json` describes it. */
 export interface BenchTask {
@@ -42,6 +43,9 @@ export interface BenchTask {
   maxTurns?: number
   /** Wall-clock limit for the whole run. */
   timeoutS?: number
+  /** Later messages, each sent after the previous run ends, with that run's
+   *  log on its answer as the chat sends it (chat/run-log.ts). */
+  followUps?: string[]
   /** Answers given to ask_user, in order; past the end, the question is dismissed. */
   answers?: AskAnswer[]
   tags?: string[]
@@ -150,9 +154,8 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
   })
 
   const context = buildWorkspaceContext(workspace)
-  const request: ChatCompletionRequest = {
-    messages: [...(context ? [{ role: 'system' as const, content: context }] : []), { role: 'user', content: task.prompt }],
-  }
+  const messages: ChatCompletionRequest['messages'] = context ? [{ role: 'system', content: context }] : []
+  const prompts = [task.prompt, ...(task.followUps ?? [])]
   const answers = [...(task.answers ?? [])]
   let plan: PlanStep[] | null = null
   let trims = 0
@@ -168,49 +171,54 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
   }
 
   let result: AgentResult | undefined
+  /** Every message's run, in order: the check can look at one message's calls. */
+  const runs: AgentResult[] = []
   try {
-    result = await runAgentLoop({
-      client: options.client,
-      request,
-      tools,
-      toolContext: { workspaceRoots: [workspace] },
-      signal: controller.signal,
-      maxIterations: task.maxTurns ?? 40,
-      context: tracker,
-      approveChange: async (pending) => {
-        applyPendingWrite(pending)
-        return true
-      },
-      approveCommand: async (pending) => {
-        if (pending.background) {
-          const started = processes.start(pending.command, pending.cwd)
-          const first = await processes.output(started.id, { waitMs: 3_000 })
-          return {
-            text: `Started ${started.id}: ${pending.command} — ${first?.process.running ? 'running' : `exited with code ${first?.process.exitCode}`}.\n${first?.text.slice(-4_000) ?? ''}`,
-            isError: first ? !first.process.running && first.process.exitCode !== 0 : false,
-          }
-        }
-        const run = await runCommandLine({ command: pending.command, cwd: pending.cwd, ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}), signal: controller.signal })
-        return { text: formatCommandRun(run), isError: runFailed(run) }
-      },
-      ask: {
-        user: async (_request: AskRequest) => {
-          questions++
-          return answers.shift() ?? null
+    for (const [index, prompt] of prompts.entries()) {
+      if (index > 0) log(`  message ${index + 1}: ${prompt.slice(0, 80)}`)
+      messages.push({ role: 'user', content: prompt })
+      result = await runAgentLoop({
+        client: options.client,
+        request: { messages: [...messages] },
+        tools,
+        toolContext: { workspaceRoots: [workspace] },
+        signal: controller.signal,
+        maxIterations: task.maxTurns ?? 40,
+        context: tracker,
+        approveChange: async (pending) => {
+          applyPendingWrite(pending)
+          return true
         },
-      },
-      plan: { get: () => plan, save: (steps) => void (plan = steps.map((s) => ({ ...s }))) },
-      // The bench measures one allowance of turns; it never says "keep going".
-      askContinue: async () => false,
-      handlers: {
-        onToolCall: (call, recovered) => log(`  call ${call.function.name}${recovered ? ' [recovered]' : ''} ${call.function.arguments.slice(0, 120)}`),
-        onContextTrimmed: (report: FitReport) => {
-          trims++
-          log(`  context trimmed ~${report.before} → ~${report.after} of ${report.usable}`)
+        approveCommand: async (pending) => {
+          if (pending.background) return startInBackground(processes, pending.command, pending.cwd)
+          const run = await runCommandLine({ command: pending.command, cwd: pending.cwd, ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}), signal: controller.signal })
+          return { text: formatCommandRun(run), isError: runFailed(run), exitCode: run.exitCode }
         },
-      },
-    })
-    record.stopReason = controller.signal.aborted ? 'timeout' : result.stopReason
+        ask: {
+          user: async (_request: AskRequest) => {
+            questions++
+            return answers.shift() ?? null
+          },
+        },
+        plan: { get: () => plan, save: (steps) => void (plan = steps.map((s) => ({ ...s }))) },
+        // The bench measures one allowance of turns; it never says "keep going".
+        askContinue: async () => false,
+        handlers: {
+          onToolCall: (call, recovered) => log(`  call ${call.function.name}${recovered ? ' [recovered]' : ''} ${call.function.arguments.slice(0, 120)}`),
+          onContextTrimmed: (report: FitReport) => {
+            trims++
+            log(`  context trimmed ~${report.before} → ~${report.after} of ${report.usable}`)
+          },
+        },
+      })
+      runs.push(result)
+      record.stopReason = controller.signal.aborted ? 'timeout' : result.stopReason
+      if (record.stopReason !== 'complete') break
+      // The answer, then what the run did: what the chat sends on the next message.
+      const effects = result.toolRuns.map((r) => r.result.effect).filter((e): e is ToolEffect => e !== undefined)
+      const runLog = formatRunLog(effects)
+      messages.push({ role: 'assistant', content: [result.content, runLog].filter(Boolean).join('\n\n') })
+    }
   } catch (err) {
     record.stopReason = controller.signal.aborted ? 'timeout' : 'error'
     record.error = err instanceof Error ? err.message : String(err)
@@ -219,11 +227,12 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     processes.stopAll()
   }
 
+  const allRuns = runs.flatMap((r) => r.toolRuns)
   if (result) {
     record.model = result.model ?? null
-    record.iterations = result.iterations
+    record.iterations = runs.reduce((n, r) => n + r.iterations, 0) || result.iterations
     record.answer = result.content.slice(0, 2_000)
-    for (const run of result.toolRuns) {
+    for (const run of allRuns) {
       record.toolCalls++
       if (run.result.isError) record.toolErrors++
       if (run.recovered) record.recovered++
@@ -248,11 +257,9 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
         plan,
         stopReason: record.stopReason,
         questions,
-        calls: (result?.toolRuns ?? []).map((r) => ({
-          name: r.call.function.name,
-          args: r.call.function.arguments.slice(0, 500),
-          isError: r.result.isError,
-        })),
+        calls: allRuns.map(callRecord),
+        // One entry per message (the prompt and any follow-ups), with its own calls.
+        messages: runs.map((r) => ({ calls: r.toolRuns.map(callRecord) })),
       },
       null,
       2,
@@ -268,6 +275,11 @@ export async function runTask(task: BenchTask, options: RunTaskOptions): Promise
     setTimeout(() => fs.rm(workspace, { recursive: true, force: true }, () => {}), 1_000).unref()
   }
   return { ...record, workspace }
+}
+
+/** A call as the check sees it. */
+function callRecord(run: AgentResult['toolRuns'][number]): { name: string; args: string; isError: boolean } {
+  return { name: run.call.function.name, args: run.call.function.arguments.slice(0, 500), isError: run.result.isError }
 }
 
 // ---------------------------------------------------------------------------

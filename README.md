@@ -170,6 +170,14 @@ logged to the output channel.
 Every request with tools also starts with a short note about the workspace:
 its `AGENTS.md` (or `CLAUDE.md`) and a two-level file tree.
 
+Across messages, only your words and the assistant's answers are sent, so
+each answer also carries a short log of what its run did: files created,
+changed, moved or deleted, commands and their exit codes, processes started
+and their address, the last page check's first problem. Rejected writes and
+commands are listed as rejected. Logs older than the last six answers shrink
+to one line. What is running right now (`p1 "npm run dev" →
+http://localhost:5173`) goes on your newest message.
+
 The webview is Svelte 5 (`src/webview/components/`). Its state is a plain
 reducer, `src/webview/view-model.ts`, tested under `node --test`; the
 components only read it and post what you did.
@@ -210,7 +218,7 @@ server now reports in the files it wrote.
 | Tool | Description |
 |---|---|
 | `ys_run_command` | Propose a shell command; it runs after approval and the result starts with its exit code, then stdout and stderr. `timeout_s` (default 120, max 900). |
-| `ys_process` | Background commands (a dev server, a watcher). `action: "start"` proposes one, with the same approval; `"output"` reads what it printed since the last read (`wait_s` to wait for a server); `"stop"` ends it. All of them stop when the window closes. |
+| `ys_process` | Background commands (a dev server, a watcher). `action: "start"` proposes one, with the same approval, and waits up to 5s for the address it prints (`p1 is serving http://localhost:5173`) or for it to exit; `"output"` reads what it printed since the last read (`wait_s` to wait); `"stop"` ends it. All of them stop when the window closes. |
 
 Commands run with your shell and environment; their output streams into the
 **Yellowscript Commands** output channel. **Always allow** on the prompt adds

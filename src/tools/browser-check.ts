@@ -372,8 +372,15 @@ export function createCheckPageTool(deps: CheckPageDeps): Tool {
           saved = null
         }
       }
-      const problems = check.events.some((e) => e.kind === 'exception' || e.kind === 'error' || e.kind === 'request-failed')
-      const result = toolOk(formatPageCheck(check, saved), `ys_check_page — ${problems ? 'problems found' : 'no errors'}`)
+      const order: PageEvent['kind'][] = ['exception', 'error', 'request-failed']
+      const problems = check.events.filter((e) => order.includes(e.kind)).sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))
+      const result = toolOk(formatPageCheck(check, saved), `ys_check_page — ${problems.length ? 'problems found' : 'no errors'}`)
+      result.effect = {
+        kind: 'check',
+        target: resolved.url,
+        problems: problems.length + (check.loaded ? 0 : 1),
+        first: check.loaded ? (problems[0]?.text.split('\n')[0]!.slice(0, 160) ?? null) : 'did not finish loading',
+      }
       if (check.screenshot) result.images = [`data:image/png;base64,${check.screenshot}`]
       return result
     },

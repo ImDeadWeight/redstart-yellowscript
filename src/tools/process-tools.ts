@@ -100,10 +100,12 @@ function stop(processes: BackgroundProcesses, args: unknown): ToolResult {
   if (!id) return toolError('ys_process stop requires an "id", e.g. {"action": "stop", "id": "p1"}.')
   const stopped = processes.stop(id)
   if (!stopped) return toolError(`There is no background process "${id}".`)
-  return toolOk(
+  const result = toolOk(
     stopped.running ? `Stopping ${id} (${stopped.command}).` : `${id} had already exited (code ${stopped.exitCode ?? 'none'}).`,
     `ys_process stop — ${id}`,
   )
+  result.effect = { kind: 'stop', processId: id }
+  return result
 }
 
 export function createProcessTool(processes: BackgroundProcesses): Tool {

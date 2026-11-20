@@ -791,3 +791,117 @@ describe('ChatSession — approvals', () => {
     assert.equal(await pending, 'deny')
   })
 })
+
+// ---------------------------------------------------------------------------
+// The run log: what an earlier message's run did, sent with later requests.
+// ---------------------------------------------------------------------------
+
+describe('ChatSession run log', () => {
+  const workspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-runlog-')))
+  fs.writeFileSync(path.join(workspace, 'game.js'), 'let x = 1\n')
+  after(() => fs.rmSync(workspace, { recursive: true, force: true }))
+
+  const registry = () =>
+    createToolRegistry({
+      ripgrepPath: null,
+      diagnostics: () => [],
+      editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }),
+    })
+
+  /** Each send runs the next script; every request is kept. */
+  function session(scripts: StreamScript[], extra: Partial<SessionDeps> = {}) {
+    const requests: ChatCompletionRequest[] = []
+    let n = 0
+    const s = new ChatSession({
+      getClient: () => fakeClient((req, handlers, signal) => {
+        requests.push(structuredClone(req))
+        const script = scripts.shift()
+        if (!script) throw new Error('no script left')
+        return script(req, handlers, signal)
+      }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: () => {},
+      newId: () => `id-${++n}`,
+      tools: () => registry(),
+      toolContext: () => ({ workspaceRoots: [workspace] }),
+      approveChange: async () => true,
+      ...extra,
+    })
+    return { s, requests }
+  }
+
+  const call = (name: string, args: unknown): StreamScript => async () =>
+    emptyResult({ toolCalls: [{ index: 0, id: `c-${name}`, function: { name, arguments: JSON.stringify(args) } }] })
+  const assistantTexts = (req: ChatCompletionRequest) =>
+    req.messages.filter((m) => m.role === 'assistant').map((m) => m.content as string)
+
+  test('the second message knows which file the first one wrote', async () => {
+    const { s, requests } = session([
+      call('ys_write_file', { path: 'src/new.js', content: 'export const a = 1\n' }),
+      says('Created src/new.js.'),
+      says('Done.'),
+    ])
+    await s.send('build X')
+    await s.send('now change the file you made')
+    const second = requests.at(-1)!
+    assert.deepEqual(assistantTexts(second), ['Created src/new.js.\n\n[What this run did]\ncreated src/new.js'])
+  })
+
+  test('a rejected write is sent as rejected', async () => {
+    const { s, requests } = session(
+      [call('ys_replace', { path: 'game.js', old_string: 'let x = 1', new_string: 'let x = 2' }), says('I tried.'), says('ok')],
+      { approveChange: async () => false },
+    )
+    await s.send('change x')
+    await s.send('again')
+    assert.match(assistantTexts(requests.at(-1)!)[0]!, /rejected, NOT written: game\.js/)
+  })
+
+  test('a turn that failed after a write still sends what it did, without its error', async () => {
+    const { s, requests } = session([
+      call('ys_write_file', { path: 'half.js', content: '1\n' }),
+      async () => {
+        throw new Error('stream died')
+      },
+      says('ok'),
+    ])
+    await s.send('build')
+    await s.send('what happened?')
+    const texts = assistantTexts(requests.at(-1)!)
+    assert.deepEqual(texts, ['[What this run did]\ncreated half.js'])
+    assert.ok(!texts.join('').includes('stream died'))
+  })
+
+  test('a run that only read sends no log', async () => {
+    const { s, requests } = session([call('ys_read_file', { path: 'game.js' }), says('x is 1.'), says('ok')])
+    await s.send('what is x')
+    await s.send('thanks')
+    assert.deepEqual(assistantTexts(requests.at(-1)!), ['x is 1.'])
+  })
+
+  test('logs older than the last 6 assistant messages collapse to one line', async () => {
+    const scripts: StreamScript[] = []
+    for (let i = 0; i < 7; i++) scripts.push(call('ys_write_file', { path: `f${i}.js`, content: `${i}\n` }), says(`made f${i}`))
+    scripts.push(says('ok'))
+    const { s, requests } = session(scripts)
+    for (let i = 0; i < 7; i++) await s.send(`make f${i}`)
+    await s.send('done?')
+    const texts = assistantTexts(requests.at(-1)!)
+    assert.equal(texts.length, 7)
+    assert.equal(texts[0], 'made f0\n\n[Earlier run: wrote 1 file]')
+    assert.equal(texts[1], 'made f1\n\n[What this run did]\ncreated f1.js')
+  })
+
+  test('the live line goes on the newest message only, and is not stored', async () => {
+    let live: string | null = 'Running now: p1 "npm run dev" → http://localhost:5173/ (just started)'
+    const { s, requests } = session([says('one'), says('two')], { liveState: () => live })
+    await s.send('first')
+    live = null
+    await s.send('second')
+    const [first, second] = requests
+    assert.equal(first!.messages.at(-1)!.content, '[Running now: p1 "npm run dev" → http://localhost:5173/ (just started)]\n\nfirst')
+    const users = second!.messages.filter((m) => m.role === 'user').map((m) => m.content)
+    assert.deepEqual(users, ['first', 'second'])
+  })
+})

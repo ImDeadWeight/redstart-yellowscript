@@ -33,7 +33,8 @@ import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../ag
 import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
-import type { ToolContext } from '../tools/types.ts'
+import type { ToolContext, ToolEffect } from '../tools/types.ts'
+import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
 
 /** Outbound protocol messages, before the owning conversation's id is tagged
  *  on. Distributes the `conversationId` omission across the union so callers can
@@ -86,6 +87,9 @@ export interface SessionDeps {
   /** A system message about the workspace (its instructions, its files),
    *  sent first on every request that carries tools. */
   workspaceContext?: () => string | null
+  /** What is running right now (a dev server and its address), computed on
+   *  each request and put before the newest message, not stored. */
+  liveState?: () => string | null
   /** The plan changed (null: cleared), so the host can keep it on disk. */
   onPlanChanged?: (steps: PlanStep[] | null) => void
   /** After an applied write: the problems now in those files, for the model. */
@@ -341,6 +345,9 @@ export class ChatSession {
 
     const controller = new AbortController()
     this.controller = controller
+    // What the run changes, kept as it happens: a turn that fails after three
+    // writes still made those writes, and the next message must know.
+    const effects: ToolEffect[] = []
 
     try {
       const handlers = {
@@ -411,6 +418,10 @@ export class ChatSession {
                 })
               },
               onToolResult: (call, toolResult) => {
+                if (toolResult.effect) {
+                  effects.push(toolResult.effect)
+                  turn.run = [...effects]
+                }
                 turn.tools = (turn.tools ?? []).map((card) =>
                   card.callId === call.id
                     ? {
@@ -563,13 +574,29 @@ export class ChatSession {
     const workspace = registry ? (this.deps.workspaceContext?.() ?? null) : null
     if (workspace) messages.push({ role: 'system', content: workspace })
 
+    // The newest assistant messages keep their full run log; older ones get
+    // one line. Decided by position, so a message's log stays the same text
+    // until FULL_LOGS_KEPT newer ones push it out, and the cache holds.
+    const assistants = this.messages.filter((m) => m.role === 'assistant' && !m.streaming)
+    const fullFrom = assistants.length - FULL_LOGS_KEPT
+    let assistantIndex = -1
+
     for (const message of this.messages) {
       if (message.role === 'assistant') {
-        if (message.error) continue
-        if (!message.content && !message.reasoning) continue
+        assistantIndex++
+        const log = message.run?.length
+          ? assistantIndex >= fullFrom ? formatRunLog(message.run) : collapsedRunLog(message.run)
+          : null
+        // A failed turn's text stays out (replaying an error teaches the model
+        // to imitate it), but what its run did is real.
+        if (message.error) {
+          if (log) messages.push({ role: 'assistant', content: log })
+          continue
+        }
+        if (!message.content && !message.reasoning && !log) continue
         const entry: ChatCompletionRequest['messages'][number] = {
           role: 'assistant',
-          content: message.content,
+          content: log ? (message.content ? `${message.content}\n\n${log}` : log) : message.content,
         }
         if (INCLUDE_REASONING_IN_CONTEXT && message.reasoning) {
           entry.reasoning_content = message.reasoning
@@ -578,6 +605,15 @@ export class ChatSession {
       } else {
         messages.push({ role: 'user', content: message.content })
       }
+    }
+
+    // Live state goes on the newest message, not in the system message: it
+    // changes whenever a process starts or stops, and a change at the start
+    // of the request would cost the whole prompt cache.
+    const live = registry ? (this.deps.liveState?.() ?? null) : null
+    const newest = messages.at(-1)
+    if (live && newest?.role === 'user' && typeof newest.content === 'string') {
+      newest.content = `[${live}]\n\n${newest.content}`
     }
 
     // No `tools` in Phase 1. That is load-bearing, not an omission: the gateway

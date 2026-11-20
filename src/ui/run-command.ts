@@ -19,7 +19,7 @@
 import * as vscode from 'vscode'
 
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
-import { formatCommandRun, runCommandLine, runFailed, type BackgroundProcesses } from '../tools/process-runner.ts'
+import { formatCommandRun, runCommandLine, runFailed, startInBackground, type BackgroundProcesses } from '../tools/process-runner.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
 import type { AskApproval } from '../chat/approvals.ts'
@@ -75,18 +75,8 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
 
     if (pending.background) {
       try {
-        const started = deps.processes.start(pending.command, pending.cwd)
-        // Give it a moment, so a command that fails at once says so now.
-        const first = await deps.processes.output(started.id, { waitMs: 3_000 })
-        const state = first?.process.running ? 'is running' : `exited at once with code ${first?.process.exitCode ?? 'none'}`
-        const text = first?.text.trimEnd()
-        return {
-          text:
-            `Started ${started.id}: ${pending.command} — it ${state}.\n` +
-            (text ? `--- first output ---\n${text.slice(-4_000)}\n` : '(no output yet)\n') +
-            `Read more with ys_process {"action":"output","id":"${started.id}"}; end it with "action":"stop".`,
-          isError: first ? !first.process.running && first.process.exitCode !== 0 : false,
-        }
+        // Waits for its address or its exit, so the model is told which.
+        return await startInBackground(deps.processes, pending.command, pending.cwd)
       } catch (err) {
         return { text: `Could not start the command: ${err instanceof Error ? err.message : String(err)}`, isError: true }
       }
@@ -101,6 +91,6 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
     })
     const text = formatCommandRun(run)
     channel.appendLine(`[${text.split('\n')[0]}]`)
-    return { text, isError: runFailed(run) }
+    return { text, isError: runFailed(run), exitCode: run.exitCode }
   }
 }

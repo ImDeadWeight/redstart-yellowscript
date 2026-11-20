@@ -113,6 +113,21 @@ describe('runTask', () => {
     assert.match(String(client.requests[0]!.messages[0]!.content), /The workspace is ys-bench-fix-crash-/)
   })
 
+  test('a follow-up is a new request carrying the first run\'s log', async () => {
+    const followUp = tasks.find((t) => t.id === 'follow-up-edit')!
+    const client = scripted([
+      call('c1', 'ys_write_file', { path: 'src/lib/greeting.js', content: 'export function greet(name) {\n  return `Hello, ${name}!`\n}\n' }),
+      { content: 'Added greet in src/lib/greeting.js.' },
+      call('c2', 'ys_replace', { path: 'src/lib/greeting.js', old_string: 'greet(name) {\n  return `Hello,', new_string: 'greet(name, greeting = "Hello") {\n  return `${greeting},' }),
+      { content: 'Done.' },
+    ])
+    const record = await runTask(followUp, { client, label: 'scripted' })
+    assert.equal(record.pass, true, record.check)
+    const second = client.requests[2]!.messages
+    assert.equal(second.at(-2)!.content, 'Added greet in src/lib/greeting.js.\n\n[What this run did]\ncreated src/lib/greeting.js')
+    assert.match(String(second.at(-1)!.content), /optional second parameter/)
+  })
+
   test('a model that gives up fails, with the check saying why', async () => {
     const record = await runTask(fixCrash, { client: scripted([{ content: 'I cannot fix this.' }]), label: 'scripted' })
     assert.equal(record.pass, false)

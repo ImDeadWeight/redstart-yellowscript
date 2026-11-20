@@ -20,9 +20,9 @@ costs there, and phase 0 makes room first.
 | # | Item | Phase | Where | State |
 |---|---|---|---|---|
 | 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core | Done: 11,120 → 6,674 characters; repair in Yellowscript until agent-core takes it |
-| 1 | Run log carried into the next message | 1 | Yellowscript | |
+| 1 | Run log carried into the next message | 1 | Yellowscript | Done; live line on the newest message (see item) |
 | 2 | Task summary card | 1 | Yellowscript | |
-| 3 | Dev-server URL detection | 1 | Yellowscript | |
+| 3 | Dev-server URL detection | 1 | Yellowscript | Done |
 | 16 | Protected paths (before 15) | 1 | Yellowscript | |
 | 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | |
 | 4 | Outline, symbols, references | 2 | Yellowscript | |
@@ -143,8 +143,11 @@ the same message. The text is what the model said; the log is what it did.
   `run-log.ts`, not in the context budget, so the prefix stays stable from
   request to request and the prompt cache holds.
 
-**Live state** goes in the workspace system message, built fresh on each
-request (extend `buildWorkspaceContext`'s caller, not the stored log):
+**Live state** is built fresh on each request. *As built:* it is prefixed to
+the newest user message, not put in the workspace system message: a change
+at the start of the request (a process starting or stopping) would cost the
+whole prompt cache, and Qwen's chat template refuses a system message
+anywhere but first.
 
 ```
 Running now: p1 "npm run dev" → http://localhost:5173 (started 12 min ago)

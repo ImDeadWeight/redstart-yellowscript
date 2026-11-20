@@ -110,7 +110,46 @@ export interface ToolResult {
   /** Set by the registry when the call's arguments were malformed JSON that
    *  it repaired (argument-repair.ts). Counted by the bench; not shown. */
   argumentsRepaired?: readonly string[]
+  /** What the call changed or found, as data: the run log (chat/run-log.ts)
+   *  and the task summary are built from these, not from `content`. */
+  effect?: ToolEffect
 }
+
+/**
+ * What a tool call did, for the run log. JSON-safe: stored with the
+ * transcript. Reads and searches have none; they changed nothing.
+ */
+export type ToolEffect =
+  | {
+      kind: 'write'
+      /** False when the person rejected it: the model must not assume it happened. */
+      applied: boolean
+      files: { path: string; isNew: boolean; isDeleted: boolean }[]
+    }
+  | {
+      kind: 'command'
+      command: string
+      /** False when the person rejected it. */
+      ran: boolean
+      exitCode: number | null
+      /** Started in the background, as this process id. */
+      processId?: string
+      /** The address a background process said it serves. */
+      url?: string
+      /** The run did not succeed (non-zero exit, timeout, could not start). */
+      failed?: boolean
+      /** A failed run's last line of output, for the log. */
+      lastLine?: string
+    }
+  | { kind: 'stop'; processId: string }
+  | {
+      kind: 'check'
+      target: string
+      /** Exceptions, console errors and failed requests. */
+      problems: number
+      /** The first of them, since that is what the next message asks about. */
+      first: string | null
+    }
 
 /** A shell command the model proposes to run, for always-ask approval. */
 export interface PendingCommand {

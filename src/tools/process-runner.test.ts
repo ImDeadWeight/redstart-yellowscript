@@ -10,7 +10,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, describe, it } from 'node:test'
 
-import { BackgroundProcesses, capHeadTail, formatCommandRun, runCommandLine, runFailed } from './process-runner.ts'
+import { BackgroundProcesses, capHeadTail, describeRunning, detectServerUrl, formatCommandRun, runCommandLine, runFailed, startInBackground } from './process-runner.ts'
 import { createProcessTool, legacyProcessCall } from './process-tools.ts'
 import { allowPrefixFor, isCommandAllowed } from './approval.ts'
 
@@ -113,6 +113,50 @@ describe('BackgroundProcesses and the process tools', () => {
     assert.deepEqual(legacyProcessCall('ws_process_stop', { id: 'p1' }), { name: 'ys_process', args: { id: 'p1', action: 'stop' } })
     assert.equal(legacyProcessCall('ys_process', {}), null)
     assert.equal(legacyProcessCall('ys_read_file', {}), null)
+  })
+})
+
+describe('dev-server address detection', () => {
+  // The banners as these servers print them, colour codes included.
+  const banners: [string, string, string][] = [
+    ['Vite', '\n  \u001b[32m\u001b[1mVITE\u001b[22m v5.4.0\u001b[39m  \u001b[2mready in \u001b[0m\u001b[1m312\u001b[22m\u001b[2m\u001b[0m ms\u001b[22m\n\n  \u001b[32m➜\u001b[39m  \u001b[1mLocal\u001b[22m:   \u001b[36mhttp://localhost:\u001b[1m5173\u001b[22m/\u001b[39m\n  \u001b[32m➜\u001b[39m  \u001b[1mNetwork\u001b[22m\u001b[2m: use \u001b[22m\u001b[1m--host\u001b[22m\u001b[2m to expose\u001b[22m\n', 'http://localhost:5173/'],
+    ['Next', '  ▲ Next.js 14.2.3\n  - Local:        http://localhost:3000\n  - Environments: .env\n\n ✓ Starting...\n ✓ Ready in 1830ms\n', 'http://localhost:3000'],
+    ['http-server', 'Starting up http-server, serving ./\n\nhttp-server version: 14.1.1\n\nAvailable on:\n  http://127.0.0.1:8080\n  http://192.168.1.20:8080\nHit CTRL-C to stop the server\n', 'http://127.0.0.1:8080'],
+    ['python -m http.server', 'Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...\n', 'http://localhost:8000/'],
+    ['python -m http.server, IPv6', 'Serving HTTP on :: port 8000 (http://[::]:8000/) ...\n', 'http://localhost:8000/'],
+  ]
+  for (const [name, banner, url] of banners) {
+    it(`finds ${name}'s address`, () => assert.equal(detectServerUrl(banner), url))
+  }
+
+  it('ignores addresses on other machines, and text with none', () => {
+    assert.equal(detectServerUrl('Available on http://192.168.1.20:8080'), null)
+    assert.equal(detectServerUrl('compiled successfully'), null)
+  })
+
+  it('a start waits for the address and says it is serving', async () => {
+    const processes = new BackgroundProcesses()
+    try {
+      const code = "setTimeout(() => console.log('Local: http://localhost:4321/'), 300); setInterval(() => {}, 1000)"
+      const started = await startInBackground(processes, nodeLine(code), cwd, 5_000)
+      assert.equal(started.url, 'http://localhost:4321/')
+      assert.match(started.text, /^p1 is serving http:\/\/localhost:4321\//)
+      assert.equal(started.isError, false)
+      assert.equal(processes.list()[0]!.url, 'http://localhost:4321/')
+      assert.match(describeRunning(processes.list(), processes.list()[0]!.startedAt + 12 * 60_000)!, /^Running now: p1 ".*" → http:\/\/localhost:4321\/ \(started 12 min ago\)$/)
+    } finally {
+      processes.stopAll()
+    }
+  })
+
+  it('a start that exits says so, with its code and output', async () => {
+    const processes = new BackgroundProcesses()
+    const started = await startInBackground(processes, nodeLine("console.error('port in use'); process.exit(1)"), cwd, 5_000)
+    assert.match(started.text, /^p1 exited with code 1/)
+    assert.match(started.text, /port in use/)
+    assert.equal(started.isError, true)
+    assert.equal(started.exitCode, 1)
+    assert.equal(describeRunning(processes.list()), null, 'a process that died is not listed as running')
   })
 })
 

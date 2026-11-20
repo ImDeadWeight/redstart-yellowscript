@@ -33,6 +33,7 @@
 // =============================================================================
 
 import type { StreamChannel } from '../nest/streaming.ts'
+import type { ToolEffect } from '../tools/types.ts'
 
 /**
  * Bumped when a message shape changes incompatibly. The webview announces the
@@ -71,6 +72,10 @@ export interface ChatMessageView {
   /** The tools this assistant turn ran, in order. Kept on the turn (not only
    *  sent as live messages) so a rebuilt panel can draw the cards again. */
   tools?: ToolCardView[]
+  /** What this turn's run changed (writes, commands, processes, page
+   *  checks), in order. Sent to the model after the turn's text on later
+   *  requests (chat/run-log.ts), and drawn as the task summary. */
+  run?: ToolEffect[]
 }
 
 /** One tool call on an assistant turn. */

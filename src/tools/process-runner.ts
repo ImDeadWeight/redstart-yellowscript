@@ -186,6 +186,89 @@ export interface BackgroundProcess {
   /** null while running. */
   exitCode: number | null
   running: boolean
+  /** The first local address it printed (a dev server's banner), if any. */
+  url?: string
+}
+
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007/g
+const LOCAL_URL = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):\d{2,5}(?:\/[^\s'"()<>\]]*)?/i
+
+/**
+ * The first local address in a process's output: the line a dev server prints
+ * when it is ready. Colour codes are stripped first (Vite bolds the port), and
+ * 0.0.0.0 and [::] become localhost, which is where ys_check_page looks.
+ */
+export function detectServerUrl(text: string): string | null {
+  const match = LOCAL_URL.exec(text.replace(ANSI, ''))
+  if (!match) return null
+  return match[0].replace(/[.,;:]+$/, '').replace(/\/\/(?:0\.0\.0\.0|\[::\])(?=:)/, '//localhost')
+}
+
+/** What starting a background command produced, for the model and the log. */
+export interface BackgroundStart {
+  text: string
+  isError: boolean
+  exitCode: number | null
+  processId: string
+  url?: string
+}
+
+/** How long a start waits for an address or an exit before answering. */
+export const START_WAIT_MS = 5_000
+
+/**
+ * Start an approved background command and wait up to `waitMs` for it to
+ * print a local address or exit, so the model is told which instead of
+ * polling and parsing a banner. Throws as `start` does when too many run.
+ */
+export async function startInBackground(processes: BackgroundProcesses, command: string, cwd: string, waitMs = START_WAIT_MS): Promise<BackgroundStart> {
+  const started = processes.start(command, cwd)
+  const settled = await processes.waitForStart(started.id, waitMs)
+  const first = await processes.output(started.id)
+  const output = first?.text.trimEnd() ?? ''
+  const tail = output ? `\n--- output ---\n${output.slice(-4_000)}` : ''
+  const id = started.id
+  const more = `Read more with ys_process {"action":"output","id":"${id}"}; end it with "action":"stop".`
+
+  if (!settled.running) {
+    const code = settled.exitCode
+    return {
+      text: `${id} exited with code ${code ?? 'none'}: ${command}${tail || '\n(no output)'}`,
+      isError: code !== 0,
+      exitCode: code,
+      processId: id,
+    }
+  }
+  if (settled.url) {
+    return {
+      text: `${id} is serving ${settled.url} (${command}). Check it with ys_check_page.${tail}\n${more}`,
+      isError: false,
+      exitCode: null,
+      processId: id,
+      url: settled.url,
+    }
+  }
+  return {
+    text: `${id} is running (${command}); no address seen in its first ${Math.round(waitMs / 1000)}s.${tail || '\n(no output yet)'}\n${more}`,
+    isError: false,
+    exitCode: null,
+    processId: id,
+  }
+}
+
+/**
+ * The live line for the workspace message: what is running now, so a new
+ * message knows the dev server is up. Null when nothing runs.
+ */
+export function describeRunning(list: readonly BackgroundProcess[], now = Date.now()): string | null {
+  const running = list.filter((p) => p.running)
+  if (running.length === 0) return null
+  const parts = running.map((p) => {
+    const minutes = Math.max(0, Math.round((now - p.startedAt) / 60_000))
+    const age = minutes < 1 ? 'just started' : `started ${minutes} min ago`
+    return `${p.id} "${p.command}"${p.url ? ` → ${p.url}` : ''} (${age})`
+  })
+  return `Running now: ${parts.join('; ')}`
 }
 
 interface Entry extends BackgroundProcess {
@@ -220,6 +303,11 @@ export class BackgroundProcesses {
     const entry: Entry = { id, command, cwd, startedAt: Date.now(), exitCode: null, running: true, child, buffer: '', dropped: 0, readTo: 0 }
     const append = (chunk: string) => {
       entry.buffer += chunk
+      // Look at the tail, so a banner split across two chunks is still seen.
+      if (!entry.url) {
+        const url = detectServerUrl(entry.buffer.slice(-(chunk.length + 400)))
+        if (url) entry.url = url
+      }
       if (entry.buffer.length > BACKGROUND_BUFFER_CHARS) {
         const over = entry.buffer.length - BACKGROUND_BUFFER_CHARS
         entry.buffer = entry.buffer.slice(over)
@@ -259,6 +347,20 @@ export class BackgroundProcesses {
     return { process: this.view(entry), text: entry.buffer.slice(from - entry.dropped), missed }
   }
 
+  /**
+   * Wait up to `waitMs` for the process to print a local address or to exit,
+   * whichever comes first.
+   */
+  async waitForStart(id: string, waitMs = START_WAIT_MS): Promise<BackgroundProcess> {
+    const entry = this.entries.get(id)
+    if (!entry) throw new Error(`There is no background process "${id}".`)
+    const deadline = Date.now() + waitMs
+    while (Date.now() < deadline && entry.running && !entry.url) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return this.view(entry)
+  }
+
   stop(id: string): BackgroundProcess | null {
     const entry = this.entries.get(id)
     if (!entry) return null
@@ -283,7 +385,9 @@ export class BackgroundProcesses {
   }
 
   private view(e: Entry): BackgroundProcess {
-    return { id: e.id, command: e.command, cwd: e.cwd, startedAt: e.startedAt, exitCode: e.exitCode, running: e.running }
+    const view: BackgroundProcess = { id: e.id, command: e.command, cwd: e.cwd, startedAt: e.startedAt, exitCode: e.exitCode, running: e.running }
+    if (e.url) view.url = e.url
+    return view
   }
 }
 

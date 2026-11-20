@@ -53,7 +53,7 @@ import {
 } from './ui/tool-providers.ts'
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import { makeCommandGate } from './ui/run-command.ts'
-import { BackgroundProcesses } from './tools/process-runner.ts'
+import { BackgroundProcesses, describeRunning } from './tools/process-runner.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
 import { approvalInfo, callWithApproval } from './nest/approval.ts'
 import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
@@ -567,6 +567,7 @@ function getSession(id: string): ChatSession {
         const root = workspaceRoots()[0]
         return root ? buildWorkspaceContext(root) : null
       },
+      liveState: () => (backgroundProcesses ? describeRunning(backgroundProcesses.list()) : null),
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
       onContextTrimmed: (report) => {
         output?.info(

@@ -23,11 +23,14 @@ import type {
   ConversationState,
   HostMessage,
   PlanStepView,
+  QuestionItemView,
   QuestionView,
   ToolCardView,
   TurnStats,
 } from './protocol.ts'
+import { ApprovalQueue, type ApprovalRequest } from './approvals.ts'
 import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
+import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext } from '../tools/types.ts'
@@ -76,6 +79,19 @@ export interface SessionDeps {
   /** The Nest project the workspace is linked to, sent with every request so
    *  Nest adds its instructions and memories. */
   projectId?: () => string | null
+  /** The connection's context window, so a long run is trimmed to fit. */
+  context?: () => ContextTracker | null
+  /** Round trips before the person is asked whether to keep going. */
+  maxTurns?: () => number
+  /** A system message about the workspace (its instructions, its files),
+   *  sent first on every request that carries tools. */
+  workspaceContext?: () => string | null
+  /** The plan changed (null: cleared), so the host can keep it on disk. */
+  onPlanChanged?: (steps: PlanStep[] | null) => void
+  /** After an applied write: the problems now in those files, for the model. */
+  diagnosticsAfterWrite?: (files: string[]) => Promise<string | null>
+  /** Older messages of a run were trimmed to fit the window (for the log). */
+  onContextTrimmed?: (report: FitReport) => void
   /**
    * The conversation this session owns. Every protocol message it emits is
    * tagged with this id so the webview can route a delta to the right tab even
@@ -103,13 +119,33 @@ export class ChatSession {
   private plan: PlanStepView[] | null = null
   /** The ask_user question the running flow is waiting on. */
   private question: { view: QuestionView; resolve: (answer: AskAnswer | null) => void } | null = null
-  /** The open question was answered by a typed message, not the card. */
-  private answeredByMessage = false
   /** The running flow is waiting at its turn limit for "keep going?". */
   private limitWait: ((go: boolean) => void) | null = null
+  /** Tool calls waiting for allow / deny, shown one at a time. */
+  private readonly approvals: ApprovalQueue
 
   constructor(deps: SessionDeps) {
     this.deps = deps
+    this.approvals = new ApprovalQueue(() => this.emitState(), () => this.nextId())
+  }
+
+  /**
+   * Ask the person to allow a tool call, on the card in this conversation.
+   * Resolves with the chosen option id; the request's deny option when the
+   * turn is stopped first. The gates the host builds for this session call
+   * this, so an approval always shows in the tab whose run asked for it.
+   */
+  readonly askApproval = (request: ApprovalRequest): Promise<string> =>
+    this.approvals.ask(request, this.controller?.signal)
+
+  /** Decide the open approval. False for a stale id or an unknown choice. */
+  approve(id: string, choice: string): boolean {
+    return this.approvals.decide(id, choice)
+  }
+
+  /** Show one of the open write approval's files as a diff. */
+  openApprovalFile(id: string, index: number): void {
+    this.approvals.openFile(id, index)
   }
 
   /** Prompts queued behind the running turn, for the tab strip / composer. */
@@ -141,6 +177,7 @@ export class ChatSession {
       question: this.question ? { ...this.question.view } : null,
       plan: this.plan ? this.plan.map((step) => ({ ...step })) : null,
       atTurnLimit: this.limitWait !== null,
+      approval: this.approvals.view(),
     }
   }
 
@@ -173,6 +210,7 @@ export class ChatSession {
     this.plan = null
     this.emitState()
     this.deps.onPersist?.()
+    this.deps.onPlanChanged?.(null)
   }
 
   /** At the turn limit: keep going (true) or stop. */
@@ -222,6 +260,7 @@ export class ChatSession {
     this.controller = null
     // A flow waiting on the person ends with the abort: nobody will answer.
     if (this.question) this.answer(this.question.view.id, null)
+    this.approvals.denyAll()
     this.continueAtLimit(false)
   }
 
@@ -245,9 +284,7 @@ export class ChatSession {
     // A message typed while the assistant waits on a question IS the answer
     // (agent-core's contract): it goes to the question, not into the queue.
     if (this.question && !workflow) {
-      // Flagged so a several-question ask takes it as one reply to all of
-      // them, rather than an answer to the one on screen.
-      this.answeredByMessage = true
+      // On a several-question card it is one reply to all of them.
       this.answer(this.question.view.id, { text: prompt })
       return
     }
@@ -331,7 +368,10 @@ export class ChatSession {
             client,
             request: this.buildRequest(registry),
             tools: registry,
-            toolContext: this.deps.toolContext?.() ?? { workspaceRoots: [] },
+            toolContext: {
+              ...(this.deps.toolContext?.() ?? { workspaceRoots: [] }),
+              conversationId: this.deps.conversationId,
+            },
             signal: controller.signal,
             approveChange: this.deps.approveChange,
             approveCommand: this.deps.approveCommand,
@@ -342,11 +382,16 @@ export class ChatSession {
                 this.plan = steps.map((step) => ({ ...step }))
                 this.emitState()
                 this.deps.onPersist?.()
+                this.deps.onPlanChanged?.(this.plan)
               },
             },
             askContinue: (signal) => this.waitAtLimit(signal),
+            context: this.deps.context?.() ?? undefined,
+            diagnosticsAfterWrite: this.deps.diagnosticsAfterWrite,
+            ...(this.deps.maxTurns ? { maxIterations: this.deps.maxTurns() } : {}),
             handlers: {
               ...handlers,
+              ...(this.deps.onContextTrimmed ? { onContextTrimmed: this.deps.onContextTrimmed } : {}),
               onToolCall: (call, recovered) => {
                 const card: ToolCardView = {
                   callId: call.id,
@@ -438,47 +483,40 @@ export class ChatSession {
   /**
    * The loop's ask port: show the questions, wait for the person.
    *
-   * agent-core sends 1 to 4 questions per call. The card shows one at a time,
-   * so several are asked in turn and returned as `answers`, one per question
-   * (null where skipped). A message typed instead of using the card is one
-   * reply to all of them, as the core expects, and ends the sequence.
+   * agent-core sends 1 to 4 questions per call. Several are one card with a
+   * tab each, answered as `answers` (one reply per question, null where not
+   * answered). A message typed instead of using the card is one reply to all
+   * of them, as the core expects.
    */
-  private async ask(request: AskRequest, callId: string | undefined, signal?: AbortSignal): Promise<AskAnswer | null> {
+  private ask(request: AskRequest, callId: string | undefined, signal?: AbortSignal): Promise<AskAnswer | null> {
     const questions = request.questions
-    const baseId = callId ?? this.nextId()
-    if (questions.length === 1) return this.askOne(questions[0]!, baseId, signal)
-
-    const answers: Array<AskAnswer | null> = []
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i]!
-      const label = q.header ?? `Question ${i + 1}`
-      const reply = await this.askOne(
-        { ...q, question: `${label} (${i + 1} of ${questions.length}): ${q.question}` },
-        `${baseId}#${i + 1}`,
-        signal,
-      )
-      if (signal?.aborted) return null
-      if (this.answeredByMessage) {
-        this.answeredByMessage = false
-        return reply
-      }
-      answers.push(reply)
-    }
-    return answers.every((a) => a === null) ? null : { answers }
+    const id = callId ?? this.nextId()
+    if (questions.length <= 1) return this.askOne(questions[0]!, id, signal)
+    return this.askOne(questions[0]!, id, signal, questions.map((q) => ({
+      ...(q.header ? { header: q.header } : {}),
+      question: q.question,
+      multiSelect: q.multiSelect,
+      ...(q.options && q.options.length > 0 ? { options: [...q.options] } : {}),
+    })))
   }
 
   /** Show one question on the card and wait for its answer (null: skipped). */
-  private askOne(question: AskRequest['questions'][number], id: string, signal?: AbortSignal): Promise<AskAnswer | null> {
+  private askOne(
+    question: AskRequest['questions'][number],
+    id: string,
+    signal?: AbortSignal,
+    questions?: QuestionItemView[],
+  ): Promise<AskAnswer | null> {
     if (signal?.aborted) return Promise.resolve(null)
     // One card at a time: a second ask_user while one is open (a reply with
     // two calls) skips the first rather than stacking cards.
     if (this.question) this.answer(this.question.view.id, null)
-    this.answeredByMessage = false
     const view: QuestionView = {
       id,
       question: question.question,
       multiSelect: question.multiSelect,
       ...(question.options && question.options.length > 0 ? { options: [...question.options] } : {}),
+      ...(questions ? { questions } : {}),
     }
     return new Promise((resolve) => {
       const onAbort = () => this.answer(view.id, null)
@@ -519,6 +557,11 @@ export class ChatSession {
    */
   private buildRequest(registry: ToolRegistry | null): ChatCompletionRequest {
     const messages: ChatCompletionRequest['messages'] = []
+
+    // What the model knows about the workspace before its first call. Only
+    // with tools: without them there is nothing it could do with it.
+    const workspace = registry ? (this.deps.workspaceContext?.() ?? null) : null
+    if (workspace) messages.push({ role: 'system', content: workspace })
 
     for (const message of this.messages) {
       if (message.role === 'assistant') {

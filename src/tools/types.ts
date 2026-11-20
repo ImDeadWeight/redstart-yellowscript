@@ -72,6 +72,9 @@ export interface ToolContext {
   workspaceRoots: readonly string[]
   /** Cancels a long read or walk when the user aborts the turn. */
   signal?: AbortSignal
+  /** The conversation whose run made the call, so a tool that needs the
+   *  person (a Nest tool's approval) asks in the right tab. */
+  conversationId?: string
 }
 
 export interface ToolResult {
@@ -93,6 +96,9 @@ export interface ToolResult {
    * diff review, and the user is the only thing that turns it into bytes.
    */
   pendingWrite?: PendingWrite
+  /** Images (data URLs) that go with the text, e.g. a page screenshot. Sent to
+   *  the model only when it reads images; never shown on the card. */
+  images?: string[]
   /**
    * A shell command the model wants run, planned but NOT yet executed.
    * Phase 4.1's `ys_run_command` returns this for an always-ask confirmation:
@@ -111,6 +117,10 @@ export interface PendingCommand {
   cwd: string
   /** Human label for the UI card. */
   label: string
+  /** One-shot time limit; the runner's default when absent. */
+  timeoutMs?: number
+  /** Start it as a background process (ys_process_start) instead of waiting. */
+  background?: boolean
 }
 
 /** A file the model wants written, decoded to absolute paths and final content.

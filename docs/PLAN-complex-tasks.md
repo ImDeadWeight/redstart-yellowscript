@@ -1,13 +1,14 @@
 # Plan: complex coding tasks
 
-*As of 2026-11-19. Branch `feat/ys-prefix-and-core-resync`.*
+*As of 2026-11-19. Items 11–13 merged in PR #2. Items 1–10, Tier 2 and the
+testing suite (item 14) are on `feat/context-budget`, ready to merge. The next
+round is [PLAN-long-tasks.md](PLAN-long-tasks.md).*
 
 **Goal.** Yellowscript, driving a local model on the Nest, can build a real
 multi-file project end to end: an original single-screen barrel-dodging
 platformer (canvas, own characters and art), and the Redstart website. Both
 need roughly 50–150 tool calls across several sessions, a running dev server,
-and a way to check the result. Today the agent is built for exchanges of about
-ten calls.
+and a way to check the result.
 
 **Target model.** Qwen3.6-35B-A3B (Q3/Q4) on llama.cpp, ~32k context. Every
 budget below is sized for that; a larger window relaxes them but changes none.
@@ -18,156 +19,139 @@ budget below is sized for that; a larger window relaxes them but changes none.
 
 | # | Item | State |
 |---|---|---|
-| 12 | Run the shared agent-core loop | **Done.** PR #1 vendored it; this branch re-syncs to Nest `4a2b8b5` (alpha.16) |
-| 13 | `ys_` tool prefix | **Done** on this branch |
-| 1 | Context budget and compaction | Not started (module vendored, not called) |
-| 2 | Long runs: turn cap and loop detection | Partly: Continue at the limit exists; cap still 10 |
-| 3 | A plan that survives sessions | Partly: `update_plan` checklist exists, not on disk |
-| 4 | Approval friction | Not started |
-| 5 | Reliable command runner | Not started |
-| 6 | Background processes | Not started |
-| 7 | Search-and-replace edit, file ops | Not started |
-| 8 | Diagnostics after each write | Not started |
-| 9 | Check the running page | Not started |
-| 10 | `AGENTS.md` and a workspace overview | Not started (a linked Nest project already adds its instructions) |
-| 11 | `ask_user` | **Done** (PR #1); several questions per call on this branch |
-| 14 | Coding benchmark | Not started |
-| 15 | Milestone ladder | Not started |
+| 1 | Context budget | Done (`feat/context-budget`). Summarising very long histories is open |
+| 2 | Long runs: turn cap and repeat check | Done |
+| 3 | A plan that survives sessions | Done |
+| 4 | Approval friction | Done: task trust for writes, allowlist for commands |
+| 5 | Reliable command runner | Done |
+| 6 | Background processes | Done |
+| 7 | Search-and-replace edit, file ops | Done |
+| 8 | Diagnostics after each write | Done |
+| 9 | Check the running page | Done |
+| 10 | `AGENTS.md` and a workspace overview | Done |
+| 11 | `ask_user` | Done (PR #1, #2); tabbed card on this branch |
+| 12 | Shared agent-core loop | Done (PR #1, #2) |
+| 13 | `ys_` tool prefix | Done (PR #2) |
+| T2 | `call_tool` in the approval gate | Done |
+| 14 | Testing suite / coding benchmark | Done (`npm run live`, `npm run bench`) |
+| 15 | Milestone ladder | Next; see [PLAN-long-tasks.md](PLAN-long-tasks.md) |
+
+Every item has unit tests; `npm run check` passes 615/615. The branch has been
+used against a live Nest; benchmark rows go in
+[bench-results.md](bench-results.md) from the next recorded run.
 
 ---
 
-## Done on this branch
+## What the branch changed
 
-**Item 12 — finishing the agent-core move.**
-- Re-synced `src/vendor/agent-core` from Nest `main` (`4a2b8b5`). Upstream had
-  moved 8 files since the pin (`e1e44b7`), and added `host-tools.mjs`.
-- `ask_user` now carries 1–4 questions. The card still shows one at a time:
-  `ChatSession.ask` asks them in turn and returns `answers[]` (null where
-  skipped). A message typed instead of using the card answers all of them, as
-  agent-core expects. Tests cover both.
-- `.gitattributes` pins `src/vendor/agent-core/**` to LF. With
-  `core.autocrlf=true` every vendored file was checked out CRLF and
-  `npm run check` failed its own hash check on a clean `main`.
+**1 — Context budget** (`src/agent/context-budget.ts`). `n_ctx` comes from
+llama-server's `/props` through the gateway, or from the first
+`exceed_context_size_error`. The gateway's overhead is learned from each
+reply's `prompt_n + cache_n`. Before each request of a run, past 85% of the
+usable window, old tool results become a stub naming the tool and old calls
+lose their long string arguments (valid JSON kept), oldest first, down to 50%.
+One message over 40% is cut to head and tail. User messages and the newest 4
+are never stubbed; images count ~1,000 tokens. Edits are in place, so the
+prefix and the prompt cache stay stable. A refusal anyway: trim harder, retry
+once.
 
-**Item 13 — `ws_` → `ys_`.**
-- Every local tool now uses Nest's reserved Yellowscript prefix
-  (redstart-project `docs/tool-namespacing.md`, enforced by
-  `test-tool-namespacing.mjs`). Admin tool bans can now target Yellowscript.
-- Saved "always allow" settings are migrated on read (`migrateToolNames`).
-- A `ws_*` call replayed from an old transcript runs the `ys_*` tool.
+**2 — Long runs.** 40 turns by default (`agent.maxTurns`); Continue grants as
+many again. A call identical to three earlier ones in the run is not run.
 
-`npm run check`: 497/497 pass. `npm run build`: clean.
+**3 — The plan on disk.** `.yellowscript/PLAN.md`, a task list
+(`[ ] [~] [x] [-]`, notes indented). Written on every plan change, removed when
+the plan is cleared; a new conversation starts with it while a step is open.
+
+**4 — Approval friction.** Writes: "Apply all in this task" lasts until the
+run ends; "Revert Last Task" undoes every write of the last task, newest first.
+A deletion always asks. Commands: `allowedCommands` prefixes run without
+asking; "Always allow" offers the narrowest useful prefix (`npm run build`,
+an interpreter's exact line). A line that chains, pipes, redirects,
+substitutes or has a second line never matches.
+
+**5 — Command runner** (`src/tools/process-runner.ts`). `child_process` with
+the user's shell. "Exit code N · 2.4s" first, then stdout and stderr, each kept
+to head and tail. `timeout_s` (120 default, 900 max) stops the whole tree.
+Output streams into the "Yellowscript Commands" channel.
+
+**6 — Background processes.** `ys_process_start` (approved like a command),
+`ys_process_output` (new output since the last read, `wait_s`),
+`ys_process_stop`. At most four; all stop with the window.
+
+**7 — Edits.** `ys_replace` (exact text, unique unless `replace_all`, line
+endings matched, `$` literal), `ys_delete_file`, `ys_move_file`, all through
+the same review and checkpoint.
+
+**8 — Diagnostics after writes.** Each written file is opened as a document so
+the language server reports on it; the result gets its errors and warnings
+(at most 15) within 2.5s.
+
+**9 — `ys_check_page`** (`src/tools/browser-check.ts`). The machine's
+Edge/Chrome/Chromium, headless, over the DevTools protocol with Node's
+WebSocket: no dependency. Reports exceptions, console errors and warnings,
+failed requests, title, canvases and visible text. Loopback URLs and workspace
+files only. The screenshot is saved to `.yellowscript/screenshots/` and sent
+as an image part only when `/props` says the model reads images.
+
+**10 — Workspace context.** Requests with tools start with a system message:
+the workspace, its `AGENTS.md` (or `CLAUDE.md`, 6,000 characters at most), and
+a two-level file tree (120 entries at most).
+
+**Tier 2.** `call_tool` prompts, grants and denies now name the inner tool.
+Several `ask_user` questions are one card with a tab each.
+
+**Fixes found on the way:** a delete could ride an edit tool's "always allow";
+reverting a created file left it empty; the shadow keyed files by basename;
+the command allowlist collapsed a newline into a space before checking for a
+second command.
 
 ---
 
-## Tier 0 — the loop must sustain a long task
+## 14 — The testing suite
 
-**1. Context budget and compaction.** The biggest blocker. One result can be
-20,000 characters (`MAX_RESULT_CHARS`), about 5k tokens, and nothing trims the
-history, so five file reads fill a 32k window.
-- Read `n_ctx` from the Nest (`/props` or the models list); do not assume it.
-- Count the gateway's injected system prompt and the tool definitions in the
-  budget (Nest learned this the hard way: `context-budget-implementation.md`).
-- Drive the vendored `compaction.mjs`: first shrink old tool results to a
-  one-line stub, then summarise at 85% of the window.
-- Done when: a 30-read run on a 32k model finishes without a context error.
+What exists: `npm run live` (layer 1) and `npm run bench` (layer 2), with 8
+tasks in `bench/tasks/` (7 core, 1 milestone), each with a reference solution
+that `npm test` uses to prove the check is honest. Results are logged in
+[docs/bench-results.md](bench-results.md). The design it was built to:
 
-**2. Long runs.** `DEFAULT_MAX_ITERATIONS = 10` is per flow, and Continue
-resets it.
-- Raise the default to 40 and make it a setting.
-- Detect loops instead of relying on the cap: the same call with the same
-  arguments three times stops the flow with a note to the model.
+Two layers, both runnable from `npm`:
 
-**3. A plan that survives.** Mirror the `update_plan` checklist into
-`.yellowscript/PLAN.md` and load it into a new conversation in the same
-workspace. State on disk is what lets a local model work across sessions.
+1. **A live smoke pass** against the real Nest, scripted the way
+   `npm run smoke` is: `/props` gives `n_ctx`; a 30-read run on a 32k model
+   finishes without a context error (the item 1 "done when"); a background
+   dev server starts, answers, and stops.
+2. **A coding benchmark**, the equivalent of Nest's `scripts/agent-bench`:
+   tasks in copies of `sample-workspace`, run headless against a real Nest,
+   scored by a check script per task.
+   - make failing tests pass; add a feature across 3+ files; fix a broken
+     build; build a canvas game to a spec and pass `ys_check_page`.
+   - Record per model: pass rate, tool-call success, calls recovered from
+     text, turns per task, runs that hit a limit or a context trim.
 
-**4. Approval friction.** A 40-file build is 40 diff reviews today.
-- "Trust this task": auto-apply writes for the rest of the flow, one
-  checkpoint per turn, and a *Revert turn* command.
-- Per-workspace allowlist of command prefixes (`npm test`, `npm run build`,
-  `npx tsc --noEmit`). Commands stay always-ask by default.
+The benchmark needs the loop to run outside VS Code. Everything it calls is
+already `vscode`-free except the approval gates and diagnostics, which the
+bench would supply as an auto-approve policy and `tsc` output.
 
-## Tier 1 — tools these projects need
+## 15 — Milestone ladder
 
-**5. Command runner.** `ys_run_command` uses terminal shell integration and
-falls back to `sendText`, which captures no output.
-- Run through `child_process`, inside the workspace.
-- Result shape from Nest's D15: exit code on the first line, stdout and stderr
-  each capped keeping head and tail, duration, and a timeout.
-
-**6. Background processes.** `ys_process_start`, `ys_process_output`,
-`ys_process_stop`, so `npm run dev` stays up while the model works. Killed when
-the conversation ends or the window closes.
-
-**7. Edits a quantized model can make.** `ys_edit_file` needs a unified diff
-that matches exactly. Add `ys_replace` (`old_string` → `new_string`, must be
-unique). Add `ys_delete_file`, `ys_move_file` and directory creation for
-scaffolding, all through the existing checkpoint.
-
-**8. Feedback after writes.** Append the diagnostics for each written file to
-the write result, so errors arrive without another call.
-
-**9. Check the running page.** A headless-browser tool (Playwright) that loads
-a URL and returns console errors and a short DOM summary, plus a screenshot
-when the model can read images. Open question below.
-
-**10. Project instructions.** Load `AGENTS.md` (then `CLAUDE.md`) from the
-workspace root into the system prompt, plus a short file-tree overview. Nest's
-master plan imports and exports `AGENTS.md` for projects, so keep the format.
-
-## Tier 2 — alignment with Nest
-
-- **`call_tool` in the approval gate.** agent-core added `callToolTarget`
-  (Nest's catalog dispatcher). Yellowscript's `nest/approval.ts` judges a
-  `call_tool` by its own name, so a write inside it is not prompted here. Nest
-  still enforces approval on its side, so this fails as "not done", not as an
-  unapproved write. Unwrap it before deciding.
-- **Several-question card.** Show all of an `ask_user` call's questions at
-  once, as tabs (Nest's D44), instead of in turn.
-- **Re-sync agent-core on every Nest release.** `node scripts/sync-agent-core.mjs
-  E:/redstart-project origin/main`, then `npm run check`.
-
-## Tier 3 — measuring progress
-
-**14. Coding benchmark.** The equivalent of Nest's `scripts/agent-bench`, run
-headless against a real Nest using `sample-workspace` copies:
-- make failing tests pass; add a feature across 3+ files; fix a broken build;
-  build a canvas game to a spec and pass its smoke test.
-- Record per model: pass rate, tool-call success, calls recovered from text,
-  turns per task, runs that hit a limit.
-
-**15. Milestone ladder.** Each must pass before the next:
+Each must pass before the next:
 1. Canvas Pong in one file.
 2. A single-screen platformer: player, ladders, rolling hazards, score.
 3. The full original game: several levels, art, sound, title screen.
 4. The Redstart website, from its existing content.
 
----
+## Still open
 
-## Order of work
-
-1. Items 1 and 2 (the agent can run long).
-2. Items 5, 7 and 8 (it can act and see its errors).
-3. Item 14, a first benchmark row, before tuning anything else.
-4. Items 3, 4, 6 and 10.
-5. Item 9, then the milestones.
-
-## Open questions
-
-- Can the Nest's model read images? That decides whether item 9 returns
-  screenshots or only console and DOM text.
-- What is the real `n_ctx` on the Nest profile used for coding?
+- **Summarising long histories.** Across turns only user and assistant text is
+  sent, so history grows slowly; a very long conversation is never summarised.
+  Drive `compaction.mjs`'s summariser once a real conversation hits it.
+- **Re-sync agent-core on every Nest release:** `node scripts/sync-agent-core.mjs
+  E:/redstart-project origin/main`, then `npm run check`.
 - Where does the Redstart website live, and what stack does it use?
 
 ## Housekeeping
 
-- A stale stash holds the first rename attempt, made before PR #1:
-  `ys_ rename on pre-PR1 base (stale)`. Superseded; drop it.
-- The mascot now lives here: `assets/mascot/redstart-yellowscript.txt`,
-  `scripts/mascot.mjs` and `scripts/make-icons.mjs` (`npm run icons`), copied
-  from redstart-project commit 43c0f52. It regenerates `media/` byte for byte.
-  That branch in redstart-project (`claude/yellowscript-ide-improvements-z2auqo`)
-  can be deleted once this merges.
+- redstart-project's `claude/yellowscript-ide-improvements-z2auqo` can be
+  deleted: its mascot and icon script now live here (`npm run icons`).
 - redstart-project's notes still say `ws_run_command`
   (`agent-runtime-plan.md`, `agent-runtime-implementation.md`).

@@ -1,0 +1,7 @@
+{
+  "title": "Fix the code a failing test points at",
+  "prompt": "The tests in this project fail (run them with `node --test`). Find out why and fix the code. Do not change the tests.",
+  "maxTurns": 20,
+  "timeoutS": 600,
+  "tags": ["core"]
+}

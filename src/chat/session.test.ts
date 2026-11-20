@@ -4,7 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { ChatSession } from './session.ts'
+import { ChatSession, type SessionDeps } from './session.ts'
 import type { HostMessage } from './protocol.ts'
 import type { ChatCompletionRequest, NestClient, StreamHandlers, StreamResult } from '../nest/client.ts'
 import { NestHttpError } from '../nest/types.ts'
@@ -577,7 +577,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     })
 
   /** Scripted round trips; each entry is one model reply. */
-  function scripted(replies: Array<Partial<StreamResult>>) {
+  function scripted(replies: Array<Partial<StreamResult>>, extra: Partial<SessionDeps> = {}) {
     const requests: ChatCompletionRequest[] = []
     const emitted: HostMessage[] = []
     let persisted = 0
@@ -599,6 +599,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
       onPersist: () => {
         persisted++
       },
+      ...extra,
     })
     const states = () => emitted.filter((m) => m.type === 'conversationState').map((m) => (m as Extract<HostMessage, { type: 'conversationState' }>).state)
     return { session, requests, emitted, states, persisted: () => persisted }
@@ -643,7 +644,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     assert.match(String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content), /Sam/)
   })
 
-  test('several questions in one call are asked in turn and answered one each', async () => {
+  test('several questions in one call are one card, answered together', async () => {
     const h = scripted([
       call('ask_user', {
         questions: [
@@ -656,18 +657,15 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
     const done = h.session.send('make a game')
 
     await until(() => h.session.state().question !== null)
-    const first = h.session.state().question!
-    assert.match(first.question, /^Engine \(1 of 2\): Canvas or DOM\?$/)
-    assert.equal(h.session.answer(first.id, { chosen: ['Canvas'] }), true)
-
-    await until(() => h.session.state().question?.id !== first.id && h.session.state().question !== null)
-    const second = h.session.state().question!
-    assert.match(second.question, /^Question 2 \(2 of 2\): Name the hero\?$/)
-    assert.equal(h.session.answer(second.id, null), true)
+    const card = h.session.state().question!
+    assert.equal(card.questions?.length, 2)
+    assert.deepEqual(card.questions?.[0], { header: 'Engine', question: 'Canvas or DOM?', multiSelect: false, options: ['Canvas', 'DOM'] })
+    assert.equal(card.question, 'Canvas or DOM?', 'the first question is mirrored for a one-question view')
+    assert.equal(h.session.answer(card.id, { answers: [{ chosen: ['Canvas'] }, null] }), true)
     await done
 
     const tool = String(h.requests[1]?.messages.find((m) => m.role === 'tool')?.content)
-    assert.match(tool, /Canvas/)
+    assert.match(tool, /1\. Canvas or DOM\?\n.*Canvas/)
     assert.match(tool, /did not answer/)
   })
 
@@ -720,7 +718,7 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
 
   test('waits at the turn limit, and goes on when the person says so', async () => {
     const reads = Array.from({ length: 12 }, () => call('ys_read_file', { path: 'note.txt' }))
-    const h = scripted([...reads, { content: 'Finished.' }])
+    const h = scripted([...reads, { content: 'Finished.' }], { maxTurns: () => 10 })
     const done = h.session.send('read it a lot')
     await until(() => h.session.state().atTurnLimit)
     assert.equal(h.session.state().atTurnLimit, true)
@@ -759,5 +757,37 @@ describe('ChatSession — projects and workflows', () => {
     const user = h.session.transcript[0]
     assert.equal(user?.workflow?.title, 'Weekly report')
     assert.match(h.lastRequest.messages[0]?.content ?? '', /weekly report/)
+  })
+})
+
+describe('ChatSession — approvals', () => {
+  const request = {
+    kind: 'command' as const,
+    title: 'Run a command',
+    subject: 'npm test',
+    options: [
+      { id: 'run', label: 'Run', kind: 'allow' as const },
+      { id: 'deny', label: 'Deny', kind: 'deny' as const },
+    ],
+  }
+
+  test('shows the request in the conversation state and resolves with the choice', async () => {
+    const h = new Harness()
+    const pending = h.session.askApproval(request)
+    const approval = h.session.state().approval
+    assert.equal(approval?.subject, 'npm test')
+    const pushed = h.ofType('conversationState').at(-1)
+    assert.equal(pushed?.state.approval?.id, approval?.id)
+    assert.equal(h.session.approve('stale', 'run'), false)
+    assert.equal(h.session.approve(approval!.id, 'run'), true)
+    assert.equal(await pending, 'run')
+    assert.equal(h.session.state().approval, null)
+  })
+
+  test('Stop denies a waiting approval', async () => {
+    const h = new Harness()
+    const pending = h.session.askApproval(request)
+    h.session.abort()
+    assert.equal(await pending, 'deny')
   })
 })

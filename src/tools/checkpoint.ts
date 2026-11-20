@@ -50,6 +50,8 @@ export interface GitBackend {
   readFile(absolutePath: string): Promise<string>
   /** Write a file's content (used to stage content into the shadow working tree). */
   writeFile(absolutePath: string, content: string): Promise<void>
+  /** Delete a file, if present. Absent: a revert writes it empty instead. */
+  removeFile?(absolutePath: string): Promise<void>
   /** Absolute path of the shadow root. */
   shadowRoot: string
 }
@@ -77,6 +79,8 @@ export interface StagedFile {
   relativePath: string
   /** The content to snapshot (current on-disk state, before the write). */
   content: string
+  /** The file did not exist before the write: a revert deletes it. */
+  wasAbsent?: boolean
 }
 
 export class CheckpointManager {
@@ -160,6 +164,11 @@ export class CheckpointManager {
    */
   async revert(checkpoint: Checkpoint, files: readonly StagedFile[]): Promise<void> {
     for (const file of files) {
+      // The write created it: undoing that is removing it, not emptying it.
+      if (file.wasAbsent && this.git.removeFile) {
+        await this.git.removeFile(file.workspaceAbsolute)
+        continue
+      }
       const blob = await this.git.run(
         ['show', `${checkpoint.revision}:${file.relativePath}`],
         this.git.shadowRoot,

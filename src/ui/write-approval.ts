@@ -12,9 +12,10 @@
 //      git repo. If the apply step then corrupts something, `revert` restores
 //      exactly these bytes. This happens BEFORE any write — a checkpoint taken
 //      after the write would snapshot the corrupted state.
-//   2. OPEN a native diff tab per file (before on disk vs. the proposed after),
-//      so the user reviews the real change, not a description of it.
-//   3. ASK: Apply / Reject / Always-allow. Apply writes via the injected
+//   2. SHOW each file's diff on the approval card in the chat, so the user
+//      reviews the real change, not a description of it; any file opens as a
+//      native diff tab (before on disk vs. the proposed after) from the card.
+//   3. ASK on that card: Apply / Reject / Always-allow. Apply writes via the injected
 //      `WriteBackend`. "Always allow" remembers the tool per workspace and then
 //      applies. Reject writes nothing.
 //
@@ -43,8 +44,9 @@ import {
   type StagedFile,
 } from '../tools/checkpoint.ts'
 import { applyPendingWrite, type WriteBackend } from '../tools/apply.ts'
-import { type ApprovalStore, isAutoApproved, rememberApproval } from '../tools/approval.ts'
+import { type ApprovalStore, type TaskTrust, autoApplyReason, rememberApproval } from '../tools/approval.ts'
 import type { PendingWrite } from '../tools/types.ts'
+import type { AskApproval } from '../chat/approvals.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -81,7 +83,11 @@ export function realGitBackend(shadowRoot: string): GitBackend {
       return fs.promises.readFile(abs, 'utf8')
     },
     async writeFile(abs, content) {
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true })
       await fs.promises.writeFile(abs, content, 'utf8')
+    },
+    async removeFile(abs) {
+      await fs.promises.rm(abs, { force: true })
     },
   }
 }
@@ -112,6 +118,10 @@ interface ReviewDeps {
   /** Records each successful checkpoint so the `Revert Last Write` command can
    *  restore it. Kept optional so tests/reuse needn't supply it. */
   recordCheckpoint?: (checkpoint: Checkpoint, files: readonly StagedFile[]) => void
+  /** "Apply all in this task": offered when present, and honoured until the run ends. */
+  task?: TaskTrust
+  /** Ask on the conversation's approval card. */
+  ask: AskApproval
 }
 
 /**
@@ -129,6 +139,7 @@ async function snapshot(deps: ReviewDeps, pending: PendingWrite): Promise<Checkp
     workspaceAbsolute: c.absolutePath,
     relativePath: vscodeRelative(c.absolutePath, deps),
     content: c.before,
+    wasAbsent: c.isNew,
   }))
   try {
     const checkpoint = await deps.checkpoints.checkpoint(staged, pending.label)
@@ -154,11 +165,12 @@ function outputWarn(err: unknown): void {
 
 /** Best-effort workspace-relative key for a shadow path. */
 function vscodeRelative(absolutePath: string, deps: ReviewDeps): string {
-  // The checkpoint stores by relative path; for the shadow we just need a stable
-  // key unique per file. Use the workspace-relative form when resolvable, else
-  // the basename. Exact value only matters for partial reverts, which key by the
-  // same `StagedFile` array we pass back to `revert`.
-  return path.basename(absolutePath)
+  // The shadow needs a stable key unique per file; the exact value only matters
+  // to `revert`, which is handed back the same StagedFile array. The whole
+  // absolute path, flattened, so two files with one name (src/a/index.ts and
+  // src/b/index.ts) cannot overwrite each other in one checkpoint.
+  void deps
+  return absolutePath.replace(/^[A-Za-z]:/, (d) => d[0]!.toLowerCase()).replace(/[\\/:]+/g, '__')
 }
 
 /** Open a native diff tab (before on disk vs. proposed after) for one change. */
@@ -175,7 +187,15 @@ async function showDiff(change: PendingWrite['changes'][number]): Promise<void> 
     beforeUri,
     vscode.Uri.file(afterTmp),
     `Yellowscript: ${change.isNew ? 'create' : change.isDeleted ? 'delete' : 'edit'} ${change.path}`,
+    // Beside the chat when the chat is the active editor tab, so the card
+    // with Apply / Reject stays on screen.
+    { viewColumn: chatIsActiveEditor() ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active, preview: true },
   )
+}
+
+function chatIsActiveEditor(): boolean {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input
+  return input instanceof vscode.TabInputWebview && input.viewType.includes('redstartYellowscript')
 }
 
 /**
@@ -187,27 +207,41 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
   const backend = deps.backend ?? realWriteBackend
 
   return async (pending: PendingWrite): Promise<boolean> => {
-    // Auto-approve path: checkpoint still taken, but no prompt.
+    // Auto-approve path: checkpoint still taken, but no prompt. Never for a
+    // deletion (autoApplyReason).
     const toolName = pending.changes[0]?.path ? autoToolFor(pending) : ''
-    if (toolName && isAutoApproved(deps.store, toolName)) {
+    const deletes = pending.changes.some((c) => c.isDeleted)
+    if (autoApplyReason({ toolName, deletes }, deps.store, deps.task?.trusted() ?? false)) {
       await snapshot(deps, pending)
       await applyPendingWrite(pending, backend)
       return true
     }
 
-    for (const change of pending.changes) {
-      await showDiff(change)
-    }
+    // Asked on the chat's card, with each file's diff inline; a file opens as
+    // a full diff in the editor from there.
+    const decision = await deps.ask({
+      kind: 'write',
+      title: pending.changes.length > 1 ? `Change ${pending.changes.length} files` : 'Change a file',
+      subject: pending.label,
+      files: pending.changes.map((c) => ({
+        path: c.path,
+        change: c.isNew ? 'create' : c.isDeleted ? 'delete' : 'edit',
+        diff: c.diff,
+      })),
+      options: [
+        { id: 'apply', label: 'Apply', kind: 'allow' },
+        // Offered only when the host scopes a task; deletions still always ask.
+        ...(deps.task ? [{ id: 'task', label: 'Apply all in this task', kind: 'always' as const }] : []),
+        ...(deletes ? [] : [{ id: 'always', label: 'Always allow edits', kind: 'always' as const }]),
+        { id: 'reject', label: 'Reject', kind: 'deny' },
+      ],
+      openFile: (index) => {
+        const change = pending.changes[index]
+        if (change) void showDiff(change)
+      },
+    })
 
-    const decision = await vscode.window.showInformationMessage(
-      `Yellowscript wants to ${pending.label}. Review the diff${pending.changes.length > 1 ? 's' : ''} and choose.`,
-      { modal: true },
-      'Apply',
-      'Apply & always allow',
-      'Reject',
-    )
-
-    if (decision === 'Reject' || decision === undefined) {
+    if (decision === 'reject') {
       return false
     }
 
@@ -215,7 +249,9 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
     await snapshot(deps, pending)
     const outcome = await applyPendingWrite(pending, backend)
 
-    if (decision === 'Apply & always allow') {
+    if (decision === 'task') deps.task?.trust()
+
+    if (decision === 'always') {
       const tool = autoToolFor(pending)
       if (tool) rememberApproval(deps.store, tool)
     }

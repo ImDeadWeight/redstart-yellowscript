@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="media/icon.png" alt="The Redstart bird perched on a yellow pencil" width="128" />
+</p>
+
 # Redstart Yellowscript
 
 A VSCode coding-agent extension that connects to a **local Redstart Nest** —
@@ -57,6 +61,7 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Show Connection Status` | Details view plus the next useful action |
 | `Yellowscript: Inspect Workspace Tools` | Run all `ys_*` tools with probe args and dump results to the output channel |
 | `Yellowscript: Revert Last Write` | Restore files from the most recent approved write via the shadow checkpoint |
+| `Yellowscript: Revert Last Task` | Undo every write of the last task, newest first; files it created are removed |
 | `Yellowscript: Open Settings` | Open the Redstart Yellowscript settings page |
 
 Use the **gear icon** in the view title (top-right of the Yellowscript panel)
@@ -71,6 +76,8 @@ to open settings directly.
 | `redstartYellowscript.discovery.timeoutMs` | `400` | Per-host beacon timeout (50–5000 ms). Raise on a slow network. |
 | `redstartYellowscript.autoConnect` | `true` | Reconnect to the last-used Nest when a window opens. |
 | `redstartYellowscript.editorButton` | `true` | Show the button in the editor title bar that opens the chat as an editor tab. |
+| `redstartYellowscript.agent.maxTurns` | `40` | Model round trips per message before asking whether to keep going (5–500). A repeated identical tool call is stopped sooner. |
+| `redstartYellowscript.allowedCommands` | `[]` | Command prefixes that run without asking in this workspace (`npm test`). Chained, piped or redirected lines always ask. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ys_write_file`, `ys_edit_file`). |
 
 A password is used once: Yellowscript signs in, has Nest issue a key for this
@@ -109,6 +116,9 @@ pure view change — streaming continues in background tabs.
   sequentially.
 - **Auto-titled** from the first user prompt (truncated to 40 characters).
 - Transcripts are saved on every message, turn end, and conversation switch.
+- **Drafts**: what you have typed and not sent is kept per conversation,
+  across tab switches and reloads. Closing a chat that holds only a draft
+  sends it to history; closing an empty one deletes it.
 - **Tool cards** show each call on its turn: status, arguments, the one-line
   result, a **Nest** tag for tools that ran on the server, and **recovered**
   when the model wrote the call as text. A finished turn with four or more
@@ -133,12 +143,31 @@ Yellowscript declares to Nest that it can answer `ask_user` and `update_plan`,
 so the model is offered both (agent-core runs them; see below).
 
 - **Questions** appear above the composer: options to pick, a text field, Send
-  and Skip. Typing in the composer while a question is open answers it.
+  and Skip. Up to four asked together are one card with a tab each. Typing in
+  the composer while a question is open answers it (all of them, on a tabbed
+  card).
 - **The plan** is a checklist above the composer, open while steps are open.
   It is saved with the conversation and sent with each request while steps are
-  open; the × clears it, so a plan you have moved on from stops steering.
-- **The turn limit** (10 model turns per request) asks before going on,
-  instead of stopping silently.
+  open; the × clears it, so a plan you have moved on from stops steering. It
+  is also kept in `.yellowscript/PLAN.md` (a task list you can edit), and a new
+  conversation in the workspace starts with it while any step is open.
+- **The turn limit** (`agent.maxTurns`, 40 by default) asks before going on,
+  instead of stopping silently. A tool call repeated with identical arguments
+  a fourth time is not run; the model is told to change approach.
+
+### Long runs and the context window
+
+A run's tool results are sent back on every request, so a long task would
+overflow a local model's window. Before each request, once the run passes
+85% of the usable window, the oldest tool results become a one-line stub
+(the model can call the tool again) and old write calls lose their big
+arguments, down to 50%. Your messages and the newest few are never touched.
+The window size comes from llama-server's `/props`; if a request is refused
+as too large anyway, Yellowscript trims harder and retries once. Each trim is
+logged to the output channel.
+
+Every request with tools also starts with a short note about the workspace:
+its `AGENTS.md` (or `CLAUDE.md`) and a two-level file tree.
 
 The webview is Svelte 5 (`src/webview/components/`). Its state is a plain
 reducer, `src/webview/view-model.ts`, tested under `node --test`; the
@@ -160,36 +189,58 @@ string → `{}`, malformed JSON → descriptive error).
 | `ys_grep` | Search file contents by regex. Uses ripgrep when available; falls back gracefully. |
 | `ys_diagnostics` | Return all VSCode diagnostics (errors, warnings, info, hints) with location and message. |
 | `ys_editor_context` | Return active editor state: open file, language, dirty status, cursor, selection, and open files. |
+| `ys_check_page` | Load a `localhost` URL or a workspace HTML file in headless Edge/Chrome/Chromium; report exceptions, console errors, failed requests, the canvases and visible text. The screenshot is saved to `.yellowscript/screenshots/`, and given to the model only if it reads images. Set `YELLOWSCRIPT_BROWSER` to pick a browser. |
 
 ### Write tools (with shadow-git checkpoint)
 
 | Tool | Description |
 |---|---|
+| `ys_replace` | Propose replacing exact text (`old_string` → `new_string`), unique unless `replace_all`. The edit local models get right. |
 | `ys_write_file` | Propose writing a complete file (new or full replacement). Checkpointed for revert. |
 | `ys_edit_file` | Propose editing a file via unified diff. Diff must match current content; mismatches rejected. |
+| `ys_delete_file` | Propose deleting a file. Always reviewed, whatever has been allowed. |
+| `ys_move_file` | Propose moving or renaming a file. |
 
-### Command tool
+An applied write's result ends with the errors and warnings the language
+server now reports in the files it wrote.
+
+### Command tools
 
 | Tool | Description |
 |---|---|
-| `ys_run_command` | Propose running a shell command in the workspace. Always-ask. Output captured from the integrated terminal. |
+| `ys_run_command` | Propose a shell command; it runs after approval and the result starts with its exit code, then stdout and stderr. `timeout_s` (default 120, max 900). |
+| `ys_process_start` | Propose a long-running command (a dev server, a watcher) in the background. Same approval. |
+| `ys_process_output` | Read what a background process printed since the last read (`wait_s` to wait for a server to come up). |
+| `ys_process_stop` | Stop a background process. All of them stop when the window closes. |
+
+Commands run with your shell and environment; their output streams into the
+**Yellowscript Commands** output channel. **Always allow** on the prompt adds
+the command's prefix (`npm test`, `npm run build`) to `allowedCommands` for
+this workspace. A line that chains, pipes or redirects always asks.
 
 ## Write approval & shadow checkpoints
 
 Before any write is applied, Yellowscript snapshots the pre-write state of
-every affected file into a shadow git repo (`<workspace>/.yellowscript/shadow`)
-and opens a native VSCode diff editor for review.
+every affected file into a shadow git repo (`<workspace>/.yellowscript/shadow`).
+It asks on a card in the chat, listing the files; each file's diff opens in
+VS Code's diff editor from the card. Commands and Nest's tools ask on the same
+card, one at a time.
 
-The user chooses **Apply**, **Reject**, or **Always allow** (remembered per
-tool per workspace). The checkpoint is always taken even when auto-approval
-bypasses the prompt.
+The user chooses **Apply**, **Apply all in this task** (later writes in the
+same run apply without asking), **Always allow edits** (remembered per
+workspace; never offered for a deletion), or **Reject**. A deletion always
+asks. Stopping the run denies anything still waiting. The checkpoint is always
+taken even when auto-approval bypasses the prompt.
 
 **Revert Last Write** restores files from the most recent checkpoint.
+**Revert Last Task** undoes every write of the last task, newest first, and
+removes the files it created.
 
 ## MCP tools (Nest integration)
 
 Yellowscript discovers the Nest's MCP tools via `/redstart/mcp-servers` on
-every (re)connect. Server-banned tools are greyed out in the UI and stripped
+every (re)connect, and speaks MCP's Streamable HTTP transport to the URL it
+gives (`…/mcp`): one session per connection, reopened if Nest restarts. Server-banned tools are greyed out in the UI and stripped
 from completions requests server-side — the extension never re-enables them
 client-side.
 
@@ -200,7 +251,7 @@ tagged `(ran on Nest)` in summaries.
 
 Each Nest tool carries an approval rule in its `_meta`: reads run, writes ask
 unless you have chosen **Always allow**, and destructive tools ask on every
-call. Yellowscript asks in a modal before the call reaches Nest.
+call. Yellowscript asks on the chat's approval card before the call reaches Nest.
 
 Nest itself refuses an unapproved destructive call, from any client. When it
 does, Yellowscript posts the decision you just made to `/approvals/:id` and
@@ -274,6 +325,34 @@ npm run smoke
 
 Checks: beacon payload, `/auth/config`, `/auth/me`, `/redstart/mcp-servers`,
 `/v1/models`, and unauthenticated rejection. Run before every release.
+
+`npm run live` (same two variables) checks what needs the real model and
+machine: `/props` reports `n_ctx`, an oversized request comes back with
+llama-server's context numbers, one real tool round trip, and a background
+dev server that starts, is checked with `ys_check_page`, and stops with its
+whole process tree.
+
+### The coding benchmark
+
+```bash
+YELLOWSCRIPT_TEST_LIVE_NEST=... YELLOWSCRIPT_TEST_TOKEN=rst_... \
+npm run bench -- --label "qwen3.6-35b Q4_K_XL"   # the core tasks
+npm run bench -- --task long-context-reads       # one task
+npm run bench -- --tag milestone                 # the long ones
+npm run bench -- --list                          # no Nest needed
+```
+
+Each task in `bench/tasks/<id>/` is a workspace, a prompt (`task.json`) and a
+`check.mjs` that scores the result. The run uses Yellowscript's own loop and
+tools against the real Nest, in a temp copy of the workspace, with a headless
+host: writes apply, commands run (on this machine, inside the copy), and
+`ask_user` gets the task's scripted answers. Results go to
+`bench/results/<stamp>-<label>/` (`runs.jsonl`, and `summary.md`, ending with
+the row for [docs/bench-results.md](docs/bench-results.md)).
+
+Every task also has a `reference/` solution, and `npm test` proves each check
+fails on the untouched workspace and passes on the reference, so a task can
+neither be passed by doing nothing nor be impossible.
 
 ## Relationship to the rest of the ecosystem
 

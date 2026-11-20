@@ -1,0 +1,106 @@
+// =============================================================================
+// npm run bench — run the coding benchmark against a live Nest.
+// =============================================================================
+//
+//   YELLOWSCRIPT_TEST_LIVE_NEST=http://127.0.0.1:19080 \
+//   YELLOWSCRIPT_TEST_TOKEN=rst_... \
+//   npm run bench -- --label "qwen3.6-35b Q4_K_XL" [--task fix-failing-test] [--repeat 3] [--keep]
+//
+// Each task runs in a fresh temp copy of bench/tasks/<id>/workspace and is
+// scored by its check.mjs. Results go to bench/results/<stamp>-<label>/:
+// runs.jsonl (one record per run) and summary.md, which ends with the row to
+// copy into docs/bench-results.md.
+//
+// Commands the model proposes run on this machine (inside the temp copy).
+// =============================================================================
+
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parseArgs } from 'node:util'
+
+import { NestClient } from '../nest/client.ts'
+import { loadTasks, runTask, summarize, type RunRecord } from './harness.ts'
+
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const TASKS = path.join(ROOT, 'bench', 'tasks')
+
+const { values } = parseArgs({
+  options: {
+    label: { type: 'string' },
+    task: { type: 'string', multiple: true },
+    tag: { type: 'string' },
+    repeat: { type: 'string', default: '1' },
+    keep: { type: 'boolean', default: false },
+    list: { type: 'boolean', default: false },
+    quiet: { type: 'boolean', default: false },
+  },
+})
+
+const all = loadTasks(TASKS)
+if (values.list) {
+  for (const t of all) console.log(`${t.id.padEnd(28)} ${t.title}${t.tags?.length ? `  [${t.tags.join(', ')}]` : ''}`)
+  process.exit(0)
+}
+
+const baseUrl = process.env.YELLOWSCRIPT_TEST_LIVE_NEST
+const token = process.env.YELLOWSCRIPT_TEST_TOKEN
+if (!baseUrl || !token) {
+  console.error('Set YELLOWSCRIPT_TEST_LIVE_NEST (the gateway URL) and YELLOWSCRIPT_TEST_TOKEN (an rst_ key) to run the bench.')
+  console.error('`npm run bench -- --list` shows the tasks without a Nest.')
+  process.exit(2)
+}
+
+let tasks = all
+if (values.task?.length) {
+  const wanted = new Set(values.task)
+  tasks = all.filter((t) => wanted.has(t.id))
+  const missing = [...wanted].filter((id) => !all.some((t) => t.id === id))
+  if (missing.length) {
+    console.error(`Unknown task(s): ${missing.join(', ')}. Try --list.`)
+    process.exit(2)
+  }
+}
+if (values.tag) tasks = tasks.filter((t) => t.tags?.includes(values.tag!))
+// Milestones take an hour each: only when asked for by --task or --tag.
+else if (!values.task?.length) tasks = tasks.filter((t) => !t.tags?.includes('milestone'))
+const repeat = Math.max(1, Number(values.repeat) || 1)
+
+const client = new NestClient(baseUrl, { timeoutMs: 600_000 })
+client.setCredential({ kind: 'apiKey', key: token })
+const props = await client.props().catch(() => null)
+const label = values.label ?? 'unlabelled'
+
+console.log(`\nbench: ${tasks.length} task(s) × ${repeat} against ${baseUrl} · n_ctx ${props?.nCtx ?? 'unknown'} · vision ${props?.vision ?? 'unknown'}\n`)
+
+const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+const outDir = path.join(ROOT, 'bench', 'results', `${stamp}-${label.replace(/[^\w.-]+/g, '_')}`)
+fs.mkdirSync(outDir, { recursive: true })
+const records: RunRecord[] = []
+
+for (const task of tasks) {
+  for (let i = 0; i < repeat; i++) {
+    console.log(`▶ ${task.id}${repeat > 1 ? ` (${i + 1}/${repeat})` : ''} — ${task.title}`)
+    const run = await runTask(task, {
+      client,
+      contextSource: client,
+      label,
+      keep: values.keep,
+      ...(values.quiet ? {} : { log: (line: string) => console.log(line) }),
+    })
+    const { workspace, ...record } = run
+    records.push(record)
+    fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`)
+    console.log(
+      `  ${record.pass ? 'PASS' : 'FAIL'} · ${record.stopReason} · ${record.iterations} turns · ${record.toolCalls} calls · ` +
+        `${(record.durationMs / 1000).toFixed(0)}s · ${record.check.split('\n')[0]}` +
+        (record.error ? `\n  error: ${record.error}` : '') +
+        (values.keep ? `\n  workspace kept: ${workspace}` : ''),
+    )
+  }
+}
+
+const summary = summarize(records, label)
+fs.writeFileSync(path.join(outDir, 'summary.md'), summary)
+console.log(`\n${summary}\nResults: ${outDir}`)
+process.exit(records.every((r) => r.pass) ? 0 : 1)

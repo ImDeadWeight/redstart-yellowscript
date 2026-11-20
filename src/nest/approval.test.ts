@@ -188,3 +188,29 @@ describe('callWithApproval', () => {
     assert.equal(r.calls.length, 2)
   })
 })
+
+describe('callWithApproval — call_tool', () => {
+  it('shows the tool call_tool carries, not call_tool, when Nest asks for its approval', async () => {
+    const r = recorder({ server: [refused({ ...PENDING, tool: 'write_file', summary: 'Write notes.md' }), ok('written')] })
+    const out = await callWithApproval(
+      'call_tool',
+      { name: 'write_file', arguments: { path: 'notes.md', content: 'x' } },
+      { rule: 'none', enforced: false },
+      r.deps,
+    )
+    assert.equal(out.text, 'written')
+    assert.equal(r.prompts.length, 1)
+    assert.equal(r.prompts[0]?.tool, 'write_file')
+    assert.deepEqual(r.prompts[0]?.args, { path: 'notes.md', content: 'x' })
+    assert.equal(r.prompts[0]?.summary, 'Write notes.md')
+    // The repeat carries the approval id; the call itself is unchanged.
+    assert.equal(r.calls.length, 2)
+  })
+
+  it('a deny of the inner tool is logged as that tool', async () => {
+    const r = recorder({ server: [refused({ ...PENDING, tool: 'delete_file' })], answer: 'deny' })
+    await callWithApproval('call_tool', { name: 'delete_file', arguments: { path: 'a' } }, { rule: 'none', enforced: false }, r.deps)
+    assert.deepEqual(r.decided, [['ap-1', 'deny']])
+    assert.equal(r.prompts[0]?.tool, 'delete_file')
+  })
+})

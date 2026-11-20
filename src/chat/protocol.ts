@@ -95,6 +95,54 @@ export interface QuestionView {
   question: string
   options?: string[]
   multiSelect: boolean
+  /** Two to four questions asked together, shown as tabs. The fields above
+   *  mirror the first, for a view that shows only one. */
+  questions?: QuestionItemView[]
+}
+
+/** One question of a several-question card. */
+export interface QuestionItemView {
+  /** The tab label; absent: "Question N". */
+  header?: string
+  question: string
+  options?: string[]
+  multiSelect: boolean
+}
+
+/**
+ * A tool call waiting for the person to allow or deny it: a command, a file
+ * write, or one of Nest's own tools. Shown as a card above the composer, like
+ * a question. The host holds the decision; the card only names a choice.
+ */
+export interface ApprovalView {
+  /** Names this request, so a late click cannot decide the next one. */
+  id: string
+  kind: 'command' | 'write' | 'tool'
+  /** What is being asked, e.g. "Run a command". */
+  title: string
+  /** The thing itself: the command line, the tool name, the write's label. */
+  subject: string
+  /** Where it runs, the arguments, a note on what "always" means. */
+  detail?: string
+  /** For a write: each file and its unified diff. */
+  files?: ApprovalFileView[]
+  /** In display order. Deny is always among them. */
+  options: ApprovalOptionView[]
+  /** More waiting behind this one (parallel tool calls). */
+  queued: number
+}
+
+export interface ApprovalFileView {
+  path: string
+  change: 'create' | 'edit' | 'delete'
+  diff: string
+}
+
+export interface ApprovalOptionView {
+  id: string
+  label: string
+  /** allow: this once; always: and remember it; deny: do not run. */
+  kind: 'allow' | 'always' | 'deny'
 }
 
 export interface PlanStepView {
@@ -112,6 +160,8 @@ export interface ConversationState {
   plan: PlanStepView[] | null
   /** True while the flow waits at the turn limit for "keep going?". */
   atTurnLimit: boolean
+  /** The tool call waiting to be allowed or denied, or null. */
+  approval: ApprovalView | null
 }
 
 /** A Nest project, as the Projects page lists it. */
@@ -134,12 +184,14 @@ export interface WorkflowView {
 /** The pages that take over the panel. */
 export type PageName = 'projects' | 'workflows'
 
-export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false }
+export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false, approval: null }
 
 /** The person's answer to a question; null is Skip. */
 export interface AnswerView {
   chosen?: string[]
   text?: string
+  /** A several-question card: one reply per question, in order (null: not answered). */
+  answers?: Array<{ chosen?: string[]; text?: string } | null>
 }
 
 export interface TurnStats {
@@ -158,6 +210,8 @@ export interface ConversationView {
   title: string
   busy: boolean
   queued: number
+  /** Unsent composer text, restored when the tab is opened. */
+  draft: string
 }
 
 /**
@@ -202,6 +256,8 @@ export type WebviewMessage =
   | { type: 'switchConversation'; id: string }
   | { type: 'createConversation' }
   | { type: 'deleteConversation'; id: string }
+  /** The composer's unsent text for a conversation ('' when cleared). */
+  | { type: 'saveDraft'; id: string; text: string }
   /** Delegate to an extension command — the webview never drives connection or
    *  auth logic itself, it only asks for the command the user clicked. */
   | { type: 'runCommand'; command: 'connect' | 'signIn' | 'showStatus' }
@@ -224,6 +280,11 @@ export type WebviewMessage =
   | { type: 'runWorkflow'; name: string; args: Record<string, string> }
   /** Answer the open question (`id` is its QuestionView id); null skips it. */
   | { type: 'answer'; id: string; answer: AnswerView | null }
+  /** Decide the open approval (`id` is its ApprovalView id); `choice` is one
+   *  of its option ids. */
+  | { type: 'approve'; id: string; choice: string }
+  /** Open one of a write approval's files as a diff in the editor. */
+  | { type: 'openApprovalDiff'; id: string; index: number }
   /** Clear the active conversation's plan (the × on the checklist). */
   | { type: 'clearPlan' }
   /** At the turn limit: keep going, or stop. */
@@ -301,6 +362,7 @@ export type HostMessage =
           title: string
           lastAccessedAt: number
           messageCount: number
+          draft?: boolean
         }[]
       }
     /** Tells the webview to open (and populate) the history panel. Sent by the
@@ -312,6 +374,7 @@ export type HostMessage =
           title: string
           lastAccessedAt: number
           messageCount: number
+          draft?: boolean
         }[]
       }
 
@@ -349,6 +412,10 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return { type: 'createConversation' }
     case 'deleteConversation':
       return typeof msg.id === 'string' ? { type: 'deleteConversation', id: msg.id } : null
+    case 'saveDraft':
+      return typeof msg.id === 'string' && typeof msg.text === 'string'
+        ? { type: 'saveDraft', id: msg.id, text: msg.text.slice(0, 100_000) }
+        : null
     case 'runCommand':
       return msg.command === 'connect' || msg.command === 'signIn' || msg.command === 'showStatus'
         ? { type: 'runCommand', command: msg.command }
@@ -383,6 +450,14 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       const answer = parseAnswer(msg.answer)
       return answer ? { type: 'answer', id: msg.id, answer } : null
     }
+    case 'approve':
+      return typeof msg.id === 'string' && typeof msg.choice === 'string'
+        ? { type: 'approve', id: msg.id, choice: msg.choice }
+        : null
+    case 'openApprovalDiff':
+      return typeof msg.id === 'string' && Number.isInteger(msg.index) && (msg.index as number) >= 0
+        ? { type: 'openApprovalDiff', id: msg.id, index: msg.index as number }
+        : null
     case 'clearPlan':
       return { type: 'clearPlan' }
     case 'loadPage':
@@ -411,7 +486,19 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
 function parseAnswer(value: unknown): AnswerView | null {
   if (typeof value !== 'object' || value === null) return null
   const a = value as Record<string, unknown>
-  const out: AnswerView = {}
+  if (Array.isArray(a.answers)) {
+    // At most four, each a reply or null; at least one answered.
+    const answers = a.answers.slice(0, 4).map((r) => (r === null ? null : parseReply(r)))
+    return answers.some((r) => r !== null) ? { answers } : null
+  }
+  return parseReply(a)
+}
+
+/** One reply: at least one pick or some text. */
+function parseReply(value: unknown): { chosen?: string[]; text?: string } | null {
+  if (typeof value !== 'object' || value === null) return null
+  const a = value as Record<string, unknown>
+  const out: { chosen?: string[]; text?: string } = {}
   if (Array.isArray(a.chosen)) {
     const chosen = a.chosen.filter((c): c is string => typeof c === 'string')
     if (chosen.length > 0) out.chosen = chosen

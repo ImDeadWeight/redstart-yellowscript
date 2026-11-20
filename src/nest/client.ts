@@ -17,6 +17,7 @@ import {
   credentialValue,
   type AuthConfig,
   type ClientKeysResponse,
+  type ContextExceeded,
   type Credential,
   type IssueClientKeyResponse,
   type LoginResponse,
@@ -48,6 +49,12 @@ export function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.trim()
   const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
   return withScheme.replace(/\/+$/, '')
+}
+
+/** What llama-server reports about the loaded model (see NestClient.props). */
+export interface ModelProps {
+  nCtx: number | null
+  vision: boolean
 }
 
 export class NestClient {
@@ -107,7 +114,7 @@ export class NestClient {
     }
 
     if (!response.ok) {
-      throw new NestHttpError(response.status, await describeError(response), url)
+      throw await httpError(response, url)
     }
 
     if (response.status === 204) return undefined as T
@@ -176,6 +183,25 @@ export class NestClient {
   }
 
   /**
+   * llama-server's /props, through the gateway's passthrough: the context
+   * window (n_ctx) and whether the model reads images. Missing fields come
+   * back null/false rather than throwing, since the agent can run without
+   * them (it then learns n_ctx from the first context-exceeded refusal).
+   */
+  async props(signal?: AbortSignal): Promise<ModelProps> {
+    const body = await this.request<{
+      default_generation_settings?: { n_ctx?: unknown }
+      n_ctx?: unknown
+      modalities?: { vision?: unknown }
+    }>('/props', signal ? { signal } : {})
+    const raw = body?.default_generation_settings?.n_ctx ?? body?.n_ctx
+    return {
+      nCtx: typeof raw === 'number' && raw > 0 ? raw : null,
+      vision: body?.modalities?.vision === true,
+    }
+  }
+
+  /**
    * The discovery mechanism for MCP — the built-in server's URL comes from here,
    * never from `gatewayPort + 2`. Re-fetch on every reconnect: both the server
    * list and `disabledTools` follow the Nest's active profile.
@@ -239,7 +265,7 @@ export class NestClient {
     }
 
     if (!response.ok) {
-      throw new NestHttpError(response.status, await describeError(response), url)
+      throw await httpError(response, url)
     }
     if (!response.body) {
       throw new NestHttpError(0, 'The Nest returned an empty response stream', url)
@@ -384,15 +410,33 @@ function apply(chunk: ParsedChunk, result: StreamResult, handlers: StreamHandler
  * status text for a body that isn't that shape (a proxy error page, an empty
  * 502) so the user always gets something to act on.
  */
-async function describeError(response: Response): Promise<string> {
+async function describeError(response: Response): Promise<{ message: string; contextExceeded?: ContextExceeded }> {
   try {
-    const body = (await response.json()) as { error?: { message?: string } }
-    const message = body?.error?.message
-    if (typeof message === 'string' && message.length > 0) return message
+    const body = (await response.json()) as {
+      error?: { message?: string; type?: string; n_ctx?: unknown; n_prompt_tokens?: unknown }
+    }
+    const error = body?.error
+    const message = error?.message
+    if (typeof message === 'string' && message.length > 0) {
+      // llama-server says exactly how big the window is when a prompt does
+      // not fit. The agent loop trims with these numbers and tries again.
+      if (error?.type === 'exceed_context_size_error' && typeof error.n_ctx === 'number' && error.n_ctx > 0) {
+        const contextExceeded: ContextExceeded = { nCtx: error.n_ctx }
+        if (typeof error.n_prompt_tokens === 'number') contextExceeded.promptTokens = error.n_prompt_tokens
+        return { message, contextExceeded }
+      }
+      return { message }
+    }
   } catch {
     // Not JSON — fall through.
   }
-  if (response.status === 401) return 'Unauthorized'
-  if (response.status === 502) return 'No model is running on the Nest'
-  return response.statusText || `HTTP ${response.status}`
+  if (response.status === 401) return { message: 'Unauthorized' }
+  if (response.status === 502) return { message: 'No model is running on the Nest' }
+  return { message: response.statusText || `HTTP ${response.status}` }
+}
+
+/** An HTTP error from a failed response, with its context-exceeded numbers. */
+async function httpError(response: Response, url: string): Promise<NestHttpError> {
+  const { message, contextExceeded } = await describeError(response)
+  return new NestHttpError(response.status, message, url, contextExceeded)
 }

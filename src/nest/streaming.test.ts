@@ -285,3 +285,59 @@ describe('NestClient.streamChatCompletion', () => {
     assert.equal(result.content, 'partial', 'text already on screen must not vanish')
   })
 })
+
+describe('NestClient — the context window', () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+  test('props() reads n_ctx and vision from llama-server /props', async () => {
+    let url = ''
+    const client = new NestClient('http://nest:19080', {
+      fetch: async (input) => {
+        url = String(input)
+        return json(200, { default_generation_settings: { n_ctx: 32768 }, modalities: { vision: true } })
+      },
+    })
+    assert.deepEqual(await client.props(), { nCtx: 32768, vision: true })
+    assert.equal(url, 'http://nest:19080/props')
+  })
+
+  test('props() gives null and false for what it does not report', async () => {
+    const client = new NestClient('http://nest:19080', { fetch: async () => json(200, {}) })
+    assert.deepEqual(await client.props(), { nCtx: null, vision: false })
+  })
+
+  test('a context-exceeded refusal carries llama-server numbers', async () => {
+    const client = new NestClient('http://nest:19080', {
+      fetch: async () =>
+        json(400, {
+          error: {
+            type: 'exceed_context_size_error',
+            message: 'request (9500 tokens) exceeds the available context size (8192 tokens)',
+            n_prompt_tokens: 9500,
+            n_ctx: 8192,
+          },
+        }),
+    })
+    await assert.rejects(
+      client.streamChatCompletion({ messages: [{ role: 'user', content: 'hi' }] }, {}),
+      (err: unknown) => {
+        const e = err as { status: number; contextExceeded?: unknown; message: string }
+        assert.equal(e.status, 400)
+        assert.deepEqual(e.contextExceeded, { nCtx: 8192, promptTokens: 9500 })
+        assert.match(e.message, /exceeds the available context size/)
+        return true
+      },
+    )
+  })
+
+  test('any other error has no context numbers', async () => {
+    const client = new NestClient('http://nest:19080', {
+      fetch: async () => json(400, { error: { type: 'invalid_request_error', message: 'bad' } }),
+    })
+    await assert.rejects(client.streamChatCompletion({ messages: [{ role: 'user', content: 'hi' }] }, {}), (err: unknown) => {
+      assert.equal((err as { contextExceeded?: unknown }).contextExceeded, undefined)
+      return true
+    })
+  })
+})

@@ -8,10 +8,11 @@
 // Two responsibilities that look small and are not:
 //
 // 1. ARGUMENTS ARRIVE AS A STRING AND ARE OFTEN MALFORMED. A local model emits
-//    `arguments` as JSON text, and a 3B-active MoE gets that wrong regularly —
-//    trailing commas, single quotes, a bare value, an empty string. Parsing is
-//    centralised here so every tool gets the same forgiving treatment and the
-//    same correctable error message, rather than each one reinventing it.
+//    `arguments` as JSON text, and a 3B-active MoE gets that wrong regularly.
+//    Parsing is centralised here so every tool gets the same treatment: an
+//    empty string is "no arguments", and anything JSON.parse rejects gets one
+//    correctable error message. Nothing is repaired yet (trailing commas,
+//    single quotes, raw newlines in strings); see PLAN-long-tasks.md item 0.
 //
 // 2. DUPLICATE NAMES MUST BE LOUD. A tools array carrying two entries with one
 //    name silently drops one of them, and the symptom is a tool that "sometimes
@@ -29,6 +30,10 @@ import { createDiagnosticsTool, type DiagnosticsProvider } from './diagnostics.t
 import { createEditorContextTool, type EditorStateProvider } from './editor-context.ts'
 import { createEditFileTool, createWriteFileTool, nodeWriteFs, type WriteFs } from './write-file.ts'
 import { runCommandTool } from './run-command.ts'
+import { createDeleteFileTool, createMoveFileTool, createReplaceTool } from './file-ops.ts'
+import { createProcessOutputTool, createProcessStopTool, processStartTool } from './process-tools.ts'
+import type { BackgroundProcesses } from './process-runner.ts'
+import { createCheckPageTool, type CheckPageDeps } from './browser-check.ts'
 
 /** One entry of the OpenAI-compatible `tools` array. */
 export interface ToolPayloadEntry {
@@ -47,6 +52,10 @@ export interface ToolRegistryOptions {
   editorState: EditorStateProvider
   /** Read-only fs for the write tools' planning phase. Defaults to node:fs. */
   writeFs?: WriteFs
+  /** The window's background processes. Absent: no ys_process_* tools. */
+  processes?: BackgroundProcesses
+  /** The headless browser for ys_check_page. Absent: no such tool. */
+  browser?: CheckPageDeps
 }
 
 export interface ToolRegistry {
@@ -71,9 +80,16 @@ export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
     createGrepTool(options.ripgrepPath),
     createDiagnosticsTool(options.diagnostics),
     createEditorContextTool(options.editorState),
+    createReplaceTool(writeFs),
     createEditFileTool(writeFs),
     createWriteFileTool(writeFs),
+    createDeleteFileTool(writeFs),
+    createMoveFileTool(writeFs),
     runCommandTool,
+    ...(options.processes
+      ? [processStartTool, createProcessOutputTool(options.processes), createProcessStopTool(options.processes)]
+      : []),
+    ...(options.browser ? [createCheckPageTool(options.browser)] : []),
   ]
 
   const byName = new Map<string, Tool>()
@@ -137,7 +153,7 @@ export interface NestToolRef {
   inputSchema: unknown
   meta?: Record<string, unknown>
   /** The host calls this to execute the tool on the Nest via McpHost.callTool. */
-  execute: (args: unknown) => Promise<string>
+  execute: (args: unknown, context: ToolContext) => Promise<string>
 }
 
 /**
@@ -185,9 +201,8 @@ export function mergeNestTools(
     }
     // Wire the real execution delegate: calls back into McpHost.callTool.
     const ref = nest
-    wrapped.execute = (_args: unknown) => {
-      void _args
-      return ref.execute(_args).then((content) => ({
+    wrapped.execute = (args: unknown, context: ToolContext) => {
+      return ref.execute(args, context).then((content) => ({
         content,
         isError: false,
         summary: `${ref.name} (ran on Nest)`,
@@ -232,8 +247,9 @@ export function mergeNestTools(
         )
       }
 
-      void context
-      return tool.execute(parsed.value, { workspaceRoots: [] })
+      // The caller's context, roots and all: a local ys_* tool handed empty
+      // roots would refuse every path once Nest's tools were merged in.
+      return tool.execute(parsed.value, context)
     },
   }
 }

@@ -136,6 +136,11 @@
         "command": "redstartYellowscript.revertLastWrite",
         "title": "Revert Last Write",
         "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.revertLastTask",
+        "title": "Revert Last Task",
+        "category": "Yellowscript"
       }
     ],
     "configuration": {
@@ -162,6 +167,19 @@
           "type": "boolean",
           "default": true,
           "description": "Try to reconnect to the last known Nest when a window opens."
+        },
+        "redstartYellowscript.agent.maxTurns": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 5,
+          "maximum": 500,
+          "markdownDescription": "Model round trips one message may run before Yellowscript asks whether to keep going. **Continue** grants as many again. A repeated identical tool call is stopped sooner, whatever this says."
+        },
+        "redstartYellowscript.allowedCommands": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "markdownDescription": "Command prefixes that run without asking in this workspace, e.g. `npm test` or `npx tsc`. A line that chains, pipes or redirects (`&&`, `|`, `;`, `>`) always asks. Added by the **Always allow** button on a command prompt."
         },
         "redstartYellowscript.approvedWriteTools": {
           "type": "array",
@@ -195,6 +213,8 @@
     "typecheck": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.webview.json --fail-on-warnings",
     "test": "node --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "smoke": "node scripts/smoke.mjs",
+    "live": "node src/bench/live.ts",
+    "bench": "node src/bench/run.ts",
     "icons": "node scripts/make-icons.mjs",
     "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
     "sync:agent-core": "node scripts/sync-agent-core.mjs",

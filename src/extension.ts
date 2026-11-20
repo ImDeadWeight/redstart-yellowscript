@@ -21,6 +21,14 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
+import { findBrowser } from './tools/browser-check.ts'
+import { buildWorkspaceContext } from './tools/workspace-context.ts'
+import * as nodeFs from 'node:fs'
+import * as nodePath from 'node:path'
+import { PLAN_DIR, PLAN_FILE, formatPlanFile, hasOpenSteps, parsePlanFile } from './chat/plan-file.ts'
+import type { PlanStep } from './agent/agent-core.ts'
+import { ContextTracker } from './agent/context-budget.ts'
+import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
 import {
   EMPTY_CONVERSATION_STATE,
   type ConversationView,
@@ -36,6 +44,7 @@ import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider } from './ui/chat-view.ts'
 import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
 import {
+  diagnosticsAfterWrite,
   diagnosticsProvider,
   editorStateProvider,
   resolveRipgrep,
@@ -44,14 +53,14 @@ import {
 } from './ui/tool-providers.ts'
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import { makeCommandGate } from './ui/run-command.ts'
+import { BackgroundProcesses } from './tools/process-runner.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
 import { approvalInfo, callWithApproval } from './nest/approval.ts'
-import { makeNestApprovalDeps } from './ui/nest-approval.ts'
+import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
-import { openMcpSseStream } from './ui/mcp-stream.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
-import { conversationStore, type Conversation } from './ui/conversation-store.ts'
+import { conversationStore, isBlank, type Conversation } from './ui/conversation-store.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -81,12 +90,35 @@ let mergedTools: ToolRegistry | null = null
 /** Last successful write checkpoint per workspace root, for `Revert Last Write`.
  *  Only the most recent is kept — a multistep revert is out of scope for now. */
 const lastCheckpoint = new Map<string, { checkpoint: Checkpoint; files: readonly StagedFile[] }>()
+
+/** Per conversation: the running task's trust, and every write it checkpointed. */
+interface TaskState {
+  trusted: boolean
+  checkpoints: Array<{ root: string; checkpoint: Checkpoint; files: readonly StagedFile[] }>
+}
+const tasks = new Map<string, TaskState>()
+/** The conversation whose task wrote last, for Revert Last Task. */
+let lastTaskConversation: string | null = null
+function taskFor(conversationId: string): TaskState {
+  let task = tasks.get(conversationId)
+  if (!task) {
+    task = { trusted: false, checkpoints: [] }
+    tasks.set(conversationId, task)
+  }
+  return task
+}
 /** Resolved once — the binary does not move while the window is open, and
  *  probing the filesystem on every search would be wasteful. */
 let ripgrepPath: string | null = null
+/** Live output of approved commands, and the background processes they started. */
+let commandChannel: vscode.OutputChannel | undefined
+let backgroundProcesses: BackgroundProcesses | undefined
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
+  commandChannel = vscode.window.createOutputChannel('Yellowscript Commands')
+  backgroundProcesses = new BackgroundProcesses((id, chunk) => commandChannel?.append(`[${id}] ${chunk}`))
+  context.subscriptions.push(commandChannel, { dispose: () => void backgroundProcesses?.stopAll() })
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
   workspaceMemento = context.workspaceState
@@ -95,6 +127,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (pruned > 0) {
     output.info(`history: pruned ${pruned} conversation(s) older than 14 days`)
   }
+  // Closed chats that never had anything in them, left over from before
+  // closing a blank chat deleted it.
+  const blank = conversations.pruneBlank()
+  if (blank > 0) output.info(`history: removed ${blank} empty conversation(s)`)
 
   // The panel always has a conversation open, so the first chat is a real tab
   // from the start — not an untracked transcript that vanishes on the first
@@ -130,6 +166,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ripgrepPath,
     diagnostics: diagnosticsProvider,
     editorState: editorStateProvider,
+    processes: backgroundProcesses,
+    browser: {
+      // Looked up on use, so a browser installed later is found.
+      browser: () => findBrowser(),
+      screenshotDir: () => {
+        const root = workspaceRoots()[0]
+        return root ? nodePath.join(root, PLAN_DIR, 'screenshots') : null
+      },
+    },
   })
   const roots = workspaceRoots()
   output.info(
@@ -195,7 +240,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onDeleteConversation: (id) => {
       sessions.get(id)?.abort()
       sessions.delete(id)
-      conversations.archive(id)
+      // A chat with no messages and nothing typed is not worth a history
+      // entry; one with an unsent draft is kept so the text can come back.
+      const closing = conversations.get(id)
+      if (closing && isBlank(closing)) conversations.delete(id)
+      else conversations.archive(id)
       if (activeConversationId === id) {
         const remaining = conversations.list(currentAccountId ?? undefined)
         activeConversationId = remaining[0]?.id ?? null
@@ -210,6 +259,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       pushConversations()
       pushHistoryPanel()
+    },
+    onSaveDraft: (id, text) => {
+      conversations.setDraft(id, text)
     },
     onRunCommand: (command) => {
       void vscode.commands.executeCommand(`redstartYellowscript.${command}`)
@@ -272,6 +324,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     onAnswer: (id, answer) => {
       if (activeConversationId) getSession(activeConversationId).answer(id, answer)
+    },
+    onApprove: (id, choice) => {
+      if (activeConversationId) getSession(activeConversationId).approve(id, choice)
+    },
+    onOpenApprovalDiff: (id, index) => {
+      if (activeConversationId) getSession(activeConversationId).openApprovalFile(id, index)
     },
     onClearPlan: () => {
       if (activeConversationId) getSession(activeConversationId).clearPlan()
@@ -352,6 +410,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.runWorkflow', () => showPage('workflows')),
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
+    vscode.commands.registerCommand('redstartYellowscript.revertLastTask', revertLastTaskCommand),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
@@ -364,6 +423,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  // A dev server the model started must not outlive the window.
+  backgroundProcesses?.stopAll()
   mcpHost?.stop()
   statusBar?.dispose()
   statusBar = undefined
@@ -387,6 +448,25 @@ export function deactivate(): void {
  * Arguments are logged trimmed: they are model-authored and can be a whole file
  * of content on a Phase 3 write call.
  */
+/**
+ * One context tracker per connected client: n_ctx is read from the Nest once
+ * (llama-server's /props), and the gateway's overhead is learned from replies.
+ * Keyed weakly, so a reconnect (a new client) starts fresh.
+ */
+const contextTrackers = new WeakMap<NestClient, ContextTracker>()
+function contextFor(client: NestClient | null): ContextTracker | null {
+  if (!client) return null
+  let tracker = contextTrackers.get(client)
+  if (!tracker) {
+    tracker = new ContextTracker(client)
+    contextTrackers.set(client, tracker)
+    void tracker.ready().then(() => {
+      output?.info(`context: n_ctx ${tracker!.contextSize ?? 'unknown (learned from the first refusal)'}`)
+    })
+  }
+  return tracker
+}
+
 function logToolActivity(message: HostMessage): void {
   if (message.type === 'tool/call') {
     const args = message.arguments.length > 300 ? `${message.arguments.slice(0, 300)}…` : message.arguments
@@ -479,6 +559,21 @@ function getSession(id: string): ChatSession {
   if (!session) {
     session = new ChatSession({
       getClient: () => manager?.activeClient ?? null,
+      context: () => contextFor(manager?.activeClient ?? null),
+      diagnosticsAfterWrite,
+      onPlanChanged: (steps) => writeWorkspacePlan(steps),
+      workspaceContext: () => {
+        const root = workspaceRoots()[0]
+        return root ? buildWorkspaceContext(root) : null
+      },
+      maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
+      onContextTrimmed: (report) => {
+        output?.info(
+          `context: trimmed to fit (~${report.before} → ~${report.after} of ${report.usable ?? '?'} usable tokens; ` +
+            `${report.stubbed} old results stubbed, ${report.shrunk} calls shrunk, ${report.capped} messages capped)` +
+            (report.overLimit ? '  [STILL OVER the window]' : ''),
+        )
+      },
       onUnauthorized: () => manager?.handleUnauthorized(),
       tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
       toolContext: () => ({ workspaceRoots: workspaceRoots() }),
@@ -489,19 +584,43 @@ function getSession(id: string): ChatSession {
           return Promise.resolve(false)
         }
         const gate = makeApprovalGate({
+          ask: (request) => getSession(id).askApproval(request),
           checkpoints: checkpointForWorkspace(roots[0]!),
           store: approvalStore(),
           recordCheckpoint: (checkpoint, files) => {
             lastCheckpoint.set(roots[0]!, { checkpoint, files })
+            taskFor(id).checkpoints.push({ root: roots[0]!, checkpoint, files })
+            lastTaskConversation = id
+          },
+          task: {
+            trusted: () => taskFor(id).trusted,
+            trust: () => {
+              taskFor(id).trusted = true
+            },
           },
         })
         return gate(pending)
       },
-      approveCommand: (pending) => makeCommandGate()(pending),
+      approveCommand: (pending) =>
+        backgroundProcesses && commandChannel
+          ? makeCommandGate({
+              channel: commandChannel,
+              processes: backgroundProcesses,
+              ask: (request) => getSession(id).askApproval(request),
+            })(pending)
+          : Promise.resolve(null),
       conversationId: id,
       projectId: () => linkedProject()?.id ?? null,
       onPersist: () => persistConversation(id),
       emit: (message) => {
+        // A task is one user message's run: it starts when that message runs
+        // (not when it queues) and ends with the turn. "Apply all in this
+        // task" lasts until then; its checkpoints stay for Revert Last Task.
+        if (message.type === 'message' && message.message.role === 'user' && !message.message.pending) {
+          tasks.set(id, { trusted: false, checkpoints: [] })
+        } else if (message.type === 'turn/completed' || message.type === 'turn/failed') {
+          taskFor(id).trusted = false
+        }
         chatView?.post(message)
         if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
           statusBar?.setModel(getSession(message.conversationId).currentModel ?? null, message.stats.tokensPerSecond)
@@ -517,6 +636,14 @@ function getSession(id: string): ChatSession {
     const conv = conversations.get(id)
     if (conv && (conv.messages.length > 0 || conv.plan)) {
       session.load(conv.messages, conv.plan ?? null)
+    } else {
+      // A fresh conversation carries on the workspace's plan while steps are
+      // open (.yellowscript/PLAN.md, kept by onPlanChanged).
+      const carried = readWorkspacePlan()
+      if (carried) {
+        session.load([], carried)
+        output?.info(`plan: carried ${carried.length} step(s) from ${PLAN_DIR}/${PLAN_FILE} into a new conversation`)
+      }
     }
   }
   return session
@@ -536,6 +663,9 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
     pushActiveConversation()
   }
   const conversationId = id
+  // Sent, so no longer a draft. Cleared here rather than trusting the
+  // webview's follow-up, which could land after a save below.
+  conversations.setDraft(conversationId, '')
   const conv = conversations.get(conversationId)
   if (conv && conv.title === 'New chat' && workflow) {
     conv.title = titleFor(workflow.title)
@@ -546,11 +676,14 @@ function sendToActive(text: string, workflow?: { name: string; title: string }):
   pushSession()
   // Title a still-untitled chat once its turn (or its queue) is underway.
   void finished.then(() => {
-    if (conv && conv.title === 'New chat') {
+    // Re-read: `conv` is from before the turn, and saving it back would put
+    // its stale transcript and draft over what has been stored since.
+    const current = conversations.get(conversationId)
+    if (current && current.title === 'New chat') {
       const firstUser = getSession(conversationId).transcript.find((m) => m.role === 'user')
       if (firstUser) {
-        conv.title = titleFor(firstUser.content)
-        conversations.save(conv)
+        current.title = titleFor(firstUser.content)
+        conversations.save(current)
         pushConversations()
       }
     }
@@ -772,7 +905,7 @@ function switchConversation(id: string): void {
 function toViews(list: Conversation[]): ConversationView[] {
   return list.map((c) => {
     const session = sessions.get(c.id)
-    return { id: c.id, title: c.title, busy: session?.busy === true, queued: session?.queued ?? 0 }
+    return { id: c.id, title: c.title, busy: session?.busy === true, queued: session?.queued ?? 0, draft: c.draft ?? '' }
   })
 }
 
@@ -1098,6 +1231,74 @@ async function revertLastWriteCommand(): Promise<void> {
   }
 }
 
+/** The workspace plan's path, or null with no folder open. */
+function workspacePlanPath(): string | null {
+  const root = workspaceRoots()[0]
+  return root ? nodePath.join(root, PLAN_DIR, PLAN_FILE) : null
+}
+
+/** The open plan in the workspace, or null (no file, or every step closed). */
+function readWorkspacePlan(): PlanStep[] | null {
+  const file = workspacePlanPath()
+  if (!file) return null
+  try {
+    const steps = parsePlanFile(nodeFs.readFileSync(file, 'utf8'))
+    return hasOpenSteps(steps) ? steps : null
+  } catch {
+    return null
+  }
+}
+
+/** Keep the plan on disk; a cleared plan removes the file. Never fails a turn. */
+function writeWorkspacePlan(steps: PlanStep[] | null): void {
+  const file = workspacePlanPath()
+  if (!file) return
+  try {
+    if (steps && steps.length > 0) {
+      nodeFs.mkdirSync(nodePath.dirname(file), { recursive: true })
+      nodeFs.writeFileSync(file, formatPlanFile(steps), 'utf8')
+    } else {
+      nodeFs.rmSync(file, { force: true })
+    }
+  } catch (err) {
+    output?.warn(`plan: could not write ${file}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/**
+ * Undo every write the last task made, newest first, so a file written twice
+ * ends at its state before the task. Files the task created are removed.
+ */
+async function revertLastTaskCommand(): Promise<void> {
+  const task = lastTaskConversation ? tasks.get(lastTaskConversation) : undefined
+  if (!task || task.checkpoints.length === 0) {
+    vscode.window.showInformationMessage('Yellowscript: nothing to revert — the last task made no checkpointed writes.')
+    return
+  }
+  const files = [...new Set(task.checkpoints.flatMap((c) => c.files.map((f) => f.workspaceAbsolute)))]
+  const choice = await vscode.window.showWarningMessage(
+    `Revert the last Yellowscript task? It made ${task.checkpoints.length} write${task.checkpoints.length === 1 ? '' : 's'}; ` +
+      `${files.length} file${files.length === 1 ? '' : 's'} go back to how they were before it (files it created are deleted):`,
+    { modal: true, detail: files.join('\n') },
+    'Revert task',
+  )
+  if (choice !== 'Revert task') return
+
+  try {
+    for (const entry of [...task.checkpoints].reverse()) {
+      await checkpointForWorkspace(entry.root).revert(entry.checkpoint, entry.files)
+    }
+    output?.info(`revert: undid ${task.checkpoints.length} write(s) of the last task (${files.length} file(s))`)
+    task.checkpoints = []
+    lastCheckpoint.clear()
+    vscode.window.showInformationMessage(`Yellowscript: reverted the last task (${files.length} file${files.length === 1 ? '' : 's'}).`)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    vscode.window.showErrorMessage(`Could not revert the last task: ${reason}`)
+    output?.error('task revert failed', err)
+  }
+}
+
 /** Manual fallback for a Nest discovery can't see (different subnet, VPN). */
 async function promptForServerUrl(): Promise<void> {
   const entered = await vscode.window.showInputBox({
@@ -1208,7 +1409,6 @@ function connectMcpHost(): void {
       getCredential: () => client.getCredential(),
     },
     {
-      openStream: (url: string) => openMcpSseStream((input, init) => fetch(input, init), url),
       onTools: (mcpTools: readonly McpTool[]) => {
         const refs: NestToolRef[] = mcpTools
           .filter((t) => !currentDisabled.has(t.name))
@@ -1217,13 +1417,17 @@ function connectMcpHost(): void {
               name: t.name,
               description: t.description,
               inputSchema: t.inputSchema,
-              execute: async (args: unknown) =>
-                (
+              execute: async (args: unknown, context) => {
+                // Ask on the card of the conversation that made the call.
+                const asker = context.conversationId ? sessions.get(context.conversationId) : undefined
+                return (
                   await callWithApproval(t.name, args, approvalInfo(t.meta), {
                     ...approvals,
+                    ...(asker ? { prompt: (request) => promptInChat(request, asker.askApproval) } : {}),
                     call: (meta) => host.callToolResult(t.name, args, meta),
                   })
-                ).text,
+                ).text
+              },
             }
             if (t.meta) ref.meta = t.meta
             return ref

@@ -6,6 +6,7 @@
   import Transcript from './Transcript.svelte'
   import PlanBar from './PlanBar.svelte'
   import QuestionCard from './QuestionCard.svelte'
+  import ApprovalCard from './ApprovalCard.svelte'
   import LimitPrompt from './LimitPrompt.svelte'
   import Composer from './Composer.svelte'
   import ProjectsPage from './ProjectsPage.svelte'
@@ -38,7 +39,11 @@
       {#if s.conversation.plan && s.conversation.plan.length > 0}
         <PlanBar steps={s.conversation.plan} />
       {/if}
-      {#if s.conversation.question}
+      {#if s.conversation.approval}
+        {#key s.conversation.approval.id}
+          <ApprovalCard approval={s.conversation.approval} />
+        {/key}
+      {:else if s.conversation.question}
         {#key s.conversation.question.id}
           <QuestionCard question={s.conversation.question} />
         {/key}

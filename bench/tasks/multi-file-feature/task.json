@@ -1,0 +1,7 @@
+{
+  "title": "Add a feature across three files",
+  "prompt": "Add a `slugify(text)` function to src/strings.js: lower-case, ASCII letters and digits only, words joined by single hyphens, no leading or trailing hyphen (\"  Hello, World!  \" becomes \"hello-world\"). Export it from src/index.js alongside the others. Then add a `--slug` option to cli.js that prints the slug of the remaining arguments joined by spaces, e.g. `node cli.js --slug Barrel Jumper 2` prints `barrel-jumper-2`.",
+  "maxTurns": 25,
+  "timeoutS": 600,
+  "tags": ["core"]
+}

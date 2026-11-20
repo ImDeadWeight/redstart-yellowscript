@@ -134,6 +134,12 @@ export function credentialValue(credential: Credential): string {
 }
 
 /** An HTTP-level failure from Nest, carrying the status so callers can branch. */
+/** The prompt was larger than the model's window (llama-server's own numbers). */
+export interface ContextExceeded {
+  nCtx: number
+  promptTokens?: number
+}
+
 export class NestHttpError extends Error {
   // Fields are declared and assigned explicitly rather than via TypeScript
   // parameter properties: Node's native type stripping (which is what lets
@@ -141,12 +147,15 @@ export class NestHttpError extends Error {
   // because it emits code rather than only erasing types.
   readonly status: number
   readonly url: string | undefined
+  /** llama-server's exceed_context_size_error numbers, when that was the refusal. */
+  readonly contextExceeded: ContextExceeded | undefined
 
-  constructor(status: number, message: string, url?: string) {
+  constructor(status: number, message: string, url?: string, contextExceeded?: ContextExceeded) {
     super(message)
     this.name = 'NestHttpError'
     this.status = status
     this.url = url
+    this.contextExceeded = contextExceeded
   }
 
   /** 401 — credential missing, expired, or revoked. */

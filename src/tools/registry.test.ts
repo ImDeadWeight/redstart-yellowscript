@@ -27,15 +27,18 @@ const registry = () =>
   createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: emptyEditor })
 
 describe('createToolRegistry', () => {
-  test('registers the whole Phase 2 read-only set', () => {
+  test('registers the whole local tool set', () => {
     assert.deepEqual([...registry().names].sort(), [
+      'ys_delete_file',
       'ys_diagnostics',
       'ys_edit_file',
       'ys_editor_context',
       'ys_glob',
       'ys_grep',
       'ys_list_directory',
+      'ys_move_file',
       'ys_read_file',
+      'ys_replace',
       'ys_run_command',
       'ys_write_file',
     ])

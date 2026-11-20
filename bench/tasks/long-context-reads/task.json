@@ -1,0 +1,7 @@
+{
+  "title": "Read 30 large files without overflowing the context",
+  "prompt": "Each of the 30 files in data/ is a level record with exactly one line of the form `Barrels jumped: N`. Read every file with ys_read_file (one call per file; do not search or run commands), and tell me the total of all 30 values as `Total: <number>`.",
+  "maxTurns": 45,
+  "timeoutS": 1500,
+  "tags": ["core", "context"]
+}

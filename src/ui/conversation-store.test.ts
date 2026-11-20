@@ -8,7 +8,7 @@
 
 import { describe, it, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { conversationStore, type Conversation } from './conversation-store.ts'
+import { conversationStore, isBlank, type Conversation } from './conversation-store.ts'
 
 /** The slice of `vscode.Memento` the store actually touches. */
 interface FakeMemento {
@@ -118,4 +118,38 @@ describe('conversation-store migration', () => {
 test('conversation-store smoke', () => {
   const store = makeStore()
   assert.equal(store.list().length, 0)
+})
+
+describe('conversation-store drafts', () => {
+  it('a chat with neither messages nor a draft is blank', () => {
+    assert.equal(isBlank({ messages: [] }), true)
+    assert.equal(isBlank({ messages: [], draft: '   ' }), true)
+    assert.equal(isBlank({ messages: [], draft: 'half a thought' }), false)
+    assert.equal(isBlank({ messages: [{ id: 'm', role: 'user', content: 'hi' }] as never, draft: '' }), false)
+  })
+
+  it('setDraft stores and clears the draft without touching lastAccessedAt', () => {
+    const store = makeStore()
+    const conv = store.create('New chat')
+    store.setDraft(conv.id, 'hello')
+    assert.equal(store.get(conv.id)?.draft, 'hello')
+    assert.equal(store.get(conv.id)?.lastAccessedAt, conv.lastAccessedAt)
+    store.setDraft(conv.id, '')
+    assert.equal(store.get(conv.id)?.draft, undefined)
+  })
+
+  it('pruneBlank removes closed empty chats and keeps drafts and open tabs', () => {
+    const store = makeStore()
+    const blankClosed = store.create('New chat', [], 'acct')
+    const draftClosed = store.create('New chat', [], 'acct')
+    const blankOpen = store.create('New chat', [], 'acct')
+    store.setDraft(draftClosed.id, 'keep me')
+    store.archive(blankClosed.id)
+    store.archive(draftClosed.id)
+    assert.equal(store.pruneBlank(), 1)
+    assert.equal(store.get(blankClosed.id), undefined)
+    assert.ok(store.get(blankOpen.id))
+    const history = store.history('acct')
+    assert.deepEqual(history.map((h) => [h.id, h.draft]), [[draftClosed.id, true]])
+  })
 })

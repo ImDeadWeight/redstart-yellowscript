@@ -33,7 +33,7 @@
 // =============================================================================
 
 import type { ChatCompletionRequest, StreamHandlers, StreamResult } from '../nest/client.ts'
-import type { ToolCall } from '../nest/types.ts'
+import { NestHttpError, type ToolCall } from '../nest/types.ts'
 import type { ToolCallDelta, StreamTimings } from '../nest/streaming.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { PendingCommand, PendingWrite, ToolContext, ToolResult } from '../tools/types.ts'
@@ -44,17 +44,38 @@ import {
   type AgentMessage,
   type AgentPorts,
   type AgentToolCall,
+  ASK_USER_DEFINITION,
+  UPDATE_PLAN_DEFINITION,
+  type HostToolDefinition,
 } from './agent-core.ts'
+import type { ToolPayloadEntry } from '../tools/registry.ts'
+import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
 
 /**
- * How many model round trips one user message may cost.
+ * How many model round trips one user message may cost before the person is
+ * asked whether to keep going (Continue grants as many again).
  *
  * Each iteration is a full generation, so on a local model this is also a
- * wall-clock budget. Ten is enough for read → think → read again → answer,
- * and short enough that a loop caused by a confused model is noticed rather
- * than endured.
+ * wall-clock budget. A multi-file task needs dozens; a confused model is
+ * caught sooner by the repeat check below than by this cap.
  */
-export const DEFAULT_MAX_ITERATIONS = 10
+export const DEFAULT_MAX_ITERATIONS = 40
+
+/**
+ * The same call (tool and arguments) this many times in one run is a loop:
+ * the result cannot change, so the call is not run again and the model is
+ * told why. A write that failed and is retried unchanged is the usual case.
+ */
+export const MAX_IDENTICAL_CALLS = 3
+
+/** What the model reads instead of a repeated call's result. */
+export function repeatedCallResult(name: string, times: number): string {
+  return (
+    `Not run: you have called ${name} with these exact arguments ${times} times in this task, ` +
+    'and the result will not change. Use what the earlier results said, try a different approach, ' +
+    'or tell the user what is blocking you.'
+  )
+}
 
 /** Just the part of NestClient the loop needs, so tests can supply a fake. */
 export interface CompletionStreamer {
@@ -102,6 +123,8 @@ export interface AgentLoopHandlers extends StreamHandlers {
   onToolResult?: (call: ToolCall, result: ToolResult) => void
   /** A new round trip is starting; `iteration` is 1-based. */
   onIteration?: (iteration: number) => void
+  /** Older messages were trimmed to fit the context window before a request. */
+  onContextTrimmed?: (report: FitReport) => void
 }
 
 /**
@@ -128,7 +151,14 @@ export type ApprovalGate = (pending: PendingWrite) => Promise<boolean>
  * user rejected it. Kept as an injected port for testability — the real one lives
  * in the host alongside `vscode`.
  */
-export type CommandApprovalGate = (pending: PendingCommand) => Promise<string | null>
+export type CommandApprovalGate = (pending: PendingCommand) => Promise<CommandOutcome | string | null>
+
+/** What an approved command produced: the model's text, and whether it failed
+ *  (non-zero exit, timeout, could not start), so the card shows it. */
+export interface CommandOutcome {
+  text: string
+  isError: boolean
+}
 
 export interface AgentLoopOptions {
   client: CompletionStreamer
@@ -152,6 +182,12 @@ export interface AgentLoopOptions {
   plan?: AgentPorts['plan']
   /** The turn limit was reached: may the flow go on? Absent: no. */
   askContinue?: (signal?: AbortSignal) => Promise<boolean>
+  /** The connection's context window. Absent: no trimming, and a request
+   *  that overflows fails as it always did. */
+  context?: ContextTracker | undefined
+  /** After a write is applied: the problems now reported in those files
+   *  (absolute paths), appended to the result. Absent: nothing appended. */
+  diagnosticsAfterWrite?: ((files: string[]) => Promise<string | null>) | undefined
 }
 
 /**
@@ -212,7 +248,7 @@ export function assembleToolCalls(deltas: readonly ToolCallDelta[]): ToolCall[] 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResult> {
   const maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS
   const handlers = options.handlers ?? {}
-  const toolPayload = options.tools.payload()
+  const toolPayload = withHostTools(options.tools.payload(), options)
   const signal = options.signal
 
   // Worked on a copy: the caller's transcript is its own business, and the
@@ -225,6 +261,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   const toolRuns: ToolRun[] = []
 
   let iterations = 0
+  /** Images of the result being stored, handed to extraParts right after. */
+  let resultImages: string[] = []
+  /** How often each exact call (name + arguments) has been asked for. */
+  const callCounts = new Map<string, number>()
   let hitTurnCap = false
   let streamCut = false
   let last: StreamResult | undefined
@@ -234,7 +274,19 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
       streamTurn: async ({ acc, messages: turnMessages, signal: turnSignal }) => {
         iterations++
         handlers.onIteration?.(iterations)
-        const result = await options.client.streamChatCompletion(
+        const context = options.context
+        // Fit the run to the window, editing its messages in place (see
+        // context-budget.ts). `force` after the server refused: its numbers
+        // beat the estimate.
+        const fit = async (force: boolean) => {
+          if (!context) return
+          await context.ready(turnSignal)
+          const limits = context.limits()
+          if (!limits) return
+          const report = fitMessages(turnMessages as BudgetMessage[], limits, force)
+          if (report.stubbed || report.shrunk || report.capped) handlers.onContextTrimmed?.(report)
+        }
+        const send = () => options.client.streamChatCompletion(
           {
             ...options.request,
             messages: toWire(turnMessages),
@@ -257,6 +309,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           },
           turnSignal,
         )
+        await fit(false)
+        let estimate = totalTokens(turnMessages as BudgetMessage[])
+        let result: StreamResult
+        try {
+          result = await send()
+        } catch (err) {
+          // Too big after all: llama-server says how big the window is. Trim
+          // to that and try once more; a second refusal is reported as usual.
+          if (!context || !(err instanceof NestHttpError) || !err.contextExceeded) throw err
+          context.recordExceeded(err.contextExceeded.nCtx, err.contextExceeded.promptTokens, estimate)
+          await fit(true)
+          estimate = totalTokens(turnMessages as BudgetMessage[])
+          result = await send()
+        }
+        // The prompt the server really processed: what the overhead is.
+        if (context && typeof result.timings?.prompt_n === 'number') {
+          context.recordPrompt(result.timings.prompt_n + (result.timings.cache_n ?? 0), estimate)
+        }
         last = result
         // The client's assembled strings are the record; the deltas paint.
         acc.content = result.content
@@ -278,14 +348,35 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         const recovered = call.id.startsWith(FALLBACK_ID_PREFIX)
         const toolCall = call as ToolCall
         handlers.onToolCall?.(toolCall, recovered)
-        const toolResult = await options.tools.execute(call.function.name, call.function.arguments, options.toolContext)
-        const resultForModel = await review(toolResult, options)
+        const signature = callSignature(call.function.name, call.function.arguments)
+        const times = (callCounts.get(signature) ?? 0) + 1
+        callCounts.set(signature, times)
+        const resultForModel = times > MAX_IDENTICAL_CALLS
+          ? {
+              content: repeatedCallResult(call.function.name, times - 1),
+              isError: true,
+              summary: 'Not run: repeated call',
+              truncated: false,
+            }
+          : await review(await options.tools.execute(call.function.name, call.function.arguments, options.toolContext), options)
         handlers.onToolResult?.(toolCall, resultForModel)
         toolRuns.push({ call: toolCall, result: resultForModel, recovered })
+        resultImages = resultForModel.images ?? []
         // A failure goes back as content, not as an exception: the model needs
         // to read why and try something else.
         return { text: resultForModel.content, isError: resultForModel.isError }
       },
+      // A result's images (a page screenshot) go to the model as image parts,
+      // only when it reads images. The core calls these right after execute.
+      extractAttachments: (text: string) => {
+        const attachments = resultImages
+        resultImages = []
+        return { text, attachments }
+      },
+      extraParts: async (_text: string, attachments: unknown[]) =>
+        options.context?.vision
+          ? (attachments as string[]).map((url) => ({ type: 'image_url', image_url: { url } }))
+          : [],
     },
     gate: { approve: async () => true },
     limit: {
@@ -392,10 +483,19 @@ function answerSummary(answer: AskAnswerShape | null): string {
  */
 async function review(toolResult: ToolResult, options: AgentLoopOptions): Promise<ToolResult> {
   if (toolResult.pendingWrite && options.approveChange) {
-    const applied = await options.approveChange(toolResult.pendingWrite)
+    const pending = toolResult.pendingWrite
+    const applied = await options.approveChange(pending)
     // Honest accounting: the model is told whether the write actually
     // happened, never that a pending plan succeeded on its own.
-    return applied ? withAppliedNote(toolResult) : withRejectedNote(toolResult)
+    if (!applied) return withRejectedNote(toolResult)
+    const done = withAppliedNote(toolResult)
+    // What the write broke, without another call. Deleted files have none.
+    const written = pending.changes.filter((c) => !c.isDeleted).map((c) => c.absolutePath)
+    if (options.diagnosticsAfterWrite && written.length > 0) {
+      const report = await options.diagnosticsAfterWrite(written).catch(() => null)
+      if (report) done.content = `${done.content}\n\n${report}`
+    }
+    return done
   }
   if (toolResult.pendingCommand && options.approveCommand) {
     // Always-ask: show verbatim → run on approval → capture output. The gate
@@ -438,7 +538,8 @@ function withRejectedNote(result: ToolResult): ToolResult {
 /** Replace a pending-command result's text with the captured output, or a rejected
  *  note. `output` is the captured stdout/stderr (already budgeted by the caller) or
  *  null if the user declined — in which case the model is told it was not run. */
-function withCommandNote(result: ToolResult, output: string | null): ToolResult {
+function withCommandNote(result: ToolResult, outcome: CommandOutcome | string | null): ToolResult {
+  const output = outcome === null ? null : typeof outcome === 'string' ? { text: outcome, isError: false } : outcome
   if (output === null) {
     const next: ToolResult = {
       ...result,
@@ -451,10 +552,42 @@ function withCommandNote(result: ToolResult, output: string | null): ToolResult 
   }
   const next: ToolResult = {
     ...result,
-    content: output,
-    summary: `${result.summary} — ran`,
-    isError: false,
+    content: output.text,
+    summary: `${result.summary.replace(/ \(pending approval\)$/, '')} — ${output.isError ? 'failed' : 'ran'}`,
+    isError: output.isError,
   }
   delete next.pendingCommand
   return next
+}
+
+/**
+ * ask_user and update_plan, offered whenever this loop can answer them.
+ *
+ * Nest offers both over MCP to a client that declares them, but this loop is
+ * what answers them, so it must not depend on that: with Nest's tools missing
+ * (MCP down, an older Nest) the model was left without a way to ask, and,
+ * told elsewhere that a question in its reply ends the turn unanswered, it
+ * spun through throwaway commands instead (2026-11-19). Nest's copy, when
+ * present, wins; it is the same definition from the same agent-core.
+ */
+export function withHostTools(payload: ToolPayloadEntry[], options: Pick<AgentLoopOptions, 'ask' | 'plan'>): ToolPayloadEntry[] {
+  const have = new Set(payload.map((t) => t.function.name))
+  const extra: ToolPayloadEntry[] = []
+  const add = (def: HostToolDefinition) => {
+    if (!have.has(def.name)) extra.push({ type: 'function', function: { name: def.name, description: def.description, parameters: def.inputSchema } })
+  }
+  if (options.ask) add(ASK_USER_DEFINITION)
+  if (options.plan) add(UPDATE_PLAN_DEFINITION)
+  return extra.length ? [...payload, ...extra] : payload
+}
+
+/**
+ * What makes two calls "the same call" for the repeat check. Exact, except
+ * for commands: there digits are ignored, so `echo break2`, `echo break3`…
+ * count as one repeated call (seen 2026-11-19, a model evading the exact
+ * check). Reads keep exact arguments: level-01 … level-30 are different work.
+ */
+export function callSignature(name: string, args: string): string {
+  const loose = name === 'ys_run_command' || name === 'ys_process_start'
+  return `${name}\u0000${(loose ? args.replace(/\d+/g, '#') : args).trim()}`
 }

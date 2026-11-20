@@ -1,0 +1,8 @@
+{
+  "title": "Ask instead of guessing an ambiguous requirement",
+  "prompt": "Add a temperature conversion function to src/convert.js and export it. I need it for the weather widget.",
+  "maxTurns": 15,
+  "timeoutS": 600,
+  "answers": [{ "chosen": ["Celsius to Fahrenheit"], "text": "call it celsiusToFahrenheit" }],
+  "tags": ["core", "ask"]
+}

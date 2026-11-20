@@ -18,6 +18,8 @@ import * as toolCalls from '../vendor/agent-core/tool-calls.mjs'
 import * as parser from '../vendor/agent-core/tool-call-parser.mjs'
 import * as askUser from '../vendor/agent-core/ask-user.mjs'
 import * as updatePlan from '../vendor/agent-core/update-plan.mjs'
+import * as compaction from '../vendor/agent-core/compaction.mjs'
+import * as approval from '../vendor/agent-core/approval.mjs'
 
 import type {
   AgentLoopParams,
@@ -82,3 +84,23 @@ export type { AskRequest as AskUserRequest }
 
 export const UPDATE_PLAN_TOOL: string = updatePlan.UPDATE_PLAN_TOOL
 export const openSteps: (steps: readonly PlanStep[] | null) => PlanStep[] = updatePlan.openSteps
+
+/** n_ctx and the send budget for the messages: n_ctx minus reply headroom and overhead. */
+export const compactionBudget: (
+  nCtx: number | null | undefined,
+  maxTokens: unknown,
+  overheadTokens?: unknown,
+) => { nCtx: number; usable: number } | null = compaction.compactionBudget
+
+/** The tool a call_tool call names, and its arguments, or null (Nest's catalog dispatcher). */
+export const callToolTarget: (name: string, args: unknown) => { name: string; args: Record<string, unknown> } | null =
+  approval.callToolTarget
+
+/** The tool definitions for the two host-answered tools (name, description, inputSchema). */
+export interface HostToolDefinition {
+  name: string
+  description: string
+  inputSchema: unknown
+}
+export const ASK_USER_DEFINITION: HostToolDefinition = askUser.ASK_USER_DEFINITION
+export const UPDATE_PLAN_DEFINITION: HostToolDefinition = updatePlan.UPDATE_PLAN_DEFINITION

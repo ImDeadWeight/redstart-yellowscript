@@ -14,3 +14,4 @@ sample-workspace/**
 scripts/**
 tsconfig.webview.json
 assets/**
+bench/**

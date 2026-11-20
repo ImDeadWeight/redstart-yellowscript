@@ -1,0 +1,7 @@
+{
+  "title": "Milestone: a single-screen barrel-dodging platformer",
+  "prompt": "Build an original single-screen platformer in this folder: index.html plus game.js (and more files if you like), canvas 800×600, plain JavaScript. A player that runs (ArrowLeft/ArrowRight), jumps (Space) and climbs ladders (ArrowUp/ArrowDown) across four sloped girders; barrels that roll down from the top, fall down the ladders at random, and end the run on contact; a point for each barrel jumped; three lives; and a goal at the top that wins the level. Draw everything with canvas shapes in your own style; no images. Plan the work with update_plan, check the page with ys_check_page as you go, and fix what it reports.",
+  "maxTurns": 80,
+  "timeoutS": 3600,
+  "tags": ["milestone", "web"]
+}

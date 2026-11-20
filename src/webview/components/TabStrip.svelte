@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ConversationView } from '../../chat/protocol.ts'
   import { post } from '../host.ts'
+  import { flushDraft } from '../drafts.ts'
   import { view } from '../store.svelte.ts'
   import Icon from './Icon.svelte'
 
@@ -22,7 +23,11 @@
           role="tab"
           aria-selected={tab.id === activeId}
           title={tab.title}
-          onclick={() => tab.id !== activeId && post({ type: 'switchConversation', id: tab.id })}
+          onclick={() => {
+            if (tab.id === activeId) return
+            flushDraft()
+            post({ type: 'switchConversation', id: tab.id })
+          }}
         >
           {#if tab.busy}<span class="busy" aria-label="working"></span>{/if}
           <span class="label">{tab.title}</span>
@@ -33,7 +38,12 @@
           class="close"
           title="Close conversation"
           aria-label="Close {tab.title}"
-          onclick={() => post({ type: 'deleteConversation', id: tab.id })}
+          onclick={() => {
+            // The host decides between history and deletion by whether
+            // anything was typed, so the draft must reach it first.
+            flushDraft()
+            post({ type: 'deleteConversation', id: tab.id })
+          }}
         ><Icon name="x" size={12} /></button>
       </div>
     {/each}

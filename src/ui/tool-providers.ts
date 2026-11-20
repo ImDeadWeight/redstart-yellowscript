@@ -14,7 +14,7 @@ import * as vscode from 'vscode'
 
 import { locateRipgrep } from '../tools/ripgrep.ts'
 import { migrateToolNames, type ApprovalStore } from '../tools/approval.ts'
-import type { DiagnosticRecord, DiagnosticSeverity } from '../tools/diagnostics.ts'
+import { formatWriteDiagnostics, type DiagnosticRecord, type DiagnosticSeverity } from '../tools/diagnostics.ts'
 import type { EditorState, EditorPosition } from '../tools/editor-context.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
@@ -187,4 +187,44 @@ export function approvalStore(): ApprovalStore {
       )
     },
   }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics after a write (item 8).
+// ---------------------------------------------------------------------------
+
+/** How long to wait for a language server to report on a written file. */
+const DIAGNOSTICS_WAIT_MS = 2_500
+/** Quiet time after the last change before the report is taken. */
+const DIAGNOSTICS_SETTLE_MS = 400
+
+/**
+ * The errors and warnings in the files just written. A language server only
+ * reports on files it has open, so each is opened as a document (not shown in
+ * an editor), then this waits for diagnostics on them to arrive and settle,
+ * or for the time limit, whichever is first.
+ */
+export async function diagnosticsAfterWrite(files: string[]): Promise<string | null> {
+  const uris = files.map((f) => vscode.Uri.file(f))
+  const wanted = new Set(uris.map((u) => u.toString()))
+  let settle: ReturnType<typeof setTimeout> | undefined
+  let limit: ReturnType<typeof setTimeout> | undefined
+  let sub: vscode.Disposable | undefined
+  const settled = new Promise<void>((resolve) => {
+    limit = setTimeout(resolve, DIAGNOSTICS_WAIT_MS)
+    sub = vscode.languages.onDidChangeDiagnostics((event) => {
+      if (!event.uris.some((u) => wanted.has(u.toString()))) return
+      if (settle) clearTimeout(settle)
+      settle = setTimeout(resolve, DIAGNOSTICS_SETTLE_MS)
+    })
+  })
+  try {
+    await Promise.all(uris.map((u) => vscode.workspace.openTextDocument(u).then(() => undefined, () => undefined)))
+    await settled
+  } finally {
+    clearTimeout(limit)
+    clearTimeout(settle)
+    sub?.dispose()
+  }
+  return formatWriteDiagnostics(diagnosticsProvider(), files, workspaceRoots())
 }

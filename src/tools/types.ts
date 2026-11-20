@@ -160,6 +160,8 @@ export type ToolEffect =
       exitCode: number | null
       /** Started in the background, as this process id. */
       processId?: string
+      /** Where a background process runs, so an interrupted task can restart it. */
+      cwd?: string
       /** The address a background process said it serves. */
       url?: string
       /** The run did not succeed (non-zero exit, timeout, could not start). */

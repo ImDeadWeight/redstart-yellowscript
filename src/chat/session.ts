@@ -23,6 +23,7 @@ import type {
   ConversationState,
   HostMessage,
   PlanStepView,
+  InFlightRun,
   QuestionItemView,
   QuestionView,
   ToolCardView,
@@ -40,6 +41,9 @@ import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
  *  on. Distributes the `conversationId` omission across the union so callers can
  *  build a message without it and let ChatSession attach it. */
 type OutboundMessage = HostMessage extends infer T ? (T extends { conversationId: string } ? Omit<T, 'conversationId'> : T) : never
+
+/** What Continue sends after a reload cut a run off. */
+export const RESUME_PROMPT = 'Continue the task from where it stopped.'
 
 /**
  * How the assistant's own thinking is treated on the NEXT request.
@@ -127,6 +131,10 @@ export class ChatSession {
   private limitWait: ((go: boolean) => void) | null = null
   /** Tool calls waiting for allow / deny, shown one at a time. */
   private readonly approvals: ApprovalQueue
+  /** The running turn's record, saved with the conversation. */
+  private inFlight: InFlightRun | null = null
+  /** A run from an earlier window that never ended: offered to continue. */
+  private interrupted: InFlightRun | null = null
 
   constructor(deps: SessionDeps) {
     this.deps = deps
@@ -182,7 +190,35 @@ export class ChatSession {
       plan: this.plan ? this.plan.map((step) => ({ ...step })) : null,
       atTurnLimit: this.limitWait !== null,
       approval: this.approvals.view(),
+      interrupted: this.interrupted ? { startedAt: this.interrupted.startedAt, processes: this.interrupted.processes.map((p) => p.command) } : null,
     }
+  }
+
+  /** The running turn's record, for persistence; null when idle. */
+  inFlightSnapshot(): InFlightRun | null {
+    return this.inFlight ? { startedAt: this.inFlight.startedAt, processes: this.inFlight.processes.map((p) => ({ ...p })) } : null
+  }
+
+  /** Put the "interrupted" card away. */
+  dismissInterrupted(): void {
+    if (!this.interrupted) return
+    this.interrupted = null
+    this.emitState()
+    this.deps.onPersist?.()
+  }
+
+  /**
+   * Continue an interrupted run. Returns the background commands it had
+   * running, for the host to restart first when the person asked to; then
+   * sends the message that picks the task up again. The run log of what had
+   * finished is on its turn already, so the model starts knowing it.
+   */
+  resumeInterrupted(): { processes: { command: string; cwd: string }[]; sent: Promise<void> } | null {
+    const was = this.interrupted
+    if (!was || this.busy) return null
+    this.interrupted = null
+    this.emitState()
+    return { processes: was.processes.map(({ command, cwd }) => ({ command, cwd })), sent: this.send(RESUME_PROMPT) }
   }
 
   /** The plan, for persistence. */
@@ -243,9 +279,14 @@ export class ChatSession {
    * and must be allowed to finish. Switching tabs never calls this; it is a
    * pure view change handled by the host.
    */
-  load(messages: ChatMessageView[], plan: PlanStepView[] | null = null): void {
-    this.messages = messages.map((message) => ({ ...message }))
-    if (!this.busy) this.plan = plan ? plan.map((step) => ({ ...step })) : null
+  load(messages: ChatMessageView[], plan: PlanStepView[] | null = null, inFlight: InFlightRun | null = null): void {
+    // A turn saved mid-stream by a window that then closed is not streaming
+    // any more: it stopped.
+    this.messages = messages.map((message) => (message.streaming && !this.busy ? { ...message, streaming: false, aborted: true } : { ...message }))
+    if (!this.busy) {
+      this.plan = plan ? plan.map((step) => ({ ...step })) : null
+      this.interrupted = inFlight ? { startedAt: inFlight.startedAt, processes: inFlight.processes.map((p) => ({ ...p })) } : null
+    }
     this.emit({ type: 'conversation', messages: this.messages, state: this.state() })
   }
 
@@ -337,6 +378,13 @@ export class ChatSession {
 
     this.messages.push(userMessage)
     this.emit({ type: 'message', message: { ...userMessage } })
+    // Recorded before the first save, so a crash from here on reads as
+    // interrupted on the next load.
+    this.inFlight = { startedAt: Date.now(), processes: [] }
+    if (this.interrupted) {
+      this.interrupted = null
+      this.emitState()
+    }
 
     const turn: ChatMessageView = { id: this.nextId(), role: 'assistant', content: '', streaming: true }
     this.messages.push(turn)
@@ -423,9 +471,17 @@ export class ChatSession {
                 })
               },
               onToolResult: (call, toolResult) => {
-                if (toolResult.effect) {
-                  effects.push(toolResult.effect)
+                const effect = toolResult.effect
+                if (effect) {
+                  effects.push(effect)
                   turn.run = [...effects]
+                  if (effect.kind === 'command' && effect.ran && effect.processId && effect.exitCode === null && effect.cwd) {
+                    this.inFlight?.processes.push({ id: effect.processId, command: effect.command, cwd: effect.cwd })
+                  } else if (effect.kind === 'stop' && this.inFlight) {
+                    this.inFlight.processes = this.inFlight.processes.filter((p) => p.id !== effect.processId)
+                  }
+                  // Saved as it happens: a crash keeps the run log so far.
+                  this.deps.onPersist?.()
                 }
                 turn.tools = (turn.tools ?? []).map((card) =>
                   card.callId === call.id
@@ -493,6 +549,7 @@ export class ChatSession {
       }
     } finally {
       if (this.controller === controller) this.controller = null
+      this.inFlight = null
       this.deps.onPersist?.()
     }
   }

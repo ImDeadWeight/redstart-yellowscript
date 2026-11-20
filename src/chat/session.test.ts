@@ -4,7 +4,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { ChatSession, type SessionDeps } from './session.ts'
+import { ChatSession, RESUME_PROMPT, type SessionDeps } from './session.ts'
+import { BackgroundProcesses } from '../tools/process-runner.ts'
 import type { HostMessage } from './protocol.ts'
 import type { ChatCompletionRequest, NestClient, StreamHandlers, StreamResult } from '../nest/client.ts'
 import { NestHttpError } from '../nest/types.ts'
@@ -903,5 +904,74 @@ describe('ChatSession run log', () => {
     assert.equal(first!.messages.at(-1)!.content, '[Running now: p1 "npm run dev" → http://localhost:5173/ (just started)]\n\nfirst')
     const users = second!.messages.filter((m) => m.role === 'user').map((m) => m.content)
     assert.deepEqual(users, ['first', 'second'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// An interrupted run: recorded while it goes, offered to continue on reload.
+// ---------------------------------------------------------------------------
+
+describe('ChatSession interrupted runs', () => {
+  const workspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-inflight-')))
+  after(() => fs.rmSync(workspace, { recursive: true, force: true }))
+
+  test('a run records what it has running, saved as it goes, cleared at the end', async () => {
+    const saved: (ReturnType<ChatSession['inFlightSnapshot']>)[] = []
+    let session!: ChatSession
+    let n = 0
+    const scripts: StreamScript[] = [
+      async () => emptyResult({ toolCalls: [{ index: 0, id: 'c1', function: { name: 'ys_process', arguments: '{"action":"start","command":"npm run dev"}' } }] }),
+      says('Started.'),
+    ]
+    session = new ChatSession({
+      getClient: () => fakeClient((req, handlers, signal) => scripts.shift()!(req, handlers, signal)),
+      conversationId: 'c',
+      onUnauthorized: () => {},
+      emit: () => {},
+      newId: () => `id-${++n}`,
+      tools: () => createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }), processes: new BackgroundProcesses() }),
+      toolContext: () => ({ workspaceRoots: [workspace] }),
+      approveCommand: async () => ({ text: 'p1 is serving http://localhost:5173/', isError: false, exitCode: null, processId: 'p1' }),
+      onPersist: () => saved.push(session.inFlightSnapshot()),
+    })
+    await session.send('start the dev server')
+    const during = saved.find((s) => s?.processes.length)
+    assert.deepEqual(during?.processes, [{ id: 'p1', command: 'npm run dev', cwd: workspace }])
+    assert.equal(session.inFlightSnapshot(), null, 'cleared when the run ends')
+    assert.equal(saved.at(-1), null)
+  })
+
+  test('loaded with a run still recorded: offered to continue, and the stuck turn stops spinning', async () => {
+    const h = new Harness()
+    h.session.load(
+      [
+        { id: 'u1', role: 'user', content: 'build it' },
+        { id: 'a1', role: 'assistant', content: 'Working', streaming: true },
+      ],
+      null,
+      { startedAt: 1, processes: [{ id: 'p1', command: 'npm run dev', cwd: workspace }] },
+    )
+    assert.deepEqual(h.session.state().interrupted, { startedAt: 1, processes: ['npm run dev'] })
+    const turn = h.session.snapshot()[1]!
+    assert.equal(turn.streaming, false)
+    assert.equal(turn.aborted, true)
+
+    h.respond(says('Picking up.'))
+    const resumed = h.session.resumeInterrupted()!
+    assert.deepEqual(resumed.processes, [{ command: 'npm run dev', cwd: workspace }])
+    await resumed.sent
+    assert.equal(h.lastRequest.messages.at(-1)!.content, RESUME_PROMPT)
+    assert.equal(h.session.state().interrupted, null)
+  })
+
+  test('dismiss puts the card away; a new message does too', async () => {
+    const h = new Harness()
+    const run = { startedAt: 1, processes: [] }
+    h.session.load([], null, run)
+    h.session.dismissInterrupted()
+    assert.equal(h.session.state().interrupted, null)
+    h.session.load([], null, run)
+    await h.session.send('something else')
+    assert.equal(h.session.state().interrupted, null)
   })
 })

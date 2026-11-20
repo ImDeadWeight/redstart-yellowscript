@@ -58,6 +58,7 @@ import type { PendingCommand, ToolEffect } from './tools/types.ts'
 import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
 import { nodeCommandContext } from './tools/command-context.ts'
 import { usableReadRoots } from './tools/read-scope.ts'
+import { AttentionTracker, LONG_RUN_MS } from './chat/attention.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { BackgroundProcesses, describeRunning } from './tools/process-runner.ts'
 import { McpHost, withProjectMeta, type McpTool } from './nest/mcp-host.ts'
@@ -308,7 +309,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const session = getSession(activeConversationId)
         // If the active conversation has a saved transcript and nothing is
         // streaming, seed the session so the panel opens on the right chat.
-        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null)
+        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
         chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId, session.state())
       } else {
         chatView?.sendInit(snapshot(null), [], null, EMPTY_CONVERSATION_STATE)
@@ -344,6 +345,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     onContinueAtLimit: (go) => {
       if (activeConversationId) getSession(activeConversationId).continueAtLimit(go)
+    },
+    onResumeTask: (restart) => {
+      if (!activeConversationId) return
+      const session = getSession(activeConversationId)
+      // Clicking "Restart and continue" is the person's go-ahead for them.
+      const resumed = session.resumeInterrupted()
+      if (!resumed) return
+      if (restart && backgroundProcesses) {
+        for (const p of resumed.processes) {
+          try {
+            const started = backgroundProcesses.start(p.command, p.cwd)
+            commandChannel?.appendLine(`\n$ ${p.command}    (restarted for an interrupted task as ${started.id})`)
+          } catch (err) {
+            output?.warn(`could not restart ${p.command}: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+      }
+      void resumed.sent
+    },
+    onDismissInterrupted: () => {
+      if (activeConversationId) getSession(activeConversationId).dismissInterrupted()
     },
     onOpenTaskDiff: (turnId, file) => {
       if (activeConversationId) void openTaskDiff(getSession(activeConversationId).runOf(turnId) ?? [], file)
@@ -384,7 +406,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       conversations.unarchive(id)
       activeConversationId = id
       const session = getSession(id)
-      session.load(conv.messages, conv.plan ?? null)
+      session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
       pushConversations()
       pushActiveConversation()
       postConversation(id)
@@ -425,6 +447,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastTask', revertLastTaskCommand),
+    vscode.commands.registerCommand('redstartYellowscript.showWaiting', () => {
+      const id = attention.firstWaiting()
+      return id ? showConversation(id) : chatView?.reveal()
+    }),
   )
 
   if (config().get<boolean>('autoConnect', true)) {
@@ -658,8 +684,15 @@ function getSession(id: string): ChatSession {
         // task" lasts until then; its checkpoints stay for Revert Last Task.
         if (message.type === 'message' && message.message.role === 'user' && !message.message.pending) {
           tasks.set(id, { trusted: false, checkpoints: [] })
+          attention.runStarted(id)
         } else if (message.type === 'turn/completed' || message.type === 'turn/failed') {
           taskFor(id).trusted = false
+          const took = attention.runEnded(id)
+          if (took !== null && took > LONG_RUN_MS) notifyUnwatched(id, `finished after ${Math.round(took / 60_000)} min`)
+        } else if (message.type === 'conversationState') {
+          const news = attention.update(id, message.state)
+          statusBar?.setWaiting(attention.count)
+          if (news) notifyUnwatched(id, `is waiting for ${news}`)
         }
         chatView?.post(message)
         if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
@@ -675,7 +708,7 @@ function getSession(id: string): ChatSession {
     // every other tab the user opens later.
     const conv = conversations.get(id)
     if (conv && (conv.messages.length > 0 || conv.plan)) {
-      session.load(conv.messages, conv.plan ?? null)
+      session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
     } else {
       // A fresh conversation carries on the workspace's plan while steps are
       // open (.yellowscript/PLAN.md, kept by onPlanChanged).
@@ -740,6 +773,9 @@ function persistConversation(id: string): void {
   const plan = session.planSnapshot()
   if (plan) conv.plan = plan
   else delete conv.plan
+  const inFlight = session.inFlightSnapshot()
+  if (inFlight) conv.inFlight = inFlight
+  else delete conv.inFlight
   conversations.save(conv)
 }
 
@@ -1431,6 +1467,29 @@ async function promptForServerUrl(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Which conversations wait on the person, and how long runs take. */
+const attention = new AttentionTracker()
+
+/**
+ * Say so when a run needs the person, or a long one finished, and the window
+ * is not focused (when it is, the card is already on screen). Show brings
+ * that conversation to the front.
+ */
+function notifyUnwatched(conversationId: string, what: string): void {
+  if (vscode.window.state.focused) return
+  if (config().get<boolean>('notifyWhenWaiting') === false) return
+  const title = conversations.get(conversationId)?.title ?? 'A chat'
+  void vscode.window.showInformationMessage(`Yellowscript: "${title}" ${what}.`, 'Show').then((choice) => {
+    if (choice === 'Show') void showConversation(conversationId)
+  })
+}
+
+/** Reveal the chat with this conversation in front. */
+async function showConversation(conversationId: string): Promise<void> {
+  await chatView?.reveal()
+  switchConversation(conversationId)
+}
 
 /** What the command classifier needs to know about this workspace and run. */
 function commandContextFor(conversationId: string, pending: PendingCommand): CommandContext {

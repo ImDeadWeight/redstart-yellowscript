@@ -167,6 +167,22 @@ export interface ConversationState {
   atTurnLimit: boolean
   /** The tool call waiting to be allowed or denied, or null. */
   approval: ApprovalView | null
+  /** A run that was still going when the window closed or crashed. */
+  interrupted?: InterruptedView | null
+}
+
+/** A run cut off by a reload or a crash, offered to be continued. */
+export interface InterruptedView {
+  startedAt: number
+  /** The background commands it had running, which stopped with the window. */
+  processes: string[]
+}
+
+/** What a running turn records with the conversation, so a reload can tell
+ *  it was cut off. Cleared when the run ends. */
+export interface InFlightRun {
+  startedAt: number
+  processes: { id: string; command: string; cwd: string }[]
 }
 
 /** A Nest project, as the Projects page lists it. */
@@ -294,6 +310,10 @@ export type WebviewMessage =
   | { type: 'clearPlan' }
   /** At the turn limit: keep going, or stop. */
   | { type: 'continueAtLimit'; go: boolean }
+  /** An interrupted run: continue it (restarting its processes first, when
+   *  `restart`), or put the card away. */
+  | { type: 'resumeTask'; restart: boolean }
+  | { type: 'dismissInterrupted' }
   /** The task summary: open a file's diff since the run (`turnId`) began. */
   | { type: 'openTaskDiff'; turnId: string; path: string }
   /** The task summary: undo every write of the run `turnId`. */
@@ -471,6 +491,10 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
         : null
     case 'clearPlan':
       return { type: 'clearPlan' }
+    case 'resumeTask':
+      return { type: 'resumeTask', restart: msg.restart === true }
+    case 'dismissInterrupted':
+      return { type: 'dismissInterrupted' }
     case 'openTaskDiff':
       return typeof msg.turnId === 'string' && typeof msg.path === 'string' ? { type: 'openTaskDiff', turnId: msg.turnId, path: msg.path } : null
     case 'revertTask':

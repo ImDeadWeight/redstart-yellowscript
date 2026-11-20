@@ -55,6 +55,8 @@ export interface ChatViewHandlers {
   onContinueAtLimit: (go: boolean) => void
   onOpenTaskDiff: (turnId: string, path: string) => void
   onRevertTask: (turnId: string) => void
+  onResumeTask: (restart: boolean) => void
+  onDismissInterrupted: () => void
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.WebviewPanelSerializer {
@@ -234,6 +236,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
         break
       case 'revertTask':
         this.handlers.onRevertTask(message.turnId)
+        break
+      case 'resumeTask':
+        this.handlers.onResumeTask(message.restart)
+        break
+      case 'dismissInterrupted':
+        this.handlers.onDismissInterrupted()
         break
     }
   }

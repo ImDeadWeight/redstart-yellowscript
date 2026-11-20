@@ -19,6 +19,8 @@ export class StatusBar {
   private model: string | null = null
   private tokensPerSecond: number | null = null
   private state: ConnectionState = { status: 'disconnected' }
+  /** Conversations waiting on the person (an approval, a question). */
+  private waiting = 0
 
   constructor() {
     // Right-aligned with a high priority so it sits near the language/encoding
@@ -47,12 +49,19 @@ export class StatusBar {
     this.render()
   }
 
+  /** How many conversations wait on the person; 0 clears the badge. */
+  setWaiting(count: number): void {
+    this.waiting = count
+    this.render()
+  }
+
   private render(): void {
     const { text, tooltip, command, warning } = this.presentation()
-    this.item.text = text
-    this.item.tooltip = tooltip
-    this.item.command = command
-    this.item.backgroundColor = warning
+    const waiting = this.waiting > 0
+    this.item.text = waiting ? `$(bell-dot) ${text}` : text
+    this.item.tooltip = waiting ? `${this.waiting} Yellowscript chat${this.waiting === 1 ? ' is' : 's are'} waiting for you. Click to show.\n\n${tooltip}` : tooltip
+    this.item.command = waiting ? 'redstartYellowscript.showWaiting' : command
+    this.item.backgroundColor = warning || waiting
       ? new vscode.ThemeColor('statusBarItem.warningBackground')
       : undefined
   }

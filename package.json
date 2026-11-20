@@ -141,6 +141,11 @@
         "command": "redstartYellowscript.revertLastTask",
         "title": "Revert Last Task",
         "category": "Yellowscript"
+      },
+      {
+        "command": "redstartYellowscript.showWaiting",
+        "title": "Show the Chat Waiting for You",
+        "category": "Yellowscript"
       }
     ],
     "configuration": {
@@ -174,6 +179,11 @@
           "minimum": 5,
           "maximum": 500,
           "markdownDescription": "Model round trips one message may run before Yellowscript asks whether to keep going. **Continue** grants as many again. A repeated identical tool call is stopped sooner, whatever this says."
+        },
+        "redstartYellowscript.notifyWhenWaiting": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When the window is not focused, show a notification when a chat starts waiting for you (an approval, a question, the turn limit) or a run of over two minutes finishes. The status bar shows a bell while any chat waits."
         },
         "redstartYellowscript.tools.unifiedDiff": {
           "type": "boolean",

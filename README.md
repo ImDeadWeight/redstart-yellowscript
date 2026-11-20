@@ -61,6 +61,7 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Show Connection Status` | Details view plus the next useful action |
 | `Yellowscript: Inspect Workspace Tools` | Run all `ys_*` tools with probe args and dump results to the output channel |
 | `Yellowscript: Revert Last Write` | Restore files from the most recent approved write via the shadow checkpoint |
+| `Yellowscript: Show the Chat Waiting for You` | Bring the chat that waits on an approval or a question to the front (also the status bar's bell) |
 | `Yellowscript: Revert Last Task` | Undo every write of the last task, newest first; files it created are removed |
 | `Yellowscript: Open Settings` | Open the Redstart Yellowscript settings page |
 
@@ -81,6 +82,7 @@ to open settings directly.
 | `redstartYellowscript.commands.autoRunProjectChecks` | `true` | Run the project's test, build and lint scripts and a dev server without asking. |
 | `redstartYellowscript.extraReadRoots` | `[]` | Folders outside the workspace the read tools may read. |
 | `redstartYellowscript.allowedCommands` | `[]` | Command prefixes that run without asking in this workspace (`npm test`). Chained, piped or redirected lines always ask. |
+| `redstartYellowscript.notifyWhenWaiting` | `true` | Notify when a chat waits for you, or a long run finishes, while the window is not focused. |
 | `redstartYellowscript.tools.unifiedDiff` | `false` | Offer `ys_edit_file` (unified diffs) to the model. |
 | `redstartYellowscript.approvedWriteTools` | `[]` | Write tools to always allow without prompting (`ys_write_file`, `ys_edit_file`). |
 
@@ -158,6 +160,20 @@ so the model is offered both (agent-core runs them; see below).
 - **The turn limit** (`agent.maxTurns`, 40 by default) asks before going on,
   instead of stopping silently. A tool call repeated with identical arguments
   a fourth time is not run; the model is told to change approach.
+
+### When a run needs you, or was cut off
+
+When the window is not focused and a chat starts waiting (an approval, a
+question, the turn limit), a notification names the chat, with **Show**; the
+status bar shows a bell until it is answered. A run of over two minutes that
+finishes unwatched says so too. `notifyWhenWaiting` turns the notifications
+off.
+
+A reload or a crash ends a run and stops its processes. The chat keeps a
+record while a run goes, so on the next load it shows **This task was
+interrupted** with **Continue** (and **Restart and continue** when it had
+processes running, such as a dev server) or **Dismiss**. What the run had
+already done is in its log, so Continue starts from there.
 
 ### Long runs and the context window
 

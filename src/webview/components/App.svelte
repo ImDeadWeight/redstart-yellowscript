@@ -8,6 +8,7 @@
   import QuestionCard from './QuestionCard.svelte'
   import ApprovalCard from './ApprovalCard.svelte'
   import LimitPrompt from './LimitPrompt.svelte'
+  import InterruptedCard from './InterruptedCard.svelte'
   import Composer from './Composer.svelte'
   import ProjectsPage from './ProjectsPage.svelte'
   import WorkflowsPage from './WorkflowsPage.svelte'
@@ -49,6 +50,8 @@
         {/key}
       {:else if s.conversation.atTurnLimit}
         <LimitPrompt />
+      {:else if s.conversation.interrupted}
+        <InterruptedCard interrupted={s.conversation.interrupted} />
       {/if}
       <Composer session={s.session} viewState={s} />
     </div>

@@ -535,7 +535,10 @@ function commandEffect(pending: PendingCommand, outcome: CommandOutcome | string
   if (outcome === null) return { kind: 'command', command: pending.command, ran: false, exitCode: null }
   const output = typeof outcome === 'string' ? { text: outcome, isError: false } : outcome
   const effect: ToolEffect = { kind: 'command', command: pending.command, ran: true, exitCode: output.exitCode ?? null }
-  if (output.processId) effect.processId = output.processId
+  if (output.processId) {
+    effect.processId = output.processId
+    effect.cwd = pending.cwd
+  }
   if (output.autoRule) effect.autoRule = output.autoRule
   if (output.url) effect.url = output.url
   if (output.isError) {

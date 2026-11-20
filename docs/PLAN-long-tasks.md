@@ -30,7 +30,7 @@ costs there, and phase 0 makes room first.
 | 6 | Page steps, `eval`, viewport | 3 | Yellowscript | Done; tested in real headless Edge, not a fake socket |
 | 7 | The game test hook convention | 3 | Templates, `AGENTS.md` | Done in the bench tasks; the starter is item 13 |
 | 8 | Workspace notes (`ys_note`) | 4 | Yellowscript | Done |
-| 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript | Yellowscript half done (sends `redstart/projectId`); the Nest change is not made |
+| 9 | Project-scoped memory from Yellowscript | 4 | **Nest**, then Yellowscript | Done: Yellowscript sends `redstart/projectId`; Nest reads it on redstart-project `feat/project-memory-from-meta` |
 | 10 | Attention when a run waits on you | 5 | Yellowscript | Done |
 | 11 | Resume an interrupted task | 5 | Yellowscript | Done; a turn saved mid-stream no longer spins after a reload |
 | 12 | Images, `@file` and selections in the composer | 5 | Yellowscript | Done; seen rendered in a headless preview of the webview, not yet in VS Code |

@@ -142,7 +142,13 @@ export interface AgentLoopHandlers extends StreamHandlers {
  * so the whole loop stays testable with a scripted gate — the real one lives in
  * the host alongside `vscode`.
  */
-export type ApprovalGate = (pending: PendingWrite) => Promise<boolean>
+export type ApprovalGate = (pending: PendingWrite) => Promise<boolean | WriteOutcome>
+
+/** An approval gate's answer, with the checkpoint it took before applying. */
+export interface WriteOutcome {
+  applied: boolean
+  checkpoint?: { revision: string; root: string }
+}
 
 /**
  * The approval gate for a planned command (Phase 4.1). Unlike writes, a command
@@ -491,14 +497,17 @@ function answerSummary(answer: AskAnswerShape | null): string {
 async function review(toolResult: ToolResult, options: AgentLoopOptions): Promise<ToolResult> {
   if (toolResult.pendingWrite && options.approveChange) {
     const pending = toolResult.pendingWrite
-    const applied = await options.approveChange(pending)
+    const answer = await options.approveChange(pending)
+    const outcome: WriteOutcome = typeof answer === 'boolean' ? { applied: answer } : answer
+    const applied = outcome.applied
     // Honest accounting: the model is told whether the write actually
     // happened, never that a pending plan succeeded on its own.
     const effect: ToolEffect = {
       kind: 'write',
       applied,
-      files: pending.changes.map((c) => ({ path: c.path, isNew: c.isNew, isDeleted: c.isDeleted })),
+      files: pending.changes.map((c) => ({ path: c.path, absolutePath: c.absolutePath, isNew: c.isNew, isDeleted: c.isDeleted })),
     }
+    if (outcome.checkpoint) effect.checkpoint = outcome.checkpoint
     if (!applied) return { ...withRejectedNote(toolResult), effect }
     const done: ToolResult = { ...withAppliedNote(toolResult), effect }
     // What the write broke, without another call. Deleted files have none.

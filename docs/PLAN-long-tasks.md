@@ -21,7 +21,7 @@ costs there, and phase 0 makes room first.
 |---|---|---|---|---|
 | 0 | Room in the tool list; argument repair | 0 | Yellowscript, agent-core | Done: 11,120 → 6,674 characters; repair in Yellowscript until agent-core takes it |
 | 1 | Run log carried into the next message | 1 | Yellowscript | Done; live line on the newest message (see item) |
-| 2 | Task summary card | 1 | Yellowscript | |
+| 2 | Task summary card | 1 | Yellowscript | Done; shows processes as started, not whether they still run |
 | 3 | Dev-server URL detection | 1 | Yellowscript | Done |
 | 16 | Protected paths (before 15) | 1 | Yellowscript | |
 | 15 | Safe commands run without asking; reading outside the workspace | 1 | Yellowscript | |

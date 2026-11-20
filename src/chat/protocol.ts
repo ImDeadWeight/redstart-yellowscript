@@ -294,6 +294,10 @@ export type WebviewMessage =
   | { type: 'clearPlan' }
   /** At the turn limit: keep going, or stop. */
   | { type: 'continueAtLimit'; go: boolean }
+  /** The task summary: open a file's diff since the run (`turnId`) began. */
+  | { type: 'openTaskDiff'; turnId: string; path: string }
+  /** The task summary: undo every write of the run `turnId`. */
+  | { type: 'revertTask'; turnId: string }
 
 // ---------------------------------------------------------------------------
 // host → webview
@@ -348,6 +352,8 @@ export type HostMessage =
       summary: string
       isError: boolean
       truncated: boolean
+      /** What the call changed, for the run's task summary. */
+      effect?: ToolEffect
     }
    /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
     | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }
@@ -465,6 +471,10 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
         : null
     case 'clearPlan':
       return { type: 'clearPlan' }
+    case 'openTaskDiff':
+      return typeof msg.turnId === 'string' && typeof msg.path === 'string' ? { type: 'openTaskDiff', turnId: msg.turnId, path: msg.path } : null
+    case 'revertTask':
+      return typeof msg.turnId === 'string' ? { type: 'revertTask', turnId: msg.turnId } : null
     case 'loadPage':
       return msg.page === 'projects' || msg.page === 'workflows' ? { type: 'loadPage', page: msg.page } : null
     case 'linkProject':

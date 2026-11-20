@@ -174,3 +174,87 @@ export function collapsedRunLog(effects: readonly ToolEffect[]): string | null {
   if (rejected) parts.push(`${rejected} rejected`)
   return parts.length ? `[Earlier run: ${parts.join(', ')}]` : null
 }
+
+// ---------------------------------------------------------------------------
+// The task summary card: the same effects, for the person.
+// ---------------------------------------------------------------------------
+
+export interface TaskSummaryView {
+  files: { path: string; change: 'created' | 'changed' | 'deleted' }[]
+  moves: { from: string; to: string }[]
+  rejectedFiles: string[]
+  commands: { command: string; exitCode: number | null; failed: boolean; rejected: boolean }[]
+  processes: { id: string; command: string; url?: string; exited?: number }[]
+  /** At least one applied write has a checkpoint, so the task can be reverted. */
+  revertible: boolean
+}
+
+/** What the card shows; null when the run wrote nothing and ran nothing. */
+export function taskSummary(effects: readonly ToolEffect[] | undefined): TaskSummaryView | null {
+  if (!effects?.length) return null
+  const files = new Map<string, FileState>()
+  const view: TaskSummaryView = { files: [], moves: [], rejectedFiles: [], commands: [], processes: [], revertible: false }
+  for (const effect of effects) {
+    if (effect.kind === 'write') {
+      if (!effect.applied) {
+        for (const f of effect.files) if (!view.rejectedFiles.includes(f.path)) view.rejectedFiles.push(f.path)
+        continue
+      }
+      if (effect.checkpoint) view.revertible = true
+      const move = asMove(effect)
+      if (move) {
+        view.moves.push(move)
+        continue
+      }
+      for (const f of effect.files) {
+        const state: FileState = f.isNew ? 'created' : f.isDeleted ? 'deleted' : 'changed'
+        const before = files.get(f.path)
+        if (state === 'changed' && before === 'created') continue
+        if (state === 'deleted' && before === 'created') files.delete(f.path)
+        else files.set(f.path, state)
+      }
+    } else if (effect.kind === 'command') {
+      if (effect.ran && effect.processId) {
+        view.processes.push({
+          id: effect.processId,
+          command: effect.command,
+          ...(effect.url ? { url: effect.url } : {}),
+          ...(effect.exitCode !== null ? { exited: effect.exitCode } : {}),
+        })
+      } else {
+        view.commands.push({ command: effect.command, exitCode: effect.exitCode, failed: effect.failed === true, rejected: !effect.ran })
+      }
+    }
+  }
+  view.files = [...files].map(([path, change]) => ({ path, change }))
+  const empty = !view.files.length && !view.moves.length && !view.rejectedFiles.length && !view.commands.length && !view.processes.length
+  return empty ? null : view
+}
+
+/** Where a file's diff "since the task started" begins: the first applied
+ *  write in the run that touched it, and whether it did not exist before. */
+export function fileBaseline(
+  effects: readonly ToolEffect[],
+  path: string,
+): { revision: string; root: string; absolutePath: string; wasAbsent: boolean } | null {
+  for (const effect of effects) {
+    if (effect.kind !== 'write' || !effect.applied || !effect.checkpoint) continue
+    const file = effect.files.find((f) => f.path === path)
+    if (file?.absolutePath) return { ...effect.checkpoint, absolutePath: file.absolutePath, wasAbsent: file.isNew }
+  }
+  return null
+}
+
+/** The run's checkpointed writes, newest first: the order a revert undoes them,
+ *  so a file written twice ends at its state before the task. */
+export function revertSteps(
+  effects: readonly ToolEffect[],
+): { revision: string; root: string; files: { absolutePath: string; wasAbsent: boolean }[] }[] {
+  const steps: { revision: string; root: string; files: { absolutePath: string; wasAbsent: boolean }[] }[] = []
+  for (const effect of effects) {
+    if (effect.kind !== 'write' || !effect.applied || !effect.checkpoint) continue
+    const files = effect.files.flatMap((f) => (f.absolutePath ? [{ absolutePath: f.absolutePath, wasAbsent: f.isNew }] : []))
+    if (files.length) steps.push({ ...effect.checkpoint, files })
+  }
+  return steps.reverse()
+}

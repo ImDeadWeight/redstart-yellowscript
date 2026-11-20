@@ -153,6 +153,11 @@ export class CheckpointManager {
     return { revision, label: message }
   }
 
+  /** A file's content as `revision` holds it (its pre-write state). */
+  async show(revision: string, relativePath: string): Promise<string> {
+    return this.git.run(['show', `${revision}:${relativePath}`], this.git.shadowRoot)
+  }
+
   /**
    * Restore the workspace files to their pre-write content from `checkpoint`.
    *

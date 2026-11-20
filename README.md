@@ -243,6 +243,12 @@ taken even when auto-approval bypasses the prompt.
 **Revert Last Task** undoes every write of the last task, newest first, and
 removes the files it created.
 
+When a run writes files or runs commands, its answer ends with a summary:
+each file it changed (click one for its diff since the run began, read from
+the checkpoint, so it works after a reload), the commands with their exit
+codes, and the processes it started with their address. The newest such
+summary has **Revert this task**.
+
 ## MCP tools (Nest integration)
 
 Yellowscript discovers the Nest's MCP tools via `/redstart/mcp-servers` on

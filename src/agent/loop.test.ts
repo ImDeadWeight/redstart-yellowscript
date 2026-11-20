@@ -472,6 +472,30 @@ describe('runAgentLoop — reporting', () => {
     assert.match(result.toolRuns[0]?.result.content ?? '', /Applied/)
     assert.equal(result.toolRuns[0]?.result.pendingWrite, undefined)
   })
+
+  test('the write effect records the checkpoint the gate took', async () => {
+    const tools = registry()
+    const client = scriptedStreamer([
+      streamResult({ toolCalls: [callDelta('ys_write_file', JSON.stringify({ path: 'new.txt', content: 'x\n' }))] }),
+      streamResult({ content: 'done' }),
+    ])
+    const result = await runAgentLoop({
+      client,
+      request: baseRequest,
+      tools,
+      toolContext,
+      approveChange: async () => ({ applied: true, checkpoint: { revision: 'abc123', root: '/ws' } }),
+    })
+    const effect = result.toolRuns[0]!.result.effect
+    assert.equal(effect?.kind, 'write')
+    if (effect?.kind === 'write') {
+      assert.equal(effect.applied, true)
+      assert.deepEqual(effect.checkpoint, { revision: 'abc123', root: '/ws' })
+      assert.equal(effect.files[0]!.path, 'new.txt')
+      assert.equal(effect.files[0]!.isNew, true)
+      assert.ok(effect.files[0]!.absolutePath)
+    }
+  })
 })
 
 // --- What agent-core brings ---------------------------------------------------

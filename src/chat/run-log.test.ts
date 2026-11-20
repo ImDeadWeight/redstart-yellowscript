@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { RUN_LOG_CAP, RUN_LOG_HEADER, collapsedRunLog, formatRunLog, runLogLines } from './run-log.ts'
+import { RUN_LOG_CAP, RUN_LOG_HEADER, collapsedRunLog, fileBaseline, formatRunLog, revertSteps, runLogLines, taskSummary } from './run-log.ts'
 import type { ToolEffect } from '../tools/types.ts'
 
 const write = (files: [string, 'new' | 'changed' | 'deleted'][], applied = true): ToolEffect => ({
@@ -105,5 +105,52 @@ describe('collapsedRunLog', () => {
 
   test('null when nothing changed', () => {
     assert.equal(collapsedRunLog([{ kind: 'check', target: 'a.html', problems: 0, first: null }]), null)
+  })
+})
+
+describe('the task summary', () => {
+  const cp = (revision: string) => ({ revision, root: '/ws' })
+  const w = (files: [string, 'new' | 'changed' | 'deleted'][], revision: string | null, applied = true): ToolEffect => ({
+    kind: 'write',
+    applied,
+    files: files.map(([p, s]) => ({ path: p, absolutePath: `/ws/${p}`, isNew: s === 'new', isDeleted: s === 'deleted' })),
+    ...(revision ? { checkpoint: cp(revision) } : {}),
+  })
+
+  test('nothing to show for a run that only read', () => {
+    assert.equal(taskSummary(undefined), null)
+    assert.equal(taskSummary([{ kind: 'check', target: 'a.html', problems: 0, first: null }]), null)
+  })
+
+  test('files, commands and processes, each once', () => {
+    const view = taskSummary([
+      w([['a.js', 'new']], 'r1'),
+      w([['a.js', 'changed'], ['b.js', 'changed']], 'r2'),
+      w([['c.js', 'changed']], null, false),
+      ran('npm test', 1, { failed: true }),
+      { kind: 'command', command: 'rm -rf x', ran: false, exitCode: null },
+      ran('npm run dev', null, { processId: 'p1', url: 'http://localhost:5173' }),
+    ])!
+    assert.deepEqual(view.files, [{ path: 'a.js', change: 'created' }, { path: 'b.js', change: 'changed' }])
+    assert.deepEqual(view.rejectedFiles, ['c.js'])
+    assert.deepEqual(view.commands, [
+      { command: 'npm test', exitCode: 1, failed: true, rejected: false },
+      { command: 'rm -rf x', exitCode: null, failed: false, rejected: true },
+    ])
+    assert.deepEqual(view.processes, [{ id: 'p1', command: 'npm run dev', url: 'http://localhost:5173' }])
+    assert.equal(view.revertible, true)
+  })
+
+  test('a file diffs against the first checkpoint that held it', () => {
+    const run = [w([['a.js', 'changed']], 'r1'), w([['a.js', 'changed'], ['b.js', 'new']], 'r2')]
+    assert.deepEqual(fileBaseline(run, 'a.js'), { revision: 'r1', root: '/ws', absolutePath: '/ws/a.js', wasAbsent: false })
+    assert.deepEqual(fileBaseline(run, 'b.js'), { revision: 'r2', root: '/ws', absolutePath: '/ws/b.js', wasAbsent: true })
+    assert.equal(fileBaseline(run, 'c.js'), null)
+  })
+
+  test('a revert undoes the writes newest first, skipping rejected and uncheckpointed ones', () => {
+    const steps = revertSteps([w([['a.js', 'changed']], 'r1'), w([['b.js', 'new']], null), w([['c.js', 'changed']], 'r3', false), w([['a.js', 'changed']], 'r4')])
+    assert.deepEqual(steps.map((s) => s.revision), ['r4', 'r1'])
+    assert.deepEqual(steps[0]!.files, [{ absolutePath: '/ws/a.js', wasAbsent: false }])
   })
 })

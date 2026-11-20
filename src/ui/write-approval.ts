@@ -46,6 +46,7 @@ import {
 import { applyPendingWrite, type WriteBackend } from '../tools/apply.ts'
 import { type ApprovalStore, type TaskTrust, autoApplyReason, rememberApproval } from '../tools/approval.ts'
 import type { PendingWrite } from '../tools/types.ts'
+import type { WriteOutcome } from '../agent/loop.ts'
 import type { AskApproval } from '../chat/approvals.ts'
 
 const execFileAsync = promisify(execFile)
@@ -122,6 +123,8 @@ interface ReviewDeps {
   task?: TaskTrust
   /** Ask on the conversation's approval card. */
   ask: AskApproval
+  /** The workspace root the checkpoints belong to, returned with each one. */
+  root?: string
 }
 
 /**
@@ -137,7 +140,7 @@ interface ReviewDeps {
 async function snapshot(deps: ReviewDeps, pending: PendingWrite): Promise<Checkpoint | null> {
   const staged: StagedFile[] = pending.changes.map((c) => ({
     workspaceAbsolute: c.absolutePath,
-    relativePath: vscodeRelative(c.absolutePath, deps),
+    relativePath: shadowKey(c.absolutePath),
     content: c.before,
     wasAbsent: c.isNew,
   }))
@@ -163,13 +166,13 @@ function outputWarn(err: unknown): void {
   console.warn('[yellowscript] checkpoint failed:', err instanceof Error ? err.message : String(err))
 }
 
-/** Best-effort workspace-relative key for a shadow path. */
-function vscodeRelative(absolutePath: string, deps: ReviewDeps): string {
-  // The shadow needs a stable key unique per file; the exact value only matters
-  // to `revert`, which is handed back the same StagedFile array. The whole
-  // absolute path, flattened, so two files with one name (src/a/index.ts and
-  // src/b/index.ts) cannot overwrite each other in one checkpoint.
-  void deps
+/**
+ * A file's key in the shadow repo. Stable per file, so a stored effect finds
+ * the file's copy again (the task summary's diff, Revert This Task). The whole
+ * absolute path, flattened, so two files with one name (src/a/index.ts and
+ * src/b/index.ts) cannot overwrite each other in one checkpoint.
+ */
+export function shadowKey(absolutePath: string): string {
   return absolutePath.replace(/^[A-Za-z]:/, (d) => d[0]!.toLowerCase()).replace(/[\\/:]+/g, '__')
 }
 
@@ -203,18 +206,20 @@ function chatIsActiveEditor(): boolean {
  * applied, false when rejected. Never throws for a user "no" — that is a normal
  * outcome the model is told about.
  */
-export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => Promise<boolean> {
+export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => Promise<WriteOutcome> {
   const backend = deps.backend ?? realWriteBackend
+  const applied = (checkpoint: Checkpoint | null): WriteOutcome =>
+    checkpoint && deps.root ? { applied: true, checkpoint: { revision: checkpoint.revision, root: deps.root } } : { applied: true }
 
-  return async (pending: PendingWrite): Promise<boolean> => {
+  return async (pending: PendingWrite): Promise<WriteOutcome> => {
     // Auto-approve path: checkpoint still taken, but no prompt. Never for a
     // deletion (autoApplyReason).
     const toolName = pending.changes[0]?.path ? autoToolFor(pending) : ''
     const deletes = pending.changes.some((c) => c.isDeleted)
     if (autoApplyReason({ toolName, deletes }, deps.store, deps.task?.trusted() ?? false)) {
-      await snapshot(deps, pending)
+      const checkpoint = await snapshot(deps, pending)
       await applyPendingWrite(pending, backend)
-      return true
+      return applied(checkpoint)
     }
 
     // Asked on the chat's card, with each file's diff inline; a file opens as
@@ -242,11 +247,11 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
     })
 
     if (decision === 'reject') {
-      return false
+      return { applied: false }
     }
 
     // Checkpoint the PRE-WRITE state, then apply. Order matters (see file head).
-    await snapshot(deps, pending)
+    const checkpoint = await snapshot(deps, pending)
     const outcome = await applyPendingWrite(pending, backend)
 
     if (decision === 'task') deps.task?.trust()
@@ -263,7 +268,7 @@ export function makeApprovalGate(deps: ReviewDeps): (pending: PendingWrite) => P
       // Partial success is still a success of the gate (bytes moved); the model
       // is told per-file via the result text only for whole-file outcomes.
     }
-    return true
+    return applied(checkpoint)
   }
 }
 

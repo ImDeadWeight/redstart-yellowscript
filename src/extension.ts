@@ -11,7 +11,7 @@
 // =============================================================================
 
 import * as vscode from 'vscode'
-import { hostname } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 
 import { ConnectionManager, describeState, type ConnectionState } from './connection.ts'
 import {
@@ -51,7 +51,9 @@ import {
   workspaceRoots,
   approvalStore,
 } from './ui/tool-providers.ts'
-import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
+import { makeApprovalGate, checkpointForWorkspace, shadowKey } from './ui/write-approval.ts'
+import { fileBaseline, revertSteps } from './chat/run-log.ts'
+import type { ToolEffect } from './tools/types.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { BackgroundProcesses, describeRunning } from './tools/process-runner.ts'
 import { McpHost, type McpTool } from './nest/mcp-host.ts'
@@ -338,6 +340,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onContinueAtLimit: (go) => {
       if (activeConversationId) getSession(activeConversationId).continueAtLimit(go)
     },
+    onOpenTaskDiff: (turnId, file) => {
+      if (activeConversationId) void openTaskDiff(getSession(activeConversationId).runOf(turnId) ?? [], file)
+    },
+    onRevertTask: (turnId) => {
+      if (activeConversationId) void revertTask(getSession(activeConversationId).runOf(turnId) ?? [])
+    },
     onSearchHistory: (query) => {
       if (!currentAccountId) {
         chatView?.post({ type: 'historyList', conversations: [] })
@@ -588,6 +596,7 @@ function getSession(id: string): ChatSession {
         const gate = makeApprovalGate({
           ask: (request) => getSession(id).askApproval(request),
           checkpoints: checkpointForWorkspace(roots[0]!),
+          root: roots[0]!,
           store: approvalStore(),
           recordCheckpoint: (checkpoint, files) => {
             lastCheckpoint.set(roots[0]!, { checkpoint, files })
@@ -1297,6 +1306,58 @@ async function revertLastTaskCommand(): Promise<void> {
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     vscode.window.showErrorMessage(`Could not revert the last task: ${reason}`)
+    output?.error('task revert failed', err)
+  }
+}
+
+/**
+ * The task summary's file link: the file now, against its state before the
+ * run first wrote it (from the checkpoint stored with the run, so it works
+ * after a reload too).
+ */
+async function openTaskDiff(run: readonly ToolEffect[], file: string): Promise<void> {
+  const base = fileBaseline(run, file)
+  if (!base) {
+    vscode.window.showInformationMessage(`Yellowscript: there is no checkpoint for ${file} in this task.`)
+    return
+  }
+  try {
+    const before = base.wasAbsent ? '' : await checkpointForWorkspace(base.root).show(base.revision, shadowKey(base.absolutePath))
+    const beforeFile = nodePath.join(tmpdir(), `ys-before-${Date.now()}-${nodePath.basename(base.absolutePath)}`)
+    await nodeFs.promises.writeFile(beforeFile, before, 'utf8')
+    const now = nodeFs.existsSync(base.absolutePath) ? vscode.Uri.file(base.absolutePath) : vscode.Uri.parse(`untitled:${file} (deleted)`)
+    await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(beforeFile), now, `Yellowscript: ${file} since the task`, { preview: true })
+  } catch (err) {
+    vscode.window.showErrorMessage(`Could not open the diff for ${file}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** The task summary's Revert: undo the run's writes, newest first. */
+async function revertTask(run: readonly ToolEffect[]): Promise<void> {
+  const steps = revertSteps(run)
+  if (steps.length === 0) {
+    vscode.window.showInformationMessage('Yellowscript: this task made no checkpointed writes, so there is nothing to revert.')
+    return
+  }
+  const files = [...new Set(steps.flatMap((s) => s.files.map((f) => f.absolutePath)))]
+  const choice = await vscode.window.showWarningMessage(
+    `Revert this Yellowscript task? ${files.length} file${files.length === 1 ? '' : 's'} go back to how they were before it ` +
+      '(files it created are deleted). Later changes to these files are lost too.',
+    { modal: true, detail: files.join('\n') },
+    'Revert task',
+  )
+  if (choice !== 'Revert task') return
+  try {
+    for (const step of steps) {
+      await checkpointForWorkspace(step.root).revert(
+        { revision: step.revision, label: '' },
+        step.files.map((f) => ({ workspaceAbsolute: f.absolutePath, relativePath: shadowKey(f.absolutePath), content: '', wasAbsent: f.wasAbsent })),
+      )
+    }
+    output?.info(`revert: undid ${steps.length} write(s) of a task (${files.length} file(s))`)
+    vscode.window.showInformationMessage(`Yellowscript: reverted the task (${files.length} file${files.length === 1 ? '' : 's'}).`)
+  } catch (err) {
+    vscode.window.showErrorMessage(`Could not revert the task: ${err instanceof Error ? err.message : String(err)}`)
     output?.error('task revert failed', err)
   }
 }

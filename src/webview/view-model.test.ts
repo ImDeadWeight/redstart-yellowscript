@@ -8,6 +8,7 @@ import {
   buildAnswer,
   composerPlaceholder,
   initialViewState,
+  latestTaskId,
   matchWorkflows,
   planProgress,
   slashQuery,
@@ -75,6 +76,32 @@ describe('applyHostMessage', () => {
     assert.equal(s.messages[0]?.tools?.length, 1, 'a repeated call id is one card')
     assert.equal(s.messages[0]?.tools?.[0]?.status, 'done')
     assert.equal(s.messages[0]?.tools?.[0]?.summary, 'a.ts, 10 lines')
+  })
+
+  test('a result\'s effect is added to its turn\'s run, for the task summary', () => {
+    const effect = { kind: 'write' as const, applied: true, files: [{ path: 'a.ts', isNew: false, isDeleted: false }] }
+    const s = run(
+      init(),
+      { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '' } },
+      { type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_replace', arguments: '{}', recovered: false },
+      { type: 'tool/result', conversationId: 'c1', turnId: 't1', callId: 'k1', name: 'ys_replace', summary: 'applied', isError: false, truncated: false, effect },
+      { type: 'tool/result', conversationId: 'c1', turnId: 't1', callId: 'k2', name: 'ys_read_file', summary: 'read', isError: false, truncated: false },
+    )
+    assert.deepEqual(s.messages[0]?.run, [effect])
+  })
+
+  test('only the newest task with a checkpointed write offers Revert', () => {
+    const write = (checkpoint: boolean) => ({
+      kind: 'write' as const, applied: true, files: [{ path: 'a.ts', isNew: false, isDeleted: false }],
+      ...(checkpoint ? { checkpoint: { revision: 'r', root: '/w' } } : {}),
+    })
+    assert.equal(latestTaskId([
+      { id: 'a1', role: 'assistant', content: '', run: [write(true)] },
+      { id: 'a2', role: 'assistant', content: '', run: [write(true)] },
+      { id: 'a3', role: 'assistant', content: '', run: [write(false)] },
+      { id: 'a4', role: 'assistant', content: 'just talk' },
+    ]), 'a2')
+    assert.equal(latestTaskId([{ id: 'u', role: 'user', content: 'hi' }]), null)
   })
 
   test('conversation state follows the active tab only', () => {

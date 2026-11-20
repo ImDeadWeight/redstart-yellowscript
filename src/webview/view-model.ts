@@ -197,6 +197,7 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
             ? { ...t, status: message.isError ? 'error' : 'done', summary: message.summary, truncated: message.truncated }
             : t,
         ),
+        ...(message.effect ? { run: [...(m.run ?? []), message.effect] } : {}),
       }))
 
     case 'notice':
@@ -292,4 +293,17 @@ export function matchWorkflows(items: readonly WorkflowView[], typed: string): W
 export function slashQuery(text: string): string | null {
   const m = /^\/([\w-]*)$/.exec(text)
   return m ? (m[1] ?? '') : null
+}
+
+/**
+ * The newest assistant turn whose run made a checkpointed write: the only
+ * task summary that offers Revert, since undoing an older task would also
+ * undo every later change to the same files.
+ */
+export function latestTaskId(messages: readonly ChatMessageView[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role === 'assistant' && m.run?.some((e) => e.kind === 'write' && e.applied && e.checkpoint)) return m.id
+  }
+  return null
 }

@@ -2,9 +2,11 @@
   import type { ChatMessageView } from '../../chat/protocol.ts'
   import { renderMarkdown } from '../markdown.ts'
   import ToolCard from './ToolCard.svelte'
+  import TaskSummary from './TaskSummary.svelte'
+  import { taskSummary } from '../../chat/run-log.ts'
   import Icon from './Icon.svelte'
 
-  let { message }: { message: ChatMessageView } = $props()
+  let { message, latestTask = false }: { message: ChatMessageView; latestTask?: boolean } = $props()
 
   // renderMarkdown escapes the whole input before emitting any tag of its own
   // (see markdown.ts): the only safe way to put model text into {@html}.
@@ -19,6 +21,7 @@
   const grouped = $derived(tools.length >= GROUP_AT && !message.streaming)
   const failed = $derived(tools.filter((t) => t.status === 'error').length)
   let showTools = $state(false)
+  const summary = $derived(message.streaming ? null : taskSummary(message.run))
 </script>
 
 <article class="message {message.role}" class:pending={message.pending} class:streaming={message.streaming}>
@@ -61,6 +64,9 @@
     {/if}
     {#if message.error}
       <div class="error" role="alert">{message.error}</div>
+    {/if}
+    {#if summary}
+      <TaskSummary turnId={message.id} {summary} canRevert={latestTask} />
     {/if}
     {#if message.aborted || stats?.tokensPerSecond}
       <footer>

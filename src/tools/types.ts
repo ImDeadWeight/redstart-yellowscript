@@ -124,7 +124,12 @@ export type ToolEffect =
       kind: 'write'
       /** False when the person rejected it: the model must not assume it happened. */
       applied: boolean
-      files: { path: string; isNew: boolean; isDeleted: boolean }[]
+      /** `path` is what the model and the card see; `absolutePath` finds the
+       *  file's copy in the checkpoint. */
+      files: { path: string; absolutePath?: string; isNew: boolean; isDeleted: boolean }[]
+      /** The shadow-git checkpoint taken before it was applied: what the task
+       *  summary diffs against and Revert This Task restores. */
+      checkpoint?: { revision: string; root: string }
     }
   | {
       kind: 'command'

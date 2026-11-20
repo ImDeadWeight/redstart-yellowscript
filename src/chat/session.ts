@@ -250,6 +250,11 @@ export class ChatSession {
   }
 
   /** A snapshot of the transcript, safe to hand across the webview boundary. */
+  /** What the run of assistant turn `turnId` did (for its task summary). */
+  runOf(turnId: string): ToolEffect[] | null {
+    return this.messages.find((m) => m.id === turnId && m.role === 'assistant')?.run ?? null
+  }
+
   snapshot(): ChatMessageView[] {
     return this.messages.map((message) => ({
       ...message,
@@ -440,6 +445,7 @@ export class ChatSession {
                   summary: toolResult.summary,
                   isError: toolResult.isError,
                   truncated: toolResult.truncated,
+                  ...(toolResult.effect ? { effect: toolResult.effect } : {}),
                 })
               },
             },

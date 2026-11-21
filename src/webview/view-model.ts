@@ -22,6 +22,7 @@ import {
   type PageName,
   type ProjectView,
   type SessionSnapshot,
+  type SurfaceKind,
   type WorkflowView,
 } from '../chat/protocol.ts'
 
@@ -32,6 +33,10 @@ export interface HistoryItem {
   messageCount: number
   /** Only an unsent draft, no messages. */
   draft?: boolean
+  /** Still open in a tab. */
+  open?: boolean
+  /** Its run is still going. */
+  running?: boolean
 }
 
 export interface Notice {
@@ -41,6 +46,8 @@ export interface Notice {
 }
 
 export interface ViewState {
+  /** The sidebar (a strip of chats) or an editor tab (one chat). */
+  surface: SurfaceKind
   session: SessionSnapshot
   /** The conversation on screen. Messages for any other are dropped: the host
    *  keeps every transcript and repaints on switch. */
@@ -68,6 +75,7 @@ export interface ViewState {
 
 export function initialViewState(): ViewState {
   return {
+    surface: 'sidebar',
     session: { connection: 'disconnected', detail: 'Starting…', canSend: false, busy: false, queued: 0 },
     conversationId: null,
     messages: [],
@@ -110,6 +118,7 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
       return {
         ...state,
         stale: false,
+        surface: message.surface ?? state.surface,
         session: message.session,
         conversationId: message.conversationId ?? state.conversationId,
         messages: message.messages,
@@ -254,6 +263,20 @@ export function composerPlaceholder(state: ViewState): string {
   if (session.queued > 0) return `Queued: ${session.queued} prompt${session.queued === 1 ? '' : 's'} waiting…`
   if (session.busy) return 'Working. Type to queue another prompt…'
   return 'Ask Yellowscript…'
+}
+
+/** Why a typed Nest address will not do, or null when it will. Empty is fine:
+ *  it means discovery. Mirrors normalizeBaseUrl (a bare host gets http://). */
+export function serverUrlProblem(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+  try {
+    const url = new URL(withScheme)
+    return url.hostname ? null : 'That is not a valid URL.'
+  } catch {
+    return 'That is not a valid URL.'
+  }
 }
 
 /** "2 of 5 done" for the plan header. */

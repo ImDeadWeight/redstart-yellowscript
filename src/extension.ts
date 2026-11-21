@@ -37,11 +37,12 @@ import {
   type ProjectView,
   type SessionSnapshot,
   type WorkflowView,
+  tabLabel,
 } from './chat/protocol.ts'
 import { NestClient, normalizeBaseUrl, type NestProject } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
-import { ChatViewProvider } from './ui/chat-view.ts'
+import { ChatViewProvider, type Surface } from './ui/chat-view.ts'
 import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
 import {
   diagnosticsAfterWrite,
@@ -72,7 +73,7 @@ import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
-import { conversationStore, isBlank, type Conversation } from './ui/conversation-store.ts'
+import { conversationStore, isBlank, type Conversation, type HistoryEntry } from './ui/conversation-store.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -83,7 +84,9 @@ let chatView: ChatViewProvider | undefined
 let tools: ToolRegistry | undefined
 let mcpHost: McpHost | null = null
 let conversations: ReturnType<typeof conversationStore>
-let activeConversationId: string | null = null
+/** A conversation the sidebar should open on once VSCode creates its view
+ *  (a command ran before the view existed). */
+let pendingSidebarConversation: string | null = null
 /** The currently signed-in account username, used to scope conversation history.
  *  Set from `/auth/me` on connect/sign-in; cleared on sign-out/disconnect. */
 let currentAccountId: string | null = null
@@ -144,12 +147,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const blank = conversations.pruneBlank()
   if (blank > 0) output.info(`history: removed ${blank} empty conversation(s)`)
 
-  // The panel always has a conversation open, so the first chat is a real tab
-  // from the start — not an untracked transcript that vanishes on the first
-  // switch. Reuse the oldest existing conversation in a restored workspace;
-  // otherwise open a fresh "New chat" that participates in the tab strip.
-  const existing = conversations.list(currentAccountId ?? undefined)[0]
-  activeConversationId = existing?.id ?? conversations.create('New chat', [], currentAccountId ?? undefined).id
+  // Which conversation each view shows is decided when that view announces
+  // itself (onReady): the sidebar and every editor tab each have their own.
 
   manager = new ConnectionManager({
     credentials: new SecretCredentialStore(context.secrets),
@@ -213,77 +212,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // here — the tab strip is the source of truth for which conversations exist.
 
   chatView = new ChatViewProvider(context.extensionUri, {
-    onSend: (text, attachments) => {
-      void resolveAttachments(attachments ?? []).then((resolved) => sendToActive(text, undefined, resolved))
+    onSend: (from, text, attachments) => {
+      void resolveAttachments(from, attachments ?? []).then((resolved) => sendTo(from, text, undefined, resolved))
     },
-    onSearchFiles: (query) => {
-      void searchWorkspaceFiles(query).then((paths) => chatView?.post({ type: 'fileMatches', query, paths }))
+    onSearchFiles: (from, query) => {
+      void searchWorkspaceFiles(query).then((paths) => chatView?.postTo(from, { type: 'fileMatches', query, paths }))
     },
-    onAbort: () => {
-      if (activeConversationId) getSession(activeConversationId).abort()
+    onAbort: (from) => {
+      if (from.conversationId) getSession(from.conversationId).abort()
       pushSession()
     },
-    onNewConversation: () => {
-      const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
-      activeConversationId = conv.id
-      // Tell the webview which tab is active BEFORE reset emits the empty
-      // transcript, otherwise the conversation message is dropped because the
-      // webview's activeConversationId hasn't been updated yet.
-      pushActiveConversation()
-      getSession(conv.id).reset()
-      pushConversations()
-      pushSession()
+    onNewConversation: (from) => {
+      // An editor tab is one chat: a new one gets a tab of its own, like any
+      // other editor. The sidebar keeps a strip of them.
+      if (from.kind === 'editor') openChatInEditor(createConversation().id)
+      else showIn(from, createConversation().id)
     },
-    onListConversations: () => {
-      chatView?.post({
-        type: 'conversationList',
-        conversations: toViews(conversations.list(currentAccountId ?? undefined)),
-        activeId: activeConversationId,
-      })
+    onListConversations: () => pushConversations(),
+    onSwitchConversation: (from, id) => {
+      const editor = chatView?.editorFor(id)
+      if (editor && editor !== from) void chatView?.reveal(editor)
+      else showIn(from, id)
     },
-    onSwitchConversation: (id) => {
-      switchConversation(id)
-    },
-    onCreateConversation: () => {
-      const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
-      activeConversationId = conv.id
-      // A fresh session — no transcript to load, so nothing aborts.
-      pushConversations()
-      pushActiveConversation()
-      // Send the empty transcript so the webview clears the old conversation
-      // from the screen. Without this, the previous tab's text lingers until
-      // the user switches away and back.
-      postConversation(conv.id)
-      pushSession()
-    },
-    onDeleteConversation: (id) => {
-      sessions.get(id)?.abort()
-      sessions.delete(id)
-      // A chat with no messages and nothing typed is not worth a history
-      // entry; one with an unsent draft is kept so the text can come back.
-      const closing = conversations.get(id)
-      if (closing && isBlank(closing)) conversations.delete(id)
-      else conversations.archive(id)
-      if (activeConversationId === id) {
-        const remaining = conversations.list(currentAccountId ?? undefined)
-        activeConversationId = remaining[0]?.id ?? null
-        // Paint the new active conversation's transcript so the webview does
-        // not keep showing the conversation that was just closed.
-        if (activeConversationId) {
-          const session = getSession(activeConversationId)
-          postConversation(activeConversationId)
-        }
-        pushActiveConversation()
-        pushSession()
-      }
-      pushConversations()
-      pushHistoryPanel()
-    },
+    onDeleteConversation: (_from, id) => closeConversation(id),
     onSaveDraft: (id, text) => {
       conversations.setDraft(id, text)
     },
     onRunCommand: (command) => {
       void vscode.commands.executeCommand(`redstartYellowscript.${command}`)
+    },
+    onMoveToSidebar: (from) => moveEditorChatToSidebar(from),
+    onMoveToEditor: (id) => openChatInEditor(id),
+    onSetServerUrl: (url) => {
+      void applyServerUrl(url)
     },
     onSignIn: async (message) => {
       if (!manager) return
@@ -311,54 +272,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     // Fires on first open AND every time VSCode rebuilds a view it destroyed
     // while hidden — so this must be a complete handoff, not a delta.
-    onReady: () => {
-      pushConversations()
-      pushActiveConversation()
-      if (activeConversationId) {
-        const conv = conversations.get(activeConversationId)
-        const session = getSession(activeConversationId)
-        // If the active conversation has a saved transcript and nothing is
-        // streaming, seed the session so the panel opens on the right chat.
-        if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
-        chatView?.sendInit(snapshot(activeConversationId), session.snapshot(), activeConversationId, session.state())
+    onReady: (from, restoredId) => {
+      if (from.kind === 'editor') {
+        // The chat this tab was opened on, or showed before a reload. Gone
+        // (deleted meanwhile) means a fresh chat rather than an empty tab.
+        let id = from.conversationId ?? restoredId ?? null
+        const conv = id ? conversations.get(id) : undefined
+        if (!conv) id = createConversation().id
+        else if (conv.archived) conversations.unarchive(conv.id)
+        from.conversationId = id
+        // A chat lives in one place. The sidebar may have picked it up while
+        // this tab was still being restored.
+        const sidebar = chatView?.sidebar()
+        if (sidebar && sidebar.conversationId === id) showIn(sidebar, pickSidebarConversation(null))
       } else {
-        chatView?.sendInit(snapshot(null), [], null, EMPTY_CONVERSATION_STATE)
+        from.conversationId = pickSidebarConversation(pendingSidebarConversation ?? restoredId ?? from.conversationId)
+        pendingSidebarConversation = null
       }
+      const id = from.conversationId!
+      const conv = conversations.get(id)
+      const session = getSession(id)
+      // A saved transcript and nothing streaming: seed the session so the
+      // view opens on the right chat.
+      if (conv && !session.busy) session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
+      chatView?.sendInit(from, snapshot(id), session.snapshot(), session.state())
+      pushConversations()
     },
-    onOpenHistory: () => {
-      pushHistoryPanel()
+    onOpenHistory: (from) => pushHistoryPanel(from),
+    onOpenPage: (from, page) => {
+      if (page === 'projects') void pushProjects(from)
+      else void pushWorkflows(from)
     },
-    onOpenPage: (page) => {
-      if (page === 'projects') void pushProjects()
-      else void pushWorkflows()
+    onLinkProject: (from, id) => {
+      void linkProject(from, id)
     },
-    onLinkProject: (id) => {
-      void linkProject(id)
+    onCreateProject: (from, name) => {
+      void createProjectFromPanel(from, name)
     },
-    onCreateProject: (name) => {
-      void createProjectFromPanel(name)
+    onRunWorkflow: (from, name, args) => {
+      void runWorkflow(from, name, args)
     },
-    onRunWorkflow: (name, args) => {
-      void runWorkflow(name, args)
+    onAnswer: (from, id, answer) => {
+      if (from.conversationId) getSession(from.conversationId).answer(id, answer)
     },
-    onAnswer: (id, answer) => {
-      if (activeConversationId) getSession(activeConversationId).answer(id, answer)
+    onApprove: (from, id, choice) => {
+      if (from.conversationId) getSession(from.conversationId).approve(id, choice)
     },
-    onApprove: (id, choice) => {
-      if (activeConversationId) getSession(activeConversationId).approve(id, choice)
+    onOpenApprovalDiff: (from, id, index) => {
+      if (from.conversationId) getSession(from.conversationId).openApprovalFile(id, index)
     },
-    onOpenApprovalDiff: (id, index) => {
-      if (activeConversationId) getSession(activeConversationId).openApprovalFile(id, index)
+    onClearPlan: (from) => {
+      if (from.conversationId) getSession(from.conversationId).clearPlan()
     },
-    onClearPlan: () => {
-      if (activeConversationId) getSession(activeConversationId).clearPlan()
+    onContinueAtLimit: (from, go) => {
+      if (from.conversationId) getSession(from.conversationId).continueAtLimit(go)
     },
-    onContinueAtLimit: (go) => {
-      if (activeConversationId) getSession(activeConversationId).continueAtLimit(go)
-    },
-    onResumeTask: (restart) => {
-      if (!activeConversationId) return
-      const session = getSession(activeConversationId)
+    onResumeTask: (from, restart) => {
+      if (!from.conversationId) return
+      const session = getSession(from.conversationId)
       // Clicking "Restart and continue" is the person's go-ahead for them.
       const resumed = session.resumeInterrupted()
       if (!resumed) return
@@ -374,58 +345,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       void resumed.sent
     },
-    onDismissInterrupted: () => {
-      if (activeConversationId) getSession(activeConversationId).dismissInterrupted()
+    onDismissInterrupted: (from) => {
+      if (from.conversationId) getSession(from.conversationId).dismissInterrupted()
     },
-    onOpenTaskDiff: (turnId, file) => {
-      if (activeConversationId) void openTaskDiff(getSession(activeConversationId).runOf(turnId) ?? [], file)
+    onOpenTaskDiff: (from, turnId, file) => {
+      if (from.conversationId) void openTaskDiff(getSession(from.conversationId).runOf(turnId) ?? [], file)
     },
-    onRevertTask: (turnId) => {
-      if (activeConversationId) void revertTask(getSession(activeConversationId).runOf(turnId) ?? [])
+    onRevertTask: (from, turnId) => {
+      if (from.conversationId) void revertTask(getSession(from.conversationId).runOf(turnId) ?? [])
     },
-    onSearchHistory: (query) => {
-      if (!currentAccountId) {
-        chatView?.post({ type: 'historyList', conversations: [] })
-        return
-      }
-      const all = conversations.history(currentAccountId)
+    onSearchHistory: (from, query) => {
+      const all = historyItems()
       const q = query.trim().toLowerCase()
       const filtered = q ? all.filter((c) => c.title.toLowerCase().includes(q)) : all
-      chatView?.post({ type: 'historyList', conversations: filtered })
+      chatView?.postTo(from, { type: 'historyList', conversations: filtered })
     },
-    onDeleteHistory: (id) => {
+    onDeleteHistory: (from, id) => {
+      // Permanent, open or not; the history panel has the person confirm
+      // first, and says so when the chat is open or still running.
       sessions.get(id)?.abort()
       sessions.delete(id)
       conversations.delete(id)
-      if (activeConversationId === id) {
-        const remaining = conversations.list(currentAccountId ?? undefined)
-        activeConversationId = remaining[0]?.id ?? null
-        if (activeConversationId) {
-          const session = getSession(activeConversationId)
-          postConversation(activeConversationId)
-        }
-        pushActiveConversation()
-        pushSession()
-      }
+      vacate(id)
       pushConversations()
-      pushHistoryPanel()
+      refreshHistory(from)
     },
-    onRestoreHistory: (id) => {
+    onRestoreHistory: (from, id) => {
       const conv = conversations.get(id)
       if (!conv) return
+      // Already open somewhere: go there instead of opening it twice.
+      const shownIn = chatView?.surfaces().find((s) => s.conversationId === id)
+      if (shownIn) {
+        void chatView?.reveal(shownIn)
+        return
+      }
       conversations.unarchive(id)
-      activeConversationId = id
-      const session = getSession(id)
-      session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
+      if (from.kind === 'editor') openChatInEditor(id)
+      else showIn(from, id)
+    },
+    onSurfaceClosed: (surface) => {
+      const id = surface.conversationId
+      if (!id) return
+      // A run still going is not thrown away with its tab: it carries on in
+      // the sidebar's strip, where it can be found.
+      if (sessions.get(id)?.busy) {
+        pushConversations()
+        return
+      }
+      retire(id)
       pushConversations()
-      pushActiveConversation()
-      postConversation(id)
-      pushSession()
-      pushHistoryPanel()
-      chatView?.reveal()
     },
   })
-
   context.subscriptions.push(
     output,
     statusBar,
@@ -435,9 +405,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.authentication.registerAuthenticationProvider(AUTH_PROVIDER_ID, 'Redstart', authProvider, {
       supportsMultipleAccounts: false,
     }),
-    // The same chat as an editor tab, restored after a window reload.
+    // Chats opened as editor tabs, restored on their chat after a window reload.
     vscode.window.registerWebviewPanelSerializer(ChatViewProvider.panelType, chatView),
-    vscode.commands.registerCommand('redstartYellowscript.openInEditor', () => chatView?.openInEditor()),
+    vscode.commands.registerCommand('redstartYellowscript.openInEditor', () => openChatInEditor(createConversation().id)),
+    vscode.commands.registerCommand('redstartYellowscript.moveToEditor', moveSidebarChatToEditor),
+    vscode.commands.registerCommand('redstartYellowscript.moveToSidebar', () => moveEditorChatToSidebar(chatView?.activeEditor())),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatView, {
       // Keep the transcript alive when the panel is hidden. Without this the
       // webview is torn down and the user loses their place in the conversation
@@ -724,7 +696,16 @@ function getSession(id: string): ChatSession {
           statusBar?.setWaiting(attention.count)
           if (news) notifyUnwatched(id, `is waiting for ${news}`)
         }
-        chatView?.post(message)
+        // Only the views showing this chat; the others are on their own.
+        chatView?.postToConversation(id, message)
+        // The tab strip's busy dots and an editor tab's title follow the run.
+        if (
+          (message.type === 'message' && message.message.role === 'user' && !message.message.pending) ||
+          message.type === 'turn/completed' ||
+          message.type === 'turn/failed'
+        ) {
+          pushConversations()
+        }
         if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
           statusBar?.setModel(getSession(message.conversationId).currentModel ?? null, message.stats.tokensPerSecond)
         }
@@ -753,43 +734,31 @@ function getSession(id: string): ChatSession {
 }
 
 /**
- * Send to the active conversation (creating one if no tab is open), and title
- * a new chat from its first prompt, or from the workflow it ran.
+ * Send to the conversation on a surface (opening one if it has none), and
+ * title a new chat from its first prompt, or from the workflow it ran.
  */
-function sendToActive(text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): void {
-  let id = activeConversationId
-  if (!id) {
-    const created = conversations.create('New chat', [], currentAccountId ?? undefined)
-    id = created.id
-    activeConversationId = id
-    pushConversations()
-    pushActiveConversation()
-  }
-  const conversationId = id
+function sendTo(surface: Surface, text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): void {
+  if (!surface.conversationId) showIn(surface, createConversation().id)
+  const conversationId = surface.conversationId!
   // Sent, so no longer a draft. Cleared here rather than trusting the
   // webview's follow-up, which could land after a save below.
   conversations.setDraft(conversationId, '')
+  // Title a still-untitled chat now, from what was sent. Waiting for the run
+  // to finish left a long run as one more "New chat" tab for its whole length,
+  // indistinguishable from the empty ones around it.
   const conv = conversations.get(conversationId)
-  if (conv && conv.title === 'New chat' && workflow) {
-    conv.title = titleFor(workflow.title)
-    conversations.save(conv)
-    pushConversations()
+  if (conv && conv.title === 'New chat') {
+    const label = workflow ? workflow.title : text.trim() || (attachments?.[0] ? attachmentLabel(attachments[0]) : '')
+    if (label) {
+      conv.title = titleFor(label)
+      conversations.save(conv)
+    }
   }
   const finished = getSession(conversationId).send(text, workflow, attachments)
+  pushConversations()
   pushSession()
-  // Title a still-untitled chat once its turn (or its queue) is underway.
   void finished.then(() => {
-    // Re-read: `conv` is from before the turn, and saving it back would put
-    // its stale transcript and draft over what has been stored since.
-    const current = conversations.get(conversationId)
-    if (current && current.title === 'New chat') {
-      const firstUser = getSession(conversationId).transcript.find((m) => m.role === 'user')
-      if (firstUser) {
-        current.title = titleFor(firstUser.content || (firstUser.attachments?.[0] ? attachmentLabel(firstUser.attachments[0]) : 'New chat'))
-        conversations.save(current)
-        pushConversations()
-      }
-    }
+    pushConversations()
     pushSession()
   })
 }
@@ -809,10 +778,12 @@ function persistConversation(id: string): void {
   conversations.save(conv)
 }
 
-/** Paint a conversation: its transcript and what sits around it. */
-function postConversation(id: string): void {
+/** Paint a surface's conversation: its transcript and what sits around it. */
+function postConversation(surface: Surface): void {
+  const id = surface.conversationId
+  if (!id) return
   const session = getSession(id)
-  chatView?.post({ type: 'conversation', conversationId: id, messages: session.snapshot(), state: session.state() })
+  chatView?.postTo(surface, { type: 'conversation', conversationId: id, messages: session.snapshot(), state: session.state() })
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +814,8 @@ function snapshot(id: string | null): SessionSnapshot {
   if (project) base.project = { id: project.id, name: project.name }
   const tracker = connected ? contextFor(manager?.activeClient ?? null) : null
   if (tracker) base.vision = tracker.vision
+  const configured = config().get<string>('serverUrl', '').trim()
+  if (configured) base.configuredUrl = configured
   return base
 }
 
@@ -877,12 +850,12 @@ function linkedProject(): ProjectLink | null {
   return link.server === scope.server && link.account === scope.account ? link : null
 }
 
-async function pushProjects(): Promise<void> {
+async function pushProjects(to: Surface): Promise<void> {
   const client = manager?.activeClient
   const linkedId = linkedProject()?.id ?? null
-  chatView?.post({ type: 'projects', projects: null, linkedId })
+  chatView?.postTo(to, { type: 'projects', projects: null, linkedId })
   if (!client) {
-    chatView?.post({ type: 'projects', projects: [], linkedId, error: 'Not connected to a Nest.' })
+    chatView?.postTo(to, { type: 'projects', projects: [], linkedId, error: 'Not connected to a Nest.' })
     return
   }
   try {
@@ -893,13 +866,13 @@ async function pushProjects(): Promise<void> {
       await workspaceMemento?.update(PROJECT_LINK_KEY, undefined)
       pushSession()
     }
-    chatView?.post({
+    chatView?.postTo(to, {
       type: 'projects',
       projects: projects.map(toProjectView),
       linkedId: linkedProject()?.id ?? null,
     })
   } catch (err) {
-    chatView?.post({ type: 'projects', projects: [], linkedId, error: describeError(err, 'Could not load projects') })
+    chatView?.postTo(to, { type: 'projects', projects: [], linkedId, error: describeError(err, 'Could not load projects') })
   }
 }
 
@@ -911,7 +884,7 @@ function toProjectView(p: NestProject): ProjectView {
   return view
 }
 
-async function linkProject(id: string | null): Promise<void> {
+async function linkProject(from: Surface, id: string | null): Promise<void> {
   const scope = linkScope()
   if (!scope) return
   if (id === null) {
@@ -920,25 +893,25 @@ async function linkProject(id: string | null): Promise<void> {
     const client = manager?.activeClient
     const project = client ? (await client.listProjects().catch(() => ({ projects: [] as NestProject[] }))).projects.find((p) => p.id === id) : undefined
     if (!project) {
-      chatView?.post({ type: 'notice', level: 'error', message: 'That project is no longer on the Nest.' })
+      chatView?.postTo(from, { type: 'notice', level: 'error', message: 'That project is no longer on the Nest.' })
       return
     }
     const link: ProjectLink = { ...scope, id: project.id, name: project.name }
     await workspaceMemento?.update(PROJECT_LINK_KEY, link)
   }
   pushSession()
-  await pushProjects()
+  await pushProjects(from)
 }
 
-async function createProjectFromPanel(name: string): Promise<void> {
+async function createProjectFromPanel(from: Surface, name: string): Promise<void> {
   const client = manager?.activeClient
   if (!client) return
   try {
     const project = await client.createProject(name)
-    await linkProject(project.id)
+    await linkProject(from, project.id)
   } catch (err) {
-    chatView?.post({ type: 'notice', level: 'error', message: describeError(err, 'Could not create the project') })
-    await pushProjects()
+    chatView?.postTo(from, { type: 'notice', level: 'error', message: describeError(err, 'Could not create the project') })
+    await pushProjects(from)
   }
 }
 
@@ -946,28 +919,28 @@ async function createProjectFromPanel(name: string): Promise<void> {
 // Workflows — the account's saved instructions, run from `/` or the page
 // ---------------------------------------------------------------------------
 
-async function pushWorkflows(): Promise<void> {
+async function pushWorkflows(to: Surface): Promise<void> {
   if (!mcpHost) {
-    chatView?.post({ type: 'workflows', workflows: [], error: 'Workflows need the Nest connection. Try reconnecting.' })
+    chatView?.postTo(to, { type: 'workflows', workflows: [], error: 'Workflows need the Nest connection. Try reconnecting.' })
     return
   }
   try {
     workflowCache = (await mcpHost.listPrompts()).map((p) => ({ ...p, arguments: p.arguments.map((a) => ({ ...a })) }))
-    chatView?.post({ type: 'workflows', workflows: workflowCache })
+    chatView?.postTo(to, { type: 'workflows', workflows: workflowCache })
   } catch (err) {
-    chatView?.post({ type: 'workflows', workflows: [], error: describeError(err, 'Could not load workflows') })
+    chatView?.postTo(to, { type: 'workflows', workflows: [], error: describeError(err, 'Could not load workflows') })
   }
 }
 
-async function runWorkflow(name: string, args: Record<string, string>): Promise<void> {
+async function runWorkflow(from: Surface, name: string, args: Record<string, string>): Promise<void> {
   if (!mcpHost) return
   try {
     // Nest composes the text from its own copy of the workflow.
     const text = await mcpHost.getPrompt(name, args)
     const title = workflowCache.find((w) => w.name === name)?.title ?? name
-    sendToActive(text, { name, title })
+    sendTo(from, text, { name, title })
   } catch (err) {
-    chatView?.post({ type: 'notice', level: 'error', message: describeError(err, `Could not run the workflow "${name}"`) })
+    chatView?.postTo(from, { type: 'notice', level: 'error', message: describeError(err, `Could not run the workflow "${name}"`) })
   }
 }
 
@@ -975,39 +948,156 @@ function describeError(err: unknown, lead: string): string {
   return `${lead}: ${err instanceof Error ? err.message : String(err)}`
 }
 
+// ---------------------------------------------------------------------------
+// Surfaces — the sidebar and the editor tabs, each on its own conversation
+// ---------------------------------------------------------------------------
+// A chat lives in one place at a time. An editor tab is one chat (VSCode's own
+// tabs, movable between groups and windows); the sidebar has a strip of every
+// other open chat. Switching in one never moves another.
+
+/** Each view's snapshot: busy, queued and model are its own chat's. */
 function pushSession(): void {
-  chatView?.post({ type: 'session', session: snapshot(activeConversationId) })
+  for (const surface of chatView?.surfaces() ?? []) {
+    chatView?.postTo(surface, { type: 'session', session: snapshot(surface.conversationId) })
+  }
 }
 
+/** The sidebar's tab strip: open chats of this account not in an editor tab. */
+function sidebarConversations(): Conversation[] {
+  return conversations.list(currentAccountId ?? undefined).filter((c) => !chatView?.editorFor(c.id))
+}
+
+/** Each view's tab list, and every editor tab's title. */
 function pushConversations(): void {
-  chatView?.post({ type: 'conversationList', conversations: toViews(conversations.list(currentAccountId ?? undefined)), activeId: activeConversationId })
+  for (const surface of chatView?.surfaces() ?? []) {
+    if (surface.kind === 'sidebar') {
+      chatView?.postTo(surface, { type: 'conversationList', conversations: toViews(sidebarConversations()), activeId: surface.conversationId })
+      continue
+    }
+    const own = surface.conversationId ? conversations.get(surface.conversationId) : undefined
+    chatView?.postTo(surface, { type: 'conversationList', conversations: own ? toViews([own]) : [], activeId: surface.conversationId })
+    if (own) chatView?.setTitle(surface, editorTitle(own))
+  }
 }
 
-function pushActiveConversation(): void {
-  chatView?.post({ type: 'activeConversationChanged', id: activeConversationId })
+/** An editor tab is named for its chat, so a row of them can be told apart. */
+function editorTitle(conv: Conversation): string {
+  return tabLabel(conv.title)
 }
 
-  /** Save the active conversation's transcript to the store. Pure bookkeeping
-   *  now — it never aborts a turn, because switching tabs doesn't. */
-function saveCurrentConversation(): void {
-  if (!activeConversationId) return
-  persistConversation(activeConversationId)
+function createConversation(): Conversation {
+  return conversations.create('New chat', [], currentAccountId ?? undefined)
 }
 
-/** Switch the visible tab. A pure view change: the target session is left
- *  exactly as it is (streaming or idle), and we just hand its transcript to the
- *  webview. The previously active session keeps running untouched. */
-function switchConversation(id: string): void {
+/**
+ * The chat the sidebar should show: `preferred` when it is open, this
+ * account's and not in an editor tab; else the first of the strip; else a new one.
+ */
+function pickSidebarConversation(preferred: string | null | undefined): string {
+  const candidates = sidebarConversations()
+  if (preferred) {
+    const conv = conversations.get(preferred)
+    if (conv && !chatView?.editorFor(preferred) && (!currentAccountId || !conv.accountId || conv.accountId === currentAccountId)) {
+      if (conv.archived) conversations.unarchive(preferred)
+      return preferred
+    }
+  }
+  return candidates[0]?.id ?? createConversation().id
+}
+
+/** Put a conversation on a surface. A pure view change: whatever it is doing
+ *  (streaming, waiting on a question) carries on untouched. */
+function showIn(surface: Surface, id: string): void {
+  surface.conversationId = id
+  // activeConversationChanged FIRST so the webview takes the transcript that
+  // follows (it drops one for any chat other than its own).
+  chatView?.postTo(surface, { type: 'activeConversationChanged', id })
+  postConversation(surface)
+  chatView?.postTo(surface, { type: 'session', session: snapshot(id) })
+  pushConversations()
+}
+
+/** A chat in a new editor tab, or the tab it is already in. */
+function openChatInEditor(id: string): void {
+  const existing = chatView?.editorFor(id)
+  if (existing) {
+    void chatView?.reveal(existing)
+    return
+  }
   const conv = conversations.get(id)
-  if (!conv || id === activeConversationId) return
-  activeConversationId = id
-  const session = getSession(id)
-  // Send activeConversationChanged FIRST so the webview's activeConversationId
-  // is updated before the conversation message arrives. Otherwise the
-  // conversation message is dropped (conversationId !== activeConversationId).
-  pushActiveConversation()
-  postConversation(id)
-  pushSession()
+  if (!conv || !chatView) return
+  if (conv.archived) conversations.unarchive(id)
+  // Off the sidebar first, so it is never on screen in two places.
+  const sidebar = chatView.sidebar()
+  chatView.openEditor(id, editorTitle(conv))
+  if (sidebar && sidebar.conversationId === id) showIn(sidebar, pickSidebarConversation(null))
+  pushConversations()
+}
+
+/** The sidebar's chat, moved to an editor tab of its own. */
+function moveSidebarChatToEditor(): void {
+  const sidebar = chatView?.sidebar()
+  openChatInEditor(sidebar?.conversationId ?? createConversation().id)
+}
+
+/** An editor tab's chat, moved back into the sidebar's strip. The tab closes
+ *  without that counting as closing the chat: a run carries on. */
+function moveEditorChatToSidebar(surface: Surface | undefined): void {
+  if (!surface || surface.kind !== 'editor' || !chatView) return
+  const id = surface.conversationId
+  chatView.closeEditor(surface)
+  if (!id) return
+  const sidebar = chatView.sidebar()
+  if (sidebar) showIn(sidebar, id)
+  else pendingSidebarConversation = id
+  void chatView.revealSidebar()
+}
+
+/** Close a chat: to history, or deleted outright when there was nothing in it. */
+function retire(id: string): void {
+  const closing = conversations.get(id)
+  if (closing && isBlank(closing)) conversations.delete(id)
+  else conversations.archive(id)
+}
+
+/** The tab-strip close: stop its run, retire it, and take it off every view. */
+function closeConversation(id: string): void {
+  sessions.get(id)?.abort()
+  sessions.delete(id)
+  retire(id)
+  vacate(id)
+  pushConversations()
+  for (const surface of chatView?.surfaces() ?? []) refreshHistory(surface)
+}
+
+/** A chat is gone from the strip: an editor tab on it closes, the sidebar moves on. */
+function vacate(id: string): void {
+  for (const surface of chatView?.surfaces() ?? []) {
+    if (surface.conversationId !== id) continue
+    if (surface.kind === 'editor') chatView?.closeEditor(surface)
+    else showIn(surface, pickSidebarConversation(null))
+  }
+}
+
+/** Every chat of this account, open ones included, newest first. Open chats
+ *  are listed too, so one is never somewhere the person cannot find it. */
+function historyItems(): Array<HistoryEntry & { running: boolean }> {
+  if (!currentAccountId) return []
+  return conversations.history(currentAccountId).map((h) => ({ ...h, running: sessions.get(h.id)?.busy === true }))
+}
+
+function pushHistoryPanel(to: Surface): void {
+  chatView?.postTo(to, { type: 'showHistoryPanel', conversations: historyItems() })
+}
+
+/** Refresh the history list without opening it. */
+function refreshHistory(to: Surface): void {
+  chatView?.postTo(to, { type: 'historyList', conversations: historyItems() })
+}
+
+/** Where a command lands when it did not come from a view. */
+function targetSurface(): Surface | undefined {
+  return chatView?.focused() ?? chatView?.sidebar()
 }
 
 function toViews(list: Conversation[]): ConversationView[] {
@@ -1050,14 +1140,13 @@ async function refreshModel(): Promise<void> {
   }
 }
 
+/** A new chat in the sidebar's strip (the editor's bird button opens one in a tab). */
 async function newChatCommand(): Promise<void> {
-  const conv = conversations.create('New chat', [], currentAccountId ?? undefined)
-  activeConversationId = conv.id
-  getSession(conv.id).reset()
-  pushConversations()
-  pushActiveConversation()
-  pushSession()
-  await chatView?.reveal()
+  const id = createConversation().id
+  const sidebar = chatView?.sidebar()
+  if (sidebar) showIn(sidebar, id)
+  else pendingSidebarConversation = id
+  await chatView?.revealSidebar()
 }
 
 async function openSettingsCommand(): Promise<void> {
@@ -1066,20 +1155,22 @@ async function openSettingsCommand(): Promise<void> {
 
 /** Reveal the panel on a page, and load its data. */
 function showPage(page: PageName): void {
-  void chatView?.reveal().then(() => {
-    chatView?.post({ type: 'showPage', page })
-    if (page === 'projects') void pushProjects()
-    else void pushWorkflows()
+  const to = targetSurface()
+  void chatView?.reveal(to).then(() => {
+    const target = to ?? chatView?.sidebar()
+    if (!target) return
+    chatView?.postTo(target, { type: 'showPage', page })
+    if (page === 'projects') void pushProjects(target)
+    else void pushWorkflows(target)
   })
 }
 
 function openHistoryCommand(): void {
-  pushHistoryPanel()
-}
-
-function pushHistoryPanel(): void {
-  const items = currentAccountId ? conversations.history(currentAccountId) : []
-  chatView?.post({ type: 'showHistoryPanel', conversations: items })
+  const to = targetSurface()
+  void chatView?.reveal(to).then(() => {
+    const target = to ?? chatView?.sidebar()
+    if (target) pushHistoryPanel(target)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,18 +1572,30 @@ async function promptForServerUrl(): Promise<void> {
   })
   // Dismissed, as opposed to deliberately emptied.
   if (entered === undefined) return
+  await applyServerUrl(entered)
+}
 
+/** Save the Nest's address (empty: back to discovery) and connect. From the
+ *  input box above, or the login screen's connection details. */
+async function applyServerUrl(entered: string): Promise<void> {
   if (entered.trim() === '') {
     // `undefined` removes the key rather than storing "", which would still
     // count as an explicit override and keep discovery switched off.
     await config().update('serverUrl', undefined, vscode.ConfigurationTarget.Workspace)
+    pushSession()
     vscode.window.setStatusBarMessage('$(search) Yellowscript will discover the Nest automatically', 4000)
     await manager?.connect({})
     return
   }
 
   const url = normalizeBaseUrl(entered)
+  try {
+    new URL(url)
+  } catch {
+    return
+  }
   await config().update('serverUrl', url, vscode.ConfigurationTarget.Workspace)
+  pushSession()
   await manager?.connect({ url })
 }
 
@@ -1505,7 +1608,7 @@ async function promptForServerUrl(): Promise<void> {
  * the outline of a longer file. Files outside the workspace or that may hold
  * secrets are not attached; a notice says so.
  */
-async function resolveAttachments(list: readonly AttachmentView[]): Promise<AttachmentView[]> {
+async function resolveAttachments(from: Surface, list: readonly AttachmentView[]): Promise<AttachmentView[]> {
   const roots = workspaceRoots()
   const out: AttachmentView[] = []
   for (const a of list) {
@@ -1517,11 +1620,11 @@ async function resolveAttachments(list: readonly AttachmentView[]): Promise<Atta
     try {
       absolute = resolveWithinWorkspace(roots, a.path)
     } catch {
-      chatView?.post({ type: 'notice', level: 'warning', message: `${a.path} is outside the workspace, so it was not attached.` })
+      chatView?.postTo(from, { type: 'notice', level: 'warning', message: `${a.path} is outside the workspace, so it was not attached.` })
       continue
     }
     if (secretReason(absolute)) {
-      chatView?.post({ type: 'notice', level: 'warning', message: `${a.path} may hold secrets, so it was not attached.` })
+      chatView?.postTo(from, { type: 'notice', level: 'warning', message: `${a.path} may hold secrets, so it was not attached.` })
       continue
     }
     try {
@@ -1560,8 +1663,11 @@ async function addSelectionToChat(): Promise<void> {
   const startLine = selection.start.line + 1
   const endLine = selection.end.character === 0 && selection.end.line > selection.start.line ? selection.end.line : selection.end.line + 1
   const range = new vscode.Range(startLine - 1, 0, endLine - 1, editor.document.lineAt(endLine - 1).text.length)
-  await chatView?.reveal()
-  chatView?.post({
+  const to = targetSurface()
+  await chatView?.reveal(to)
+  const target = to ?? chatView?.sidebar()
+  if (!target) return
+  chatView?.postTo(target, {
     type: 'addAttachment',
     attachment: { kind: 'selection', path: vscode.workspace.asRelativePath(editor.document.uri, false).replace(/\\/g, '/'), startLine, endLine, text: editor.document.getText(range) },
   })
@@ -1575,8 +1681,11 @@ async function fixDiagnostic(uri: vscode.Uri, diagnostic: vscode.Diagnostic): Pr
   const path = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/')
   const source = diagnostic.source ? ` (${diagnostic.source}${diagnostic.code !== undefined ? ` ${typeof diagnostic.code === 'object' ? diagnostic.code.value : diagnostic.code}` : ''})` : ''
   const text = document.getText(new vscode.Range(first, 0, last, document.lineAt(last).text.length))
-  await chatView?.reveal()
-  sendToActive(`Fix this problem in ${path} at line ${diagnostic.range.start.line + 1}: ${diagnostic.message}${source}`, undefined, [
+  const to = targetSurface()
+  await chatView?.reveal(to)
+  const target = to ?? chatView?.sidebar()
+  if (!target) return
+  sendTo(target, `Fix this problem in ${path} at line ${diagnostic.range.start.line + 1}: ${diagnostic.message}${source}`, undefined, [
     { kind: 'selection', path, startLine: first + 1, endLine: last + 1, text },
   ])
 }
@@ -1600,8 +1709,19 @@ function notifyUnwatched(conversationId: string, what: string): void {
 
 /** Reveal the chat with this conversation in front. */
 async function showConversation(conversationId: string): Promise<void> {
-  await chatView?.reveal()
-  switchConversation(conversationId)
+  // Wherever it is on screen; else it comes up in the sidebar.
+  const shownIn = chatView?.surfaces().find((s) => s.conversationId === conversationId)
+  if (shownIn) {
+    await chatView?.reveal(shownIn)
+    return
+  }
+  const conv = conversations.get(conversationId)
+  if (!conv) return
+  if (conv.archived) conversations.unarchive(conversationId)
+  const sidebar = chatView?.sidebar()
+  if (sidebar) showIn(sidebar, conversationId)
+  else pendingSidebarConversation = conversationId
+  await chatView?.revealSidebar()
 }
 
 /** What the command classifier needs to know about this workspace and run. */
@@ -1666,6 +1786,15 @@ function onStateChanged(state: ConnectionState): void {
       }
     }
     output?.info(`account: ${currentAccountId ?? 'unknown'}`)
+    // The strip is per account: a view still on another account's chat moves
+    // to one of this account's.
+    for (const surface of chatView?.surfaces() ?? []) {
+      const conv = surface.conversationId ? conversations.get(surface.conversationId) : undefined
+      if (surface.kind === 'sidebar' && conv && currentAccountId && conv.accountId && conv.accountId !== currentAccountId) {
+        showIn(surface, pickSidebarConversation(null))
+      }
+    }
+    pushConversations()
 
     void refreshModel()
     void connectMcpHost()
@@ -1772,5 +1901,5 @@ function connectMcpHost(): void {
 function pushTools(): void {
   const current = mergedTools ?? tools
   if (!current) return
-  chatView?.post({ type: 'tools', names: current.names })
+  chatView?.broadcast({ type: 'tools', names: current.names })
 }

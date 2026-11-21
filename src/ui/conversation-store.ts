@@ -63,12 +63,14 @@ export interface HistoryEntry {
   messageCount: number
   /** True when the conversation holds only an unsent draft. */
   draft: boolean
+  /** Still open in a tab, not closed to history. */
+  open: boolean
 }
 
 export interface ConversationStore {
   /** Active (non-archived) conversations, filtered by account when provided. */
   list(accountId?: string): Conversation[]
-  /** All conversations for an account, including archived, newest first. */
+  /** Every conversation of an account, open and closed, newest first. */
   history(accountId: string): HistoryEntry[]
   get(id: string): Conversation | undefined
   save(conversation: Conversation): void
@@ -83,6 +85,7 @@ export interface ConversationStore {
   /** Delete archived conversations with no messages and no draft. */
   pruneBlank(): number
   clear(): void
+  /** Delete closed conversations untouched for this long. Open tabs are kept. */
   prune(olderThanDays: number): number
   search(accountId: string, query: string): Conversation[]
   /** Re-tag all conversations with empty accountId to the given account. */
@@ -118,7 +121,8 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
 
     history(accountId: string) {
       return readAll()
-        .filter((c) => c.accountId === accountId && c.archived)
+        // Not yet tagged ('') still belongs to whoever signs in next.
+        .filter((c) => (c.accountId === accountId || c.accountId === '') && !(c.archived === false && isBlank(c)))
         .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)
         .map((c) => ({
           id: c.id,
@@ -126,6 +130,7 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
           lastAccessedAt: c.lastAccessedAt,
           messageCount: c.messages.length,
           draft: c.messages.length === 0 && !!(c.draft ?? '').trim(),
+          open: c.archived !== true,
         }))
     },
 
@@ -209,8 +214,8 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
     prune(olderThanDays: number) {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000
       const before = readAll()
-      const after = before.filter((c) => c.lastAccessedAt >= cutoff)
-      writeAll(after)
+      const after = before.filter((c) => !c.archived || c.lastAccessedAt >= cutoff)
+      if (after.length !== before.length) writeAll(after)
       return before.length - after.length
     },
 

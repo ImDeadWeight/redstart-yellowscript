@@ -9,6 +9,7 @@
   import type { SessionSnapshot } from '../../chat/protocol.ts'
   import { CREST_HTML } from '../crest.ts'
   import { post } from '../host.ts'
+  import { serverUrlProblem } from '../view-model.ts'
   import Icon from './Icon.svelte'
 
   let { session }: { session: SessionSnapshot } = $props()
@@ -38,6 +39,30 @@
   }
 
   const working = $derived(session.connection === 'discovering' || session.connection === 'connecting')
+
+  // Connection details: the Nest's address, edited here rather than in a
+  // VSCode input box. Empty means find it by discovery.
+  let details = $state(false)
+  let address = $state('')
+  const problem = $derived(serverUrlProblem(address))
+
+  function openDetails() {
+    address = session.configuredUrl ?? ''
+    details = true
+  }
+
+  function saveAddress(event: SubmitEvent) {
+    event.preventDefault()
+    if (problem) return
+    post({ type: 'setServerUrl', url: address.trim() })
+    details = false
+  }
+
+  function useDiscovery() {
+    address = ''
+    post({ type: 'setServerUrl', url: '' })
+    details = false
+  }
 </script>
 
 <main class="login">
@@ -74,7 +99,36 @@
       <Icon name={session.connection === 'error' ? 'refresh' : 'server'} size={12} />
       {session.connection === 'error' ? 'Retry' : 'Connect to Nest'}
     </button>
-    <button type="button" class="link" onclick={() => post({ type: 'runCommand', command: 'showStatus' })}>Connection details</button>
+    {#if details}
+      <form class="details" onsubmit={saveAddress}>
+        <label for="nest-url">Nest address</label>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          id="nest-url"
+          type="text"
+          placeholder="Found automatically on your network"
+          bind:value={address}
+          aria-invalid={problem !== null}
+          spellcheck="false"
+          autofocus
+        />
+        {#if problem}<p class="error" role="alert">{problem}</p>{/if}
+        <p class="hint">
+          {session.configuredUrl
+            ? 'Saved for this workspace. Clear it to find the Nest automatically again.'
+            : 'For a Nest discovery cannot see (another subnet, a VPN, or a remote address), e.g. 192.168.1.20:19080.'}
+        </p>
+        <div class="row">
+          <button type="submit" class="primary" disabled={problem !== null}>{address.trim() ? 'Save and connect' : 'Use discovery'}</button>
+          {#if session.configuredUrl && address.trim()}
+            <button type="button" class="secondary" onclick={useDiscovery}>Use discovery</button>
+          {/if}
+          <button type="button" class="link" onclick={() => (details = false)}>Cancel</button>
+        </div>
+      </form>
+    {:else}
+      <button type="button" class="link" onclick={openDetails}>Connection details</button>
+    {/if}
   {/if}
 </main>
 
@@ -124,4 +178,10 @@
   .wide { justify-content: center; width: 100%; max-width: 280px; padding: 6px 12px; }
   .progress { padding: 8px; color: var(--ys-accent); }
   .hint { margin: 0; max-width: 260px; font-size: 0.85em; opacity: 0.6; }
+  .details { margin-top: 8px; text-align: left; }
+  .details label { font-size: 0.85em; opacity: 0.8; }
+  .details .hint { max-width: none; }
+  .details input[aria-invalid='true'] { border-color: var(--vscode-inputValidation-errorBorder, red); }
+  .error { margin: 0; font-size: 0.85em; color: var(--vscode-errorForeground); }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 </style>

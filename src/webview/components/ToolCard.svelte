@@ -9,12 +9,19 @@
   /** ys_read_file → read file; Nest tools keep their name. */
   const label = $derived(card.name.startsWith('ys_') ? card.name.slice(3).replace(/_/g, ' ') : card.name.replace(/_/g, ' '))
   const preview = $derived(argumentsPreview(card.arguments))
+  /** A write's arguments can be a whole file. Laying out tens of kilobytes on
+   *  every streamed update is what made an opened card tear; the start is
+   *  enough to see what the call was. */
+  const SHOWN_CHARS = 4_000
   const pretty = $derived.by(() => {
+    let text: string
     try {
-      return JSON.stringify(JSON.parse(card.arguments || '{}'), null, 2)
+      text = JSON.stringify(JSON.parse(card.arguments || '{}'), null, 2)
     } catch {
-      return card.arguments
+      text = card.arguments
     }
+    return text.length > SHOWN_CHARS ? `${text.slice(0, SHOWN_CHARS)}
+… ${(text.length - SHOWN_CHARS).toLocaleString()} more characters` : text
   })
   const onNest = $derived(!card.name.startsWith('ys_') && card.name !== 'ask_user' && card.name !== 'update_plan')
 </script>
@@ -49,6 +56,8 @@
 
 <style>
   .card {
+    /* Opening or updating one card repaints that card, not the transcript. */
+    contain: layout paint;
     border-radius: 4px;
     font-size: 0.88em;
     background: var(--ys-card);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ConversationView } from '../../chat/protocol.ts'
+  import { tabLabel, type ConversationView, type SurfaceKind } from '../../chat/protocol.ts'
   import { post } from '../host.ts'
   import { flushDraft } from '../drafts.ts'
   import { view } from '../store.svelte.ts'
@@ -10,19 +10,35 @@
     post({ type: 'loadPage', page })
   }
 
-  let { tabs, activeId }: { tabs: ConversationView[]; activeId: string | null } = $props()
+  let { tabs, activeId, surface }: { tabs: ConversationView[]; activeId: string | null; surface: SurfaceKind } = $props()
+
+  let strip: HTMLDivElement | undefined = $state()
+  // The active tab is always in view: with many chats the strip scrolls, and
+  // a chat scrolled out of sight is a chat that seems to have vanished.
+  $effect(() => {
+    void tabs
+    const active = activeId
+    if (!strip || !active) return
+    const el = strip.querySelector<HTMLElement>(`[data-tab="${CSS.escape(active)}"]`)
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  })
 </script>
 
 <nav class="strip" aria-label="Conversations">
-  <div class="tabs" role="tablist">
+  <!-- An editor tab is one chat; VSCode's own tab is its tab. -->
+  <div class="tabs" role="tablist" bind:this={strip} hidden={surface === 'editor'}>
     {#each tabs as tab (tab.id)}
-      <div class="tab" class:active={tab.id === activeId} role="presentation">
+      <div class="tab" class:active={tab.id === activeId} role="presentation" data-tab={tab.id}>
         <button
           type="button"
           class="tab-main"
           role="tab"
           aria-selected={tab.id === activeId}
-          title={tab.title}
+          title="{tab.title} (double-click to open in an editor tab)"
+          ondblclick={() => {
+            flushDraft()
+            post({ type: 'moveToEditor', id: tab.id })
+          }}
           onclick={() => {
             if (tab.id === activeId) return
             flushDraft()
@@ -30,7 +46,7 @@
           }}
         >
           {#if tab.busy}<span class="busy" aria-label="working"></span>{/if}
-          <span class="label">{tab.title}</span>
+          <span class="label">{tabLabel(tab.title)}</span>
           {#if tab.queued > 0}<span class="queued" title="{tab.queued} queued">{tab.queued}</span>{/if}
         </button>
         <button
@@ -48,7 +64,20 @@
       </div>
     {/each}
   </div>
-  <button type="button" class="icon-button" title="New chat" aria-label="New chat" onclick={() => post({ type: 'newConversation' })}>
+  {#if surface === 'editor'}
+    <!-- An editor tab is one chat: its title heads the bar, in full. -->
+    <h1 class="title" title={tabs[0]?.title ?? ''}>
+      {#if tabs[0]?.busy}<span class="busy" aria-label="working"></span>{/if}
+      <span class="label">{tabs[0]?.title ?? 'New chat'}</span>
+    </h1>
+    <button type="button" class="icon-button" title="Move to sidebar" aria-label="Move to sidebar" onclick={() => {
+      flushDraft()
+      post({ type: 'moveToSidebar' })
+    }}>
+      <Icon name="sidebar" />
+    </button>
+  {/if}
+  <button type="button" class="icon-button" title={surface === 'editor' ? 'New chat in a new tab' : 'New chat'} aria-label="New chat" onclick={() => post({ type: 'newConversation' })}>
     <Icon name="plus" />
   </button>
   <button type="button" class="icon-button" title="Workflows" aria-label="Workflows" onclick={() => openPage('workflows')}>
@@ -74,7 +103,20 @@
     min-width: 0;
     gap: 2px;
     overflow-x: auto;
-    scrollbar-width: none;
+    scrollbar-width: thin;
+  }
+  .tabs[hidden] { display: none; }
+  .title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 4px 6px 6px;
+    font-size: 0.95em;
+    font-weight: 600;
+    text-align: left;
   }
   .tab {
     position: relative;

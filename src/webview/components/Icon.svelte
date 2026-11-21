@@ -6,7 +6,7 @@
     | 'plus' | 'history' | 'stop' | 'send' | 'check' | 'x' | 'chevron-down' | 'chevron-up'
     | 'chevron-right' | 'list' | 'question' | 'tool' | 'alert' | 'circle' | 'circle-check'
     | 'circle-dot' | 'circle-minus' | 'spinner' | 'server' | 'refresh' | 'folder' | 'bolt'
-    | 'terminal' | 'file' | 'shield'
+    | 'terminal' | 'file' | 'shield' | 'sidebar'
 
   let { name, size = 14, label }: { name: Name; size?: number; label?: string } = $props()
 
@@ -36,6 +36,7 @@
     terminal: 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5',
     file: 'M4 1.5h5l3 3v10H4zM9 1.5v3h3',
     shield: 'M8 1.5l5.5 2v4c0 3.2-2.4 5.8-5.5 7-3.1-1.2-5.5-3.8-5.5-7v-4z',
+    sidebar: 'M2.5 3h11v10h-11zM6.5 3v10',
   }
 </script>
 

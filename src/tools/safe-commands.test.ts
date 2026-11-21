@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { classifyCommand, redactUrlCredentials, splitWords, type CommandContext } from './safe-commands.ts'
+import { classifyCommand, endsProcesses, pidsIn, redactUrlCredentials, splitWords, type CommandContext } from './safe-commands.ts'
 
 const root = path.join(os.tmpdir(), 'ys-safe-ws')
 const sibling = path.join(os.tmpdir(), 'ys-safe-sibling')
@@ -201,4 +201,15 @@ describe('redactUrlCredentials', () => {
     assert.equal(redactUrlCredentials('https://ghp_abc123@github.com/a/b'), 'https://***@github.com/a/b')
     assert.equal(redactUrlCredentials('see https://github.com/a/b and git@github.com:a/b'), 'see https://github.com/a/b and git@github.com:a/b')
   })
+})
+
+test('a line that ends processes always asks, and never offers Always', () => {
+  for (const line of ['taskkill /pid 20092 /F', 'kill -9 4242', 'pkill node', 'killall node']) {
+    const result = classifyCommand(line, ctx())
+    assert.equal(result.tier, 'C', line)
+    assert.ok(result.tier === 'C' && result.neverAlways, `${line} offers Always`)
+  }
+  assert.equal(endsProcesses('powershell -Command Stop-Process -Id 1'), true)
+  assert.equal(endsProcesses('npm test'), false)
+  assert.deepEqual(pidsIn('taskkill /pid 20092 /pid 8080 /T /F'), [20092, 8080])
 })

@@ -10,7 +10,21 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, describe, it } from 'node:test'
 
-import { BackgroundProcesses, capHeadTail, describeRunning, detectServerUrl, formatCommandRun, runCommandLine, runFailed, startInBackground } from './process-runner.ts'
+import {
+  BackgroundProcesses,
+  LABEL_CHAT,
+  LABEL_RUN,
+  capHeadTail,
+  describeKillTargets,
+  describeRunning,
+  detectServerUrl,
+  formatCommandRun,
+  formatProcessList,
+  looksLikePrompt,
+  runCommandLine,
+  runFailed,
+  startInBackground,
+} from './process-runner.ts'
 import { createProcessTool, legacyProcessCall } from './process-tools.ts'
 import { allowPrefixFor, isCommandAllowed } from './approval.ts'
 
@@ -140,10 +154,10 @@ describe('dev-server address detection', () => {
       const code = "setTimeout(() => console.log('Local: http://localhost:4321/'), 300); setInterval(() => {}, 1000)"
       const started = await startInBackground(processes, nodeLine(code), cwd, 5_000)
       assert.equal(started.url, 'http://localhost:4321/')
-      assert.match(started.text, /^p1 is serving http:\/\/localhost:4321\//)
+      assert.match(started.text, /^p1 \(pid \d+\) is serving http:\/\/localhost:4321\//)
       assert.equal(started.isError, false)
       assert.equal(processes.list()[0]!.url, 'http://localhost:4321/')
-      assert.match(describeRunning(processes.list(), processes.list()[0]!.startedAt + 12 * 60_000)!, /^Running now: p1 ".*" → http:\/\/localhost:4321\/ \(started 12 min ago\)$/)
+      assert.match(describeRunning(processes.list(), processes.list()[0]!.startedAt + 12 * 60_000)!, /^Running now: p1 ".*" → http:\/\/localhost:4321\/ \(pid \d+, started 12 min ago\)$/)
     } finally {
       processes.stopAll()
     }
@@ -152,7 +166,7 @@ describe('dev-server address detection', () => {
   it('a start that exits says so, with its code and output', async () => {
     const processes = new BackgroundProcesses()
     const started = await startInBackground(processes, nodeLine("console.error('port in use'); process.exit(1)"), cwd, 5_000)
-    assert.match(started.text, /^p1 exited with code 1/)
+    assert.match(started.text, /^p1 \(pid \d+\) exited with code 1/)
     assert.match(started.text, /port in use/)
     assert.equal(started.isError, true)
     assert.equal(started.exitCode, 1)
@@ -183,5 +197,112 @@ describe('the command allowlist', () => {
     assert.equal(allowPrefixFor('git status'), 'git status')
     assert.equal(allowPrefixFor('ls -la'), 'ls -la')
     assert.equal(allowPrefixFor('npm test && echo done'), null)
+  })
+})
+
+describe('processes Yellowscript can name', () => {
+  it('recognises a prompt waiting for an answer, and nothing else', () => {
+    assert.equal(looksLikePrompt('Overwrite files? (y/N) '), 'Overwrite files? (y/N)')
+    assert.equal(looksLikePrompt('┌  Welcome to the Svelte CLI!\n│\n◆  Directory not empty. Continue?\n│  ○ Yes / ● No\n└'), 'Directory not empty. Continue?')
+    // What `npx sv create .` really prints in a folder with files in it.
+    const sv = '┌  Welcome to the Svelte CLI! (v1.7.0)\n\u001b[?25l│\n◆  Directory not empty:\n│  C:\\tmp\\app\n│  \n│  Continue?\n│  ○ Yes / ● No\n└\n'
+    assert.equal(looksLikePrompt(sv), 'Directory not empty: … Continue?')
+    // An answered question above is not an open one.
+    assert.equal(looksLikePrompt('◇  Which template?\n│  minimal\n│\nScaffolded the project.'), null)
+    assert.equal(looksLikePrompt('? Project name › my-app'), 'Project name › my-app')
+    assert.equal(looksLikePrompt('Enter password: '), 'Enter password:')
+    assert.equal(looksLikePrompt('Press any key to continue . . .'), 'Press any key to continue . . .')
+    assert.equal(looksLikePrompt('\u001b[1mbuilding\u001b[22m 412 modules'), null)
+    assert.equal(looksLikePrompt('Compiled successfully.\n'), null)
+    assert.equal(looksLikePrompt(''), null)
+  })
+
+  it('stops a command that sits on a prompt, and says what it asked', async () => {
+    const run = await runCommandLine({
+      command: nodeLine("process.stdout.write('Continue? (y/N) '); setInterval(() => {}, 1000)"),
+      cwd,
+      inputWaitMs: 400,
+      timeoutMs: 20_000,
+    })
+    assert.equal(run.waitingForInput, 'Continue? (y/N)')
+    assert.ok(run.durationMs < 10_000, `took ${run.durationMs}ms`)
+    assert.equal(runFailed(run), true)
+    assert.match(formatCommandRun(run), /^Stopped after .*waiting for input.*it asked: "Continue\? \(y\/N\)".*--yes/)
+  })
+
+  it('a command that exits on an unanswered prompt failed, whatever its exit code', async () => {
+    const run = await runCommandLine({
+      command: nodeLine("console.log('◆  Directory not empty:'); console.log('│  Continue?'); console.log('│  ○ Yes / ● No'); console.log('└')"),
+      cwd,
+    })
+    assert.equal(run.exitCode, 0)
+    assert.equal(run.endedAtPrompt, 'Directory not empty: … Continue?')
+    assert.equal(runFailed(run), true)
+    assert.match(formatCommandRun(run), /most likely did NOT do the work/)
+    const fine = await runCommandLine({ command: nodeLine("console.log('Done in 1.2s')"), cwd })
+    assert.equal(fine.endedAtPrompt, undefined)
+  })
+
+  it('labels the process and its children, and sets CI only when asked', async () => {
+    const show = nodeLine(`console.log(process.env.${LABEL_RUN} + ' ' + process.env.${LABEL_CHAT} + ' ' + (process.env.CI ?? 'none'))`)
+    const processes = new BackgroundProcesses()
+    const labelled = await processes.run({ command: show, cwd, chat: 'conv_1', nonInteractive: true })
+    const expectedCi = process.env.CI ?? '1'
+    assert.equal(labelled.stdout.trim(), `c1 conv_1 ${expectedCi}`)
+    assert.match(formatCommandRun(labelled).split('\n')[0]!, /^Exit code 0 · \d+\.\ds · c1 \(pid \d+\)$/)
+    const plain = await processes.run({ command: show, cwd })
+    assert.equal(plain.stdout.trim(), `c2 undefined ${process.env.CI ?? 'none'}`)
+  })
+
+  it('lists commands and background processes with pids, and stops a running command by id', async () => {
+    const processes = new BackgroundProcesses()
+    await processes.run({ command: nodeLine("console.log('done')"), cwd })
+    const running = processes.run({ command: nodeLine("console.log('working'); setInterval(() => {}, 1000)"), cwd, inputWaitMs: 0 })
+    const started = processes.start(nodeLine('setInterval(() => {}, 1000)'), cwd, 'conv_2')
+    try {
+      // Wait for the command to start and print.
+      for (let i = 0; i < 50 && !processes.records().find((r) => r.id === 'c2')?.lastLine; i++) await new Promise((r) => setTimeout(r, 100))
+      const list = formatProcessList(processes.records())
+      assert.match(list, /^Started by Yellowscript in this window \(2 running\)/)
+      assert.match(list, /c1 {2}pid \d+ {2}command {2}exited 0/)
+      assert.match(list, /c2 {2}pid \d+ {2}command {2}running/)
+      assert.match(list, /last output: working/)
+      assert.match(list, /p1 {2}pid \d+ {2}background {2}running/)
+      assert.match(list, /not yours: do not end it/)
+      assert.equal(processes.owns(started.pid!)?.id, 'p1')
+      assert.equal(processes.owns(999_999_99), null)
+
+      const stopped = processes.stop('c2')
+      assert.equal(stopped?.running, true)
+      const run = await running
+      assert.equal(run.stopped, true)
+      assert.match(formatCommandRun(run), /^Stopped after .*, with everything it started\./)
+      assert.match(formatProcessList(processes.records()), /c2 {2}pid \d+ {2}command {2}stopped/)
+    } finally {
+      processes.stopAll()
+    }
+  })
+
+  it('says which pids a kill line names are Yellowscript\'s', () => {
+    const processes = new BackgroundProcesses()
+    const started = processes.start(nodeLine('setInterval(() => {}, 1000)'), cwd)
+    try {
+      const text = describeKillTargets(`taskkill /pid ${started.pid} /pid 4242 /F`, processes)
+      assert.match(text, new RegExp(`pid ${started.pid} is Yellowscript's p1`))
+      assert.match(text, /pid 4242 was NOT started by Yellowscript/)
+      assert.match(text, /running processes: p1 pid \d+/)
+    } finally {
+      processes.stopAll()
+    }
+  })
+
+  it('ys_process list and stop work through the tool', async () => {
+    const processes = new BackgroundProcesses()
+    const tool = createProcessTool(processes)
+    const empty = await tool.execute({ action: 'list' }, { workspaceRoots: [cwd], readRoots: [] } as never)
+    assert.match(empty.content, /Nothing started yet/)
+    const missing = await tool.execute({ action: 'stop', id: 'c9' }, { workspaceRoots: [cwd], readRoots: [] } as never)
+    assert.equal(missing.isError, true)
+    assert.match(missing.content, /no process "c9" started by Yellowscript/)
   })
 })

@@ -17,7 +17,7 @@
 
 import { assertWorkspaceToolName, stringArg, toolError, toolOk, type PendingCommand, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
-import { capHeadTail, type BackgroundProcesses } from './process-runner.ts'
+import { capHeadTail, formatProcessList, type BackgroundProcesses } from './process-runner.ts'
 import { redactUrlCredentials } from './safe-commands.ts'
 
 /** What an "output" read shows of new output at most. */
@@ -25,7 +25,7 @@ export const OUTPUT_CAP_CHARS = 12_000
 
 export const PROCESS_TOOL = 'ys_process'
 
-const ACTIONS = ['start', 'output', 'stop'] as const
+const ACTIONS = ['start', 'output', 'stop', 'list'] as const
 type Action = (typeof ACTIONS)[number]
 
 const LEGACY: Record<string, Action> = {
@@ -100,9 +100,15 @@ function stop(processes: BackgroundProcesses, args: unknown): ToolResult {
   const id = stringArg(args, 'id')
   if (!id) return toolError('ys_process stop requires an "id", e.g. {"action": "stop", "id": "p1"}.')
   const stopped = processes.stop(id)
-  if (!stopped) return toolError(`There is no background process "${id}".`)
+  if (!stopped) {
+    const known = processes.records().map((p) => p.id).join(', ')
+    return toolError(`There is no process "${id}" started by Yellowscript.${known ? ` Yours: ${known}.` : ' None has been started.'} See ys_process {"action":"list"}.`)
+  }
+  const pid = stopped.pid ? ` (pid ${stopped.pid})` : ''
   const result = toolOk(
-    stopped.running ? `Stopping ${id} (${stopped.command}).` : `${id} had already exited (code ${stopped.exitCode ?? 'none'}).`,
+    stopped.running
+      ? `Stopping ${id}${pid} and everything it started (${stopped.command}).`
+      : `${id}${pid} had already ended (code ${stopped.exitCode ?? 'none'}).`,
     `ys_process stop — ${id}`,
   )
   result.effect = { kind: 'stop', processId: id }
@@ -114,15 +120,15 @@ export function createProcessTool(processes: BackgroundProcesses): Tool {
     definition: {
       name: assertWorkspaceToolName(PROCESS_TOOL),
       description:
-        'Background commands, such as a dev server. "start" proposes a command (approved first) and returns ' +
-        'an id like p1; "output" reads what it printed since the last read; "stop" ends it and its children.',
+        'Your processes. "start" proposes a background command, e.g. a dev server (approved first; id p1); ' +
+        '"output" reads its new output; "list" shows all you started, with pids; "stop" ends one and its children.',
       inputSchema: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: [...ACTIONS] },
           command: { type: 'string', description: 'start: e.g. "npm run dev".' },
           cwd: { type: 'string', description: 'start: optional workspace directory.' },
-          id: { type: 'string', description: 'output, stop: e.g. "p1".' },
+          id: { type: 'string', description: 'e.g. "p1"; stop also "c1".' },
           wait_s: { type: 'number', description: 'output: seconds to wait for new output (max 30).' },
           all: { type: 'boolean', description: 'output: all kept output, not only new.' },
         },
@@ -135,6 +141,7 @@ export function createProcessTool(processes: BackgroundProcesses): Tool {
       if (action === 'start') return planStart(args, context)
       if (action === 'output') return readOutput(processes, args)
       if (action === 'stop') return stop(processes, args)
+      if (action === 'list') return toolOk(formatProcessList(processes.records()), `ys_process list — ${processes.records().filter((r) => r.running).length} running`)
       return toolError(`ys_process requires "action": one of ${ACTIONS.map((a) => `"${a}"`).join(', ')}.`)
     },
   }

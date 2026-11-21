@@ -240,6 +240,11 @@
           "items": { "type": "string" },
           "markdownDescription": "Folders outside the workspace that the read tools and read-only commands may read (never write). Added by **Always for this folder** when the model asks to read outside the workspace."
         },
+        "redstartYellowscript.commands.nonInteractive": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run one-shot commands with `CI=1`, so most command-line tools skip their prompts and test runners skip watch mode. Turn off if a tool behaves differently under CI in a way you do not want (quieter progress output, snapshot mismatches failing instead of updating). Background commands (dev servers) never get it."
+        },
         "redstartYellowscript.allowedCommands": {
           "type": "array",
           "default": [],

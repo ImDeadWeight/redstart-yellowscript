@@ -19,7 +19,8 @@
 import * as vscode from 'vscode'
 
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
-import { formatCommandRun, runCommandLine, runFailed, startInBackground, type BackgroundProcesses } from '../tools/process-runner.ts'
+import { describeKillTargets, formatCommandRun, runFailed, startInBackground, type BackgroundProcesses } from '../tools/process-runner.ts'
+import { endsProcesses } from '../tools/safe-commands.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
 import type { AskApproval } from '../chat/approvals.ts'
@@ -47,7 +48,12 @@ export interface CommandGateDeps {
   ask: AskApproval
   /** Which tier the line is in (safe-commands.ts); absent: everything asks. */
   classify?: (pending: PendingCommand) => CommandTier
+  /** The conversation running it: labels its processes. */
+  conversationId?: string
+  /** Run one-shot commands with CI=1 so CLIs skip their prompts. */
+  nonInteractive?: () => boolean
 }
+
 
 /**
  * Build the command approval gate. Resolves to the outcome for the model, or
@@ -67,7 +73,9 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
         kind: 'command',
         title: pending.background ? 'Start a command in the background' : 'Run a command',
         subject: pending.command,
-        detail: neverAlways ? `in ${pending.label}. Asked every time: ${neverAlways}.` : `in ${pending.label}`,
+        detail:
+          (neverAlways ? `in ${pending.label}. Asked every time: ${neverAlways}.` : `in ${pending.label}`) +
+          (endsProcesses(pending.command) ? ` ${describeKillTargets(pending.command, deps.processes)}` : ''),
         options: [
           { id: 'run', label: pending.background ? 'Start' : 'Run', kind: 'allow' },
           ...(prefix ? [{ id: 'always', label: `Always allow "${prefix}"`, kind: 'always' as const }] : []),
@@ -86,19 +94,23 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
     if (pending.background) {
       try {
         // Waits for its address or its exit, so the model is told which.
-        return { ...(await startInBackground(deps.processes, pending.command, pending.cwd)), ...auto }
+        return { ...(await startInBackground(deps.processes, pending.command, pending.cwd, undefined, deps.conversationId)), ...auto }
       } catch (err) {
         return { text: `Could not start the command: ${err instanceof Error ? err.message : String(err)}`, isError: true }
       }
     }
 
     channel.show(true)
-    const run = await runCommandLine({
+    // Through the registry: labelled, listed by ys_process list, stoppable,
+    // and stopped early when it sits waiting on a prompt.
+    const run = await deps.processes.run({
       // A hardened git line runs with Yellowscript's own settings added.
       command: safe?.run ?? pending.command,
       cwd: pending.cwd,
       ...(safe?.env ? { env: safe.env } : {}),
       ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}),
+      ...(deps.conversationId ? { chat: deps.conversationId } : {}),
+      nonInteractive: deps.nonInteractive?.() !== false,
       onOutput: (chunk) => channel.append(chunk),
     })
     const text = formatCommandRun(run)

@@ -606,7 +606,14 @@ function getSession(id: string): ChatSession {
       onPlanChanged: (steps) => writeWorkspacePlan(steps),
       workspaceContext: () => {
         const root = workspaceRoots()[0]
-        return root ? buildWorkspaceContext(root) : null
+        if (!root) return null
+        // What it is told about keeping notes, plans and memories follows the
+        // tools it actually has, and whether the workspace has a project.
+        const registry = mergedTools ?? tools
+        return buildWorkspaceContext(root, undefined, {
+          ...(registry ? { tools: registry.names } : {}),
+          project: linkedProject()?.name ?? null,
+        })
       },
       liveState: () => (backgroundProcesses ? describeRunning(backgroundProcesses.list()) : null),
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
@@ -675,6 +682,8 @@ function getSession(id: string): ChatSession {
               processes: backgroundProcesses,
               ask: (request) => getSession(id).askApproval(request),
               classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
+              conversationId: id,
+              nonInteractive: () => config().get<boolean>('commands.nonInteractive') !== false,
             })(pending)
           : Promise.resolve(null),
       conversationId: id,

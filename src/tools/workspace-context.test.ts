@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import * as path from 'node:path'
 import { describe, test } from 'node:test'
 
-import { MAX_INSTRUCTION_CHARS, buildWorkspaceContext, workspaceTree, type ContextFs } from './workspace-context.ts'
+import { MAX_INSTRUCTION_CHARS, buildWorkspaceContext, keepingGuide, keptFiles, workspaceTree, type ContextFs } from './workspace-context.ts'
 import { shellNote } from './process-runner.ts'
 
 const root = path.resolve('/game')
@@ -79,5 +79,45 @@ describe('shellNote', () => {
   })
   test('the workspace note includes it', () => {
     assert.match(buildWorkspaceContext(root, tree({ 'a.txt': '' }))!, /Commands \(ys_run_command/)
+  })
+})
+
+describe('where to keep things', () => {
+  const all = ['ys_note', 'ys_write_file', 'update_plan', 'ask_user', 'memory_save', 'ys_read_file']
+
+  test('one line per kind, each naming its tool and its file', () => {
+    const guide = keepingGuide({ tools: all, project: 'Crestline' })!
+    assert.match(guide, /^Where to keep things\. Each kind has one place/)
+    assert.match(guide, /update_plan.*\.yellowscript\/PLAN\.md.*Do not edit PLAN\.md yourself/)
+    assert.match(guide, /ask_user/)
+    assert.match(guide, /ys_note\. It keeps \.yellowscript\/NOTES\.md/)
+    assert.match(guide, /\.yellowscript\/docs\/auth-design\.md, written with ys_write_file/)
+    assert.match(guide, /memory_save with scope "project".*"Crestline"|"Crestline".*memory_save with scope "project"/)
+    assert.match(guide, /\.yellowscript\/shadow\/ .*never read or write it/)
+  })
+
+  test('says nothing about a tool this run does not have', () => {
+    const guide = keepingGuide({ tools: ['ys_note', 'ys_read_file'] })!
+    assert.doesNotMatch(guide, /update_plan|ask_user|memory_save|ys_write_file/)
+    assert.equal(keepingGuide({ tools: ['ys_read_file'] }), null)
+    // Unknown tools (the bench): the local ones only.
+    assert.doesNotMatch(keepingGuide()!, /update_plan|memory_save/)
+  })
+
+  test('project memory without a linked project says so, rather than inviting a failing save', () => {
+    const guide = keepingGuide({ tools: all, project: null })!
+    assert.match(guide, /needs this workspace linked to a Nest project, and it is not/)
+    assert.match(guide, /Choose Project/)
+  })
+
+  test('the model is told the files it already keeps, not Yellowscript\'s own', () => {
+    const fs = tree({
+      '.yellowscript/NOTES.md': '', '.yellowscript/PLAN.md': '', '.yellowscript/shadow/x.md': '',
+      '.yellowscript/screenshots/a.md': '', '.yellowscript/docs/design.md': '', '.yellowscript/research.md': '',
+      '.yellowscript/data.json': '',
+    })
+    assert.deepEqual(keptFiles(root, fs), ['.yellowscript/docs/design.md', '.yellowscript/research.md'])
+    const text = buildWorkspaceContext(root, fs, { tools: all, project: 'Crestline' })!
+    assert.match(text, /Yours so far: \.yellowscript\/docs\/design\.md, \.yellowscript\/research\.md\./)
   })
 })

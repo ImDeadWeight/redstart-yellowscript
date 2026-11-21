@@ -44,7 +44,7 @@
     "menus": {
       "view/title": [
         {
-          "command": "redstartYellowscript.openInEditor",
+          "command": "redstartYellowscript.moveToEditor",
           "when": "view == redstartYellowscript.chat",
           "group": "navigation"
         },
@@ -67,9 +67,14 @@
       ],
       "editor/title": [
         {
+          "command": "redstartYellowscript.moveToSidebar",
+          "group": "navigation@101",
+          "when": "activeWebviewPanelId == 'redstartYellowscript.chatPanel'"
+        },
+        {
           "command": "redstartYellowscript.openInEditor",
           "group": "navigation@100",
-          "when": "config.redstartYellowscript.editorButton && activeWebviewPanelId != 'redstartYellowscript.chatPanel'"
+          "when": "config.redstartYellowscript.editorButton"
         }
       ]
     },
@@ -82,9 +87,21 @@
       },
       {
         "command": "redstartYellowscript.openInEditor",
-        "title": "Open in Editor Tab",
+        "title": "New Chat in Editor Tab",
         "category": "Yellowscript",
         "icon": "media/yellowscript.svg"
+      },
+      {
+        "command": "redstartYellowscript.moveToSidebar",
+        "title": "Move Chat to Sidebar",
+        "category": "Yellowscript",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "redstartYellowscript.moveToEditor",
+        "title": "Move Chat to Editor Tab",
+        "category": "Yellowscript",
+        "icon": "$(link-external)"
       },
       {
         "command": "redstartYellowscript.openSettings",
@@ -223,6 +240,11 @@
           "items": { "type": "string" },
           "markdownDescription": "Folders outside the workspace that the read tools and read-only commands may read (never write). Added by **Always for this folder** when the model asks to read outside the workspace."
         },
+        "redstartYellowscript.commands.nonInteractive": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run one-shot commands with `CI=1`, so most command-line tools skip their prompts and test runners skip watch mode. Turn off if a tool behaves differently under CI in a way you do not want (quieter progress output, snapshot mismatches failing instead of updating). Background commands (dev servers) never get it."
+        },
         "redstartYellowscript.allowedCommands": {
           "type": "array",
           "default": [],
@@ -244,7 +266,7 @@
         "redstartYellowscript.editorButton": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Show the Yellowscript button in the editor title bar, which opens the chat as an editor tab."
+          "markdownDescription": "Show the Yellowscript button in the editor title bar, which opens a new chat in an editor tab."
         }
       }
     },

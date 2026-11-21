@@ -13,6 +13,13 @@ class ViewStore {
     this.current = applyHostMessage(this.current, message)
   }
 
+  /** Several host messages, one state change: one render for all of them. */
+  applyAll(messages: readonly HostMessage[]): void {
+    let next = this.current
+    for (const message of messages) next = applyHostMessage(next, message)
+    this.current = next
+  }
+
   closeHistory(): void {
     this.current = { ...this.current, history: { ...this.current.history, open: false } }
   }

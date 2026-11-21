@@ -41,7 +41,7 @@ import { parseAttachments } from './attachments.ts'
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 4
+export const PROTOCOL_VERSION = 5
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -272,7 +272,22 @@ export interface SessionSnapshot {
   project?: { id: string; name: string }
   /** The model reads images; false: the composer says so instead of sending them. */
   vision?: boolean
+  /** The `serverUrl` setting, when one is saved. Unset means discovery. */
+  configuredUrl?: string
 }
+
+/** The longest a tab's label gets, ellipsis included. The full title stays
+ *  in the store, and shows in history and on hover. */
+export const TAB_LABEL_MAX = 25
+
+/** A chat's title cut to fit a tab: the sidebar strip and editor tabs alike. */
+export function tabLabel(title: string): string {
+  const t = title.trim() || 'New chat'
+  return t.length <= TAB_LABEL_MAX ? t : `${t.slice(0, TAB_LABEL_MAX - 1).trimEnd()}…`
+}
+
+/** The sidebar view, or a chat opened as an editor tab. */
+export type SurfaceKind = 'sidebar' | 'editor'
 
 // ---------------------------------------------------------------------------
 // webview → host
@@ -281,7 +296,7 @@ export interface SessionSnapshot {
 export type WebviewMessage =
   /** Sent once per webview lifetime, after the DOM is built. The host answers
    *  with `init`. Also re-sent after VSCode rebuilds a hidden view. */
-  | { type: 'ready'; protocolVersion: number }
+  | { type: 'ready'; protocolVersion: number; /** The conversation this view showed before it was rebuilt or the window reloaded. */ conversationId?: string }
   | { type: 'send'; text: string; attachments?: AttachmentView[] }
   /** The @ picker: workspace files matching `query`. */
   | { type: 'searchFiles'; query: string }
@@ -296,6 +311,12 @@ export type WebviewMessage =
   /** Delegate to an extension command — the webview never drives connection or
    *  auth logic itself, it only asks for the command the user clicked. */
   | { type: 'runCommand'; command: 'connect' | 'signIn' | 'showStatus' }
+  /** Save the Nest's address and connect to it. Empty: back to discovery. */
+  | { type: 'setServerUrl'; url: string }
+  /** From an editor tab: put this chat back in the sidebar's strip. */
+  | { type: 'moveToSidebar' }
+  /** From the sidebar's strip: open this chat in an editor tab of its own. */
+  | { type: 'moveToEditor'; id: string }
   /** Webview-side sign-in form submission. Carries credentials directly so the
    *  host can call the manager without native dialogs. */
   | { type: 'signIn'; method: 'password'; username: string; password: string }
@@ -346,6 +367,9 @@ export type HostMessage =
       messages: ChatMessageView[]
       conversationId: string | null
       state: ConversationState
+      /** Where this view lives. The sidebar keeps a tab strip of chats; an editor
+       *  tab is one chat, and VSCode's own tabs do the rest. */
+      surface: SurfaceKind
     }
   | { type: 'session'; session: SessionSnapshot }
    /** Replace the whole transcript (switch / restore). Now carries which tab it
@@ -412,6 +436,10 @@ export type HostMessage =
           lastAccessedAt: number
           messageCount: number
           draft?: boolean
+          /** Still open in a tab, not closed to history. */
+          open?: boolean
+          /** Its run is still going. */
+          running?: boolean
         }[]
       }
     /** Tells the webview to open (and populate) the history panel. Sent by the
@@ -424,6 +452,10 @@ export type HostMessage =
           lastAccessedAt: number
           messageCount: number
           draft?: boolean
+          /** Still open in a tab, not closed to history. */
+          open?: boolean
+          /** Its run is still going. */
+          running?: boolean
         }[]
       }
 
@@ -444,9 +476,10 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
 
   switch (msg.type) {
     case 'ready':
-      return typeof msg.protocolVersion === 'number'
-        ? { type: 'ready', protocolVersion: msg.protocolVersion }
-        : null
+      if (typeof msg.protocolVersion !== 'number') return null
+      return typeof msg.conversationId === 'string' && msg.conversationId.length <= 200
+        ? { type: 'ready', protocolVersion: msg.protocolVersion, conversationId: msg.conversationId }
+        : { type: 'ready', protocolVersion: msg.protocolVersion }
     case 'send':
       if (typeof msg.text !== 'string') return null
       {
@@ -475,6 +508,12 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return msg.command === 'connect' || msg.command === 'signIn' || msg.command === 'showStatus'
         ? { type: 'runCommand', command: msg.command }
         : null
+    case 'moveToSidebar':
+      return { type: 'moveToSidebar' }
+    case 'moveToEditor':
+      return typeof msg.id === 'string' ? { type: 'moveToEditor', id: msg.id } : null
+    case 'setServerUrl':
+      return typeof msg.url === 'string' && msg.url.length <= 2_000 ? { type: 'setServerUrl', url: msg.url } : null
     case 'signIn':
       if (typeof msg.method !== 'string') return null
       if (msg.method === 'password') {

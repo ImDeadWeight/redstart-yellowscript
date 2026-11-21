@@ -153,3 +153,36 @@ describe('conversation-store drafts', () => {
     assert.deepEqual(history.map((h) => [h.id, h.draft]), [[draftClosed.id, true]])
   })
 })
+
+describe('conversation-store history', () => {
+  it('lists open chats too, marked open, so a running one can always be found', () => {
+    const store = makeStore()
+    const open = store.create('Benchmark', [{ id: 'm', role: 'user', content: 'go' }] as never, 'acct')
+    const closed = store.create('Old', [{ id: 'n', role: 'user', content: 'hi' }] as never, 'acct')
+    store.archive(closed.id)
+    store.create('Other account', [{ id: 'o', role: 'user', content: 'x' }] as never, 'someone-else')
+    const history = store.history('acct')
+    assert.deepEqual(
+      history.map((h) => [h.id, h.open]).sort(),
+      [
+        [closed.id, false],
+        [open.id, true],
+      ].sort(),
+    )
+  })
+
+  it('prune deletes old closed chats and never an open tab', () => {
+    const memento = fakeMemento()
+    const old = Date.now() - 30 * 24 * 60 * 60 * 1000
+    void memento.update('redstartYellowscript.conversations', [
+      { ...conv('open-old', 'Open', 0, old), messages: [{ id: 'm', role: 'user', content: 'hi' }] },
+      { ...conv('closed-old', 'Closed', 1, old), archived: true },
+      { ...conv('closed-new', 'Recent', 2, Date.now()), archived: true },
+    ])
+    const store = conversationStore(memento as never)
+    assert.equal(store.prune(14), 1)
+    assert.ok(store.get('open-old'))
+    assert.equal(store.get('closed-old'), undefined)
+    assert.ok(store.get('closed-new'))
+  })
+})

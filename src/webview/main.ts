@@ -15,15 +15,37 @@ import { mount } from 'svelte'
 
 import { PROTOCOL_VERSION, type HostMessage } from '../chat/protocol.ts'
 import App from './components/App.svelte'
-import { post } from './host.ts'
+import { post, saveConversationId, savedConversationId } from './host.ts'
 import { view } from './store.svelte.ts'
 
+// A streaming turn sends a message per token. Rendering each one on its own
+// kept the page busy enough that scrolling and clicks queued behind it, so
+// they are applied together, at most once a frame.
+let saved: string | null | undefined = savedConversationId()
+let queued: HostMessage[] = []
+let frame = 0
+
+function flush(): void {
+  frame = 0
+  const batch = queued
+  queued = []
+  view.applyAll(batch)
+  const id = view.current.conversationId
+  if (id !== saved) {
+    saved = id
+    saveConversationId(id)
+  }
+}
+
 window.addEventListener('message', (event: MessageEvent<HostMessage>) => {
-  view.apply(event.data)
+  queued.push(event.data)
+  // A hidden webview gets no animation frames; a timer still runs there.
+  if (!frame) frame = document.hidden ? (setTimeout(flush, 50) as unknown as number) : requestAnimationFrame(flush)
 })
 
 const target = document.getElementById('app')
 if (!target) throw new Error('webview markup is missing #app')
 mount(App, { target })
 
-post({ type: 'ready', protocolVersion: PROTOCOL_VERSION })
+const restored = savedConversationId()
+post(restored ? { type: 'ready', protocolVersion: PROTOCOL_VERSION, conversationId: restored } : { type: 'ready', protocolVersion: PROTOCOL_VERSION })

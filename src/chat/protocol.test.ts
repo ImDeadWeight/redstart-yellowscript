@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { parseWebviewMessage } from './protocol.ts'
+import { parseWebviewMessage, tabLabel, TAB_LABEL_MAX } from './protocol.ts'
 
 const answer = (value: unknown) => parseWebviewMessage({ type: 'answer', id: 'q1', answer: value })
 
@@ -38,4 +38,26 @@ describe('answer messages', () => {
     const stripped = answer({ answers: [{ text: 'a', evil: '<script>' }] }) as { answer: { answers: unknown[] } }
     assert.deepEqual(stripped.answer.answers, [{ text: 'a' }])
   })
+})
+
+test('setServerUrl carries the typed address, empty included', () => {
+  assert.deepEqual(parseWebviewMessage({ type: 'setServerUrl', url: 'nest.local:19080' }), { type: 'setServerUrl', url: 'nest.local:19080' })
+  assert.deepEqual(parseWebviewMessage({ type: 'setServerUrl', url: '' }), { type: 'setServerUrl', url: '' })
+  assert.equal(parseWebviewMessage({ type: 'setServerUrl', url: 42 }), null)
+})
+
+test('moving a chat between the sidebar and an editor tab', () => {
+  assert.deepEqual(parseWebviewMessage({ type: 'moveToSidebar' }), { type: 'moveToSidebar' })
+  assert.deepEqual(parseWebviewMessage({ type: 'moveToEditor', id: 'conv_1' }), { type: 'moveToEditor', id: 'conv_1' })
+  assert.equal(parseWebviewMessage({ type: 'moveToEditor' }), null)
+})
+
+test('a tab label is at most 25 characters, the ellipsis included', () => {
+  assert.equal(TAB_LABEL_MAX, 25)
+  assert.equal(tabLabel('Fix the login bug'), 'Fix the login bug')
+  assert.equal(tabLabel('x'.repeat(25)), 'x'.repeat(25))
+  const long = tabLabel('Initialize a new SvelteKit + TypeScript project')
+  assert.equal(long.length, 25)
+  assert.ok(long.endsWith('…'))
+  assert.equal(tabLabel('   '), 'New chat')
 })

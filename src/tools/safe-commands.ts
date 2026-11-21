@@ -473,6 +473,22 @@ function discardsWork(program: string, args: readonly string[]): string | null {
   return null
 }
 
+/** Programs that end processes. Never "Always allow": a wrong pid takes down
+ *  the editor, the Nest, or someone's work, and the card says which pids are
+ *  Yellowscript's own. */
+const PROCESS_ENDERS = new Set(['taskkill', 'tskill', 'kill', 'pkill', 'killall', 'stop-process', 'spps'])
+
+/** True when the line's program ends processes (see PROCESS_ENDERS). */
+export function endsProcesses(line: string): boolean {
+  const first = line.trim().split(/\s+/)[0]?.toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '') ?? ''
+  return PROCESS_ENDERS.has(first) || /\bstop-process\b/i.test(line)
+}
+
+/** The process ids a kill line names (`taskkill /pid 123`, `kill -9 123`). */
+export function pidsIn(line: string): number[] {
+  return [...line.matchAll(/(?:^|[\s,=])(\d{2,7})(?=$|[\s,])/g)].map((m) => Number(m[1]))
+}
+
 // --- The classifier --------------------------------------------------------------
 
 /** The tier of one command line. */
@@ -491,6 +507,7 @@ export function classifyCommand(line: string, ctx: CommandContext): CommandTier 
 
   const discards = discardsWork(program, args)
   if (discards) return c(discards, discards)
+  if (PROCESS_ENDERS.has(program)) return c(`${program} ends processes`, 'it ends processes, and a wrong one can be the editor or the Nest')
 
   const a = tierA(program, args, ctx)
   if (a && a.tier === 'A') return ctx.builtInSafe ? a : c('built-in safe commands are turned off')

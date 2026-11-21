@@ -9,6 +9,15 @@
   let query = $state('')
   let timer: ReturnType<typeof setTimeout> | undefined
   let panel: HTMLDivElement | undefined = $state()
+  /** The row asking "delete this?". Deleting is permanent, so it is asked inline
+   *  (a webview cannot open a confirm dialog). */
+  let confirming: string | null = $state(null)
+
+  function warning(item: HistoryItem): string {
+    if (item.running) return 'It is still running: deleting stops the run and closes its tab.'
+    if (item.open) return 'It is open in a tab, which will close.'
+    return 'This cannot be undone.'
+  }
 
   function search() {
     clearTimeout(timer)
@@ -20,7 +29,9 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') view.closeHistory()
+    if (event.key !== 'Escape') return
+    if (confirming) confirming = null
+    else view.closeHistory()
   }
 
   const when = (ms: number) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
@@ -34,18 +45,42 @@
   <div class="list">
     {#each items as item (item.id)}
       <div class="row">
-        <button type="button" class="open" onclick={() => post({ type: 'restoreHistory', id: item.id })}>
+        <button
+          type="button"
+          class="open"
+          onclick={() => {
+            view.closeHistory()
+            post({ type: 'restoreHistory', id: item.id })
+          }}
+        >
           <span class="title">{item.title || 'Untitled'}</span>
-          <span class="meta">{when(item.lastAccessedAt)} · {item.draft ? 'Draft' : `${item.messageCount} messages`}</span>
+          <span class="meta">{when(item.lastAccessedAt)} · {item.draft ? 'Draft' : `${item.messageCount} messages`}{#if item.open} · <span class="badge">Open</span>{/if}</span>
         </button>
         <button
           type="button"
           class="delete"
-          title="Delete from history"
+          title="Delete chat"
           aria-label="Delete {item.title || 'Untitled'}"
-          onclick={() => post({ type: 'deleteHistory', id: item.id })}
+          onclick={() => (confirming = confirming === item.id ? null : item.id)}
         ><Icon name="x" size={12} /></button>
       </div>
+      {#if confirming === item.id}
+        <div class="confirm" role="alertdialog" aria-label="Delete {item.title || 'Untitled'}?">
+          <Icon name="alert" size={12} />
+          <span class="warning">Delete this chat permanently? {warning(item)}</span>
+          <div class="actions">
+            <button
+              type="button"
+              class="danger"
+              onclick={() => {
+                confirming = null
+                post({ type: 'deleteHistory', id: item.id })
+              }}
+            >Delete</button>
+            <button type="button" class="secondary" onclick={() => (confirming = null)}>Cancel</button>
+          </div>
+        </div>
+      {/if}
     {:else}
       <p class="empty">{query ? 'No matches' : 'No history yet'}</p>
     {/each}
@@ -99,6 +134,36 @@
   }
   .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { font-size: 0.85em; opacity: 0.65; }
+  .confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0 6px 6px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 0.88em;
+    border-left: 2px solid var(--vscode-editorWarning-foreground);
+    background: var(--vscode-inputValidation-warningBackground, var(--vscode-textBlockQuote-background));
+  }
+  .confirm :global(.icon) { margin-top: 2px; color: var(--vscode-editorWarning-foreground); }
+  .warning { flex: 1; min-width: 160px; }
+  .actions { display: flex; gap: 6px; margin-left: auto; }
+  .danger {
+    padding: 2px 10px;
+    font: inherit;
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-errorForeground);
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .badge {
+    padding: 0 5px;
+    border-radius: 8px;
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+  }
   .delete {
     display: flex;
     padding: 4px;

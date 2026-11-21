@@ -1,9 +1,10 @@
 // =============================================================================
-// The sidebar chat view.
+// The chat views: the sidebar, and chats opened as editor tabs.
 // =============================================================================
-// Owns the webview's HTML shell and the message pump in both directions. It
-// holds no conversation state — ChatSession does — so a view that VSCode
-// destroys and rebuilds simply asks for a fresh snapshot.
+// Owns the webviews' HTML shell and the message pump in both directions. Each
+// webview is a Surface with its own conversation on screen, so two of them
+// never mirror each other. It holds no transcript — ChatSession does — so a
+// view that VSCode destroys and rebuilds simply asks for a fresh snapshot.
 //
 // The webview is locked down: a strict nonce-based CSP, no external origins of
 // any kind, and `localResourceRoots` limited to our own media directory. The
@@ -23,129 +24,216 @@ import {
   type HostMessage,
   type PageName,
   type SessionSnapshot,
+  type SurfaceKind,
   type WebviewMessage,
 } from '../chat/protocol.ts'
 
+/**
+ * One place the chat is drawn: the sidebar view, or a chat opened as an editor
+ * tab. An editor tab is a real VSCode editor: it can be dragged to another
+ * group, split, or moved to its own window, and it reopens on its chat after a
+ * reload.
+ */
+export interface Surface {
+  readonly id: string
+  readonly kind: SurfaceKind
+  /** The conversation on screen here. */
+  conversationId: string | null
+}
+
+/** Every handler that acts on a chat is told which surface the message came from. */
 export interface ChatViewHandlers {
-  onSend: (text: string, attachments?: AttachmentView[]) => void
-  onSearchFiles: (query: string) => void
-  onAbort: () => void
-  onNewConversation: () => void
-  onListConversations: () => void
-  onSwitchConversation: (id: string) => void
-  onCreateConversation: () => void
-  onDeleteConversation: (id: string) => void
+  onSend: (from: Surface, text: string, attachments?: AttachmentView[]) => void
+  onSearchFiles: (from: Surface, query: string) => void
+  onAbort: (from: Surface) => void
+  onNewConversation: (from: Surface) => void
+  onListConversations: (from: Surface) => void
+  onSwitchConversation: (from: Surface, id: string) => void
+  onDeleteConversation: (from: Surface, id: string) => void
   onSaveDraft: (id: string, text: string) => void
   onRunCommand: (command: 'connect' | 'signIn' | 'showStatus') => void
+  onSetServerUrl: (url: string) => void
+  /** An editor tab's chat goes back to the sidebar's strip. */
+  onMoveToSidebar: (from: Surface) => void
+  onMoveToEditor: (id: string) => void
   onSignIn: (message: { method: 'password'; username: string; password: string } | { method: 'apiKey'; key: string } | { method: 'clientKey' }) => void
-  /** Called when the webview announces itself, so the host can reply with a
-   *  full snapshot. Fires again every time VSCode rebuilds a view it destroyed
-   *  while hidden. */
-  onReady: () => void
-  onOpenHistory: () => void
-  onSearchHistory: (query: string) => void
-  onDeleteHistory: (id: string) => void
-  onRestoreHistory: (id: string) => void
-  onOpenPage: (page: PageName) => void
-  onLinkProject: (id: string | null) => void
-  onCreateProject: (name: string) => void
-  onRunWorkflow: (name: string, args: Record<string, string>) => void
-  onAnswer: (id: string, answer: AnswerView | null) => void
-  onApprove: (id: string, choice: string) => void
-  onOpenApprovalDiff: (id: string, index: number) => void
-  onClearPlan: () => void
-  onContinueAtLimit: (go: boolean) => void
-  onOpenTaskDiff: (turnId: string, path: string) => void
-  onRevertTask: (turnId: string) => void
-  onResumeTask: (restart: boolean) => void
-  onDismissInterrupted: () => void
+  /** Called when a webview announces itself, so the host can reply with a full
+   *  snapshot. Fires again every time VSCode rebuilds a view it destroyed while
+   *  hidden. `restoredId` is the conversation it showed before. */
+  onReady: (from: Surface, restoredId: string | undefined) => void
+  onOpenHistory: (from: Surface) => void
+  onSearchHistory: (from: Surface, query: string) => void
+  onDeleteHistory: (from: Surface, id: string) => void
+  onRestoreHistory: (from: Surface, id: string) => void
+  onOpenPage: (from: Surface, page: PageName) => void
+  onLinkProject: (from: Surface, id: string | null) => void
+  onCreateProject: (from: Surface, name: string) => void
+  onRunWorkflow: (from: Surface, name: string, args: Record<string, string>) => void
+  onAnswer: (from: Surface, id: string, answer: AnswerView | null) => void
+  onApprove: (from: Surface, id: string, choice: string) => void
+  onOpenApprovalDiff: (from: Surface, id: string, index: number) => void
+  onClearPlan: (from: Surface) => void
+  onContinueAtLimit: (from: Surface, go: boolean) => void
+  onOpenTaskDiff: (from: Surface, turnId: string, path: string) => void
+  onRevertTask: (from: Surface, turnId: string) => void
+  onResumeTask: (from: Surface, restart: boolean) => void
+  onDismissInterrupted: (from: Surface) => void
+  /** The person closed an editor tab. */
+  onSurfaceClosed: (surface: Surface) => void
+}
+
+interface Live {
+  surface: Surface
+  webview: vscode.Webview
+  /** Set for editor tabs. */
+  panel?: vscode.WebviewPanel
+  /** Last time it was focused or used, to pick where a command lands. */
+  touchedAt: number
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.WebviewPanelSerializer {
   static readonly viewType = 'redstartYellowscript.chat'
-  /** The same chat, opened as an editor tab. */
+  /** A chat opened as an editor tab. */
   static readonly panelType = 'redstartYellowscript.chatPanel'
 
   private readonly extensionUri: vscode.Uri
   private readonly handlers: ChatViewHandlers
-  private view: vscode.WebviewView | undefined
-  private panel: vscode.WebviewPanel | undefined
-  /** Every live webview (the sidebar view, the editor tab). Each renders the
-   *  same host state, so every message goes to all of them. */
-  private readonly webviews = new Set<vscode.Webview>()
+  private sidebarView: vscode.WebviewView | undefined
+  private readonly live = new Map<string, Live>()
+  private nextId = 0
 
   constructor(extensionUri: vscode.Uri, handlers: ChatViewHandlers) {
     this.extensionUri = extensionUri
     this.handlers = handlers
   }
 
+  // ---- surfaces -------------------------------------------------------------
+
+  surfaces(): Surface[] {
+    return [...this.live.values()].map((l) => l.surface)
+  }
+
+  sidebar(): Surface | undefined {
+    for (const l of this.live.values()) if (l.surface.kind === 'sidebar') return l.surface
+    return undefined
+  }
+
+  /** The editor tab showing this conversation, if one is. */
+  editorFor(conversationId: string): Surface | undefined {
+    for (const l of this.live.values()) {
+      if (l.surface.kind === 'editor' && l.surface.conversationId === conversationId) return l.surface
+    }
+    return undefined
+  }
+
+  /** The editor tab in front, if it is one of ours. */
+  activeEditor(): Surface | undefined {
+    for (const l of this.live.values()) {
+      try {
+        if (l.panel?.active) return l.surface
+      } catch {
+        // Disposed.
+      }
+    }
+    return undefined
+  }
+
+  /** Where a command with no surface of its own lands: the chat used last. */
+  focused(): Surface | undefined {
+    let best: Live | undefined
+    for (const l of this.live.values()) if (!best || l.touchedAt > best.touchedAt) best = l
+    return best?.surface
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view
+    // A rebuilt sidebar view (VSCode destroys one that was moved or hidden)
+    // keeps the conversation the old one showed.
+    const previous = this.sidebar()
+    if (previous) this.live.delete(previous.id)
+    this.sidebarView = view
     // Held here, not read back in onDidDispose: `view.webview` throws
     // "Webview is disposed" once the view is gone.
     const webview = view.webview
-    this.attach(webview)
+    const surface: Surface = { id: `sidebar-${++this.nextId}`, kind: 'sidebar', conversationId: previous?.conversationId ?? null }
+    const entry: Live = { surface, webview, touchedAt: view.visible ? Date.now() : 0 }
+    this.attach(entry)
+    view.onDidChangeVisibility(() => {
+      if (view.visible) entry.touchedAt = Date.now()
+    })
     view.onDidDispose(() => {
-      this.webviews.delete(webview)
-      if (this.view === view) this.view = undefined
+      // Kept in `live` until a new view replaces it would leak a dead webview;
+      // the conversation it showed is remembered by the webview's own state.
+      if (this.live.get(surface.id) === entry) this.live.delete(surface.id)
+      if (this.sidebarView === view) this.sidebarView = undefined
     })
   }
 
-  /**
-   * Open the chat as an editor tab, or bring the open one forward. One tab at
-   * a time: a second would only be the same chat twice.
-   */
-  openInEditor(): void {
-    if (this.panel) {
-      try {
-        this.panel.reveal()
-        return
-      } catch {
-        // Disposed without our handler hearing about it: open a new one.
-        this.panel = undefined
-      }
-    }
+  /** Open a conversation in a new editor tab. */
+  openEditor(conversationId: string, title: string): Surface {
     const panel = vscode.window.createWebviewPanel(
       ChatViewProvider.panelType,
-      'Yellowscript',
+      title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
       // Kept alive while hidden, like the sidebar view: a streaming turn keeps
       // painting in a tab the person has switched away from.
       { retainContextWhenHidden: true },
     )
-    this.adoptPanel(panel)
+    return this.adoptPanel(panel, conversationId)
   }
 
-  /** VSCode reopening the tab after a window reload. */
-  async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
-    this.adoptPanel(panel)
+  /** VSCode reopening an editor tab after a window reload. `state` is what the
+   *  webview saved with setState: the conversation it was showing. */
+  async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
+    const saved = state && typeof state === 'object' ? (state as { conversationId?: unknown }).conversationId : undefined
+    this.adoptPanel(panel, typeof saved === 'string' ? saved : null)
   }
 
-  private adoptPanel(panel: vscode.WebviewPanel): void {
-    const previous = this.panel
-    this.panel = panel
-    if (previous) {
-      try {
-        previous.dispose()
-      } catch {
-        // Already gone; its own onDidDispose has tidied up.
-      }
-    }
+  private adoptPanel(panel: vscode.WebviewPanel, conversationId: string | null): Surface {
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'yellowscript.svg')
     // Held here, not read back in onDidDispose: `panel.webview` throws
-    // "Webview is disposed" once the panel is closed, which used to abort this
-    // handler before `this.panel` was cleared — so the next open revealed a
-    // dead panel and failed with the same error.
+    // "Webview is disposed" once the panel is closed.
     const webview = panel.webview
-    this.attach(webview)
-    panel.onDidDispose(() => {
-      this.webviews.delete(webview)
-      if (this.panel === panel) this.panel = undefined
+    const surface: Surface = { id: `editor-${++this.nextId}`, kind: 'editor', conversationId }
+    const entry: Live = { surface, webview, panel, touchedAt: Date.now() }
+    this.attach(entry)
+    panel.onDidChangeViewState(() => {
+      if (panel.active) entry.touchedAt = Date.now()
     })
+    panel.onDidDispose(() => {
+      // Closed by closeEditor: the caller has already dealt with its chat.
+      if (this.live.get(surface.id) !== entry) return
+      this.live.delete(surface.id)
+      this.handlers.onSurfaceClosed(surface)
+    })
+    return surface
+  }
+
+  /** Close an editor tab without the close counting as the person's (its chat
+   *  was deleted, or moved to the sidebar). */
+  closeEditor(surface: Surface): void {
+    const entry = this.live.get(surface.id)
+    if (!entry?.panel) return
+    this.live.delete(surface.id)
+    try {
+      entry.panel.dispose()
+    } catch {
+      // Already gone.
+    }
+  }
+
+  setTitle(surface: Surface, title: string): void {
+    const panel = this.live.get(surface.id)?.panel
+    if (!panel) return
+    try {
+      if (panel.title !== title) panel.title = title
+    } catch {
+      // Disposed under us.
+    }
   }
 
   /** Lock a webview down, give it the page, and route what it posts. */
-  private attach(webview: vscode.Webview): void {
+  private attach(entry: Live): void {
+    const { webview } = entry
     webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media'), vscode.Uri.joinPath(this.extensionUri, 'dist')],
@@ -153,137 +241,179 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
     webview.onDidReceiveMessage((raw: unknown) => {
       const message = parseWebviewMessage(raw)
       if (!message) return
-      this.dispatch(message)
+      // Anything the person did here makes this the chat in use.
+      if (message.type !== 'ready' && message.type !== 'saveDraft') entry.touchedAt = Date.now()
+      this.dispatch(entry.surface, message)
     })
     webview.html = this.buildHtml(webview)
-    this.webviews.add(webview)
+    this.live.set(entry.surface.id, entry)
   }
 
-  private dispatch(message: WebviewMessage): void {
+  private dispatch(from: Surface, message: WebviewMessage): void {
+    const h = this.handlers
     switch (message.type) {
       case 'ready':
-        this.handlers.onReady()
+        h.onReady(from, message.conversationId)
         break
       case 'send':
-        this.handlers.onSend(message.text, message.attachments)
+        h.onSend(from, message.text, message.attachments)
         break
       case 'searchFiles':
-        this.handlers.onSearchFiles(message.query)
+        h.onSearchFiles(from, message.query)
         break
       case 'abort':
-        this.handlers.onAbort()
+        h.onAbort(from)
         break
       case 'newConversation':
-        this.handlers.onNewConversation()
+      case 'createConversation':
+        h.onNewConversation(from)
         break
       case 'listConversations':
-        this.handlers.onListConversations()
+        h.onListConversations(from)
         break
       case 'switchConversation':
-        this.handlers.onSwitchConversation(message.id)
-        break
-      case 'createConversation':
-        this.handlers.onCreateConversation()
+        h.onSwitchConversation(from, message.id)
         break
       case 'deleteConversation':
-        this.handlers.onDeleteConversation(message.id)
+        h.onDeleteConversation(from, message.id)
         break
       case 'saveDraft':
-        this.handlers.onSaveDraft(message.id, message.text)
+        h.onSaveDraft(message.id, message.text)
         break
       case 'runCommand':
-        this.handlers.onRunCommand(message.command)
+        h.onRunCommand(message.command)
+        break
+      case 'moveToSidebar':
+        h.onMoveToSidebar(from)
+        break
+      case 'moveToEditor':
+        h.onMoveToEditor(message.id)
+        break
+      case 'setServerUrl':
+        h.onSetServerUrl(message.url)
         break
       case 'signIn':
-        this.handlers.onSignIn(message)
+        h.onSignIn(message)
         break
       case 'openHistory':
-        this.handlers.onOpenHistory()
+        h.onOpenHistory(from)
         break
       case 'searchHistory':
-        this.handlers.onSearchHistory(message.query)
+        h.onSearchHistory(from, message.query)
         break
       case 'deleteHistory':
-        this.handlers.onDeleteHistory(message.id)
+        h.onDeleteHistory(from, message.id)
         break
       case 'restoreHistory':
-        this.handlers.onRestoreHistory(message.id)
+        h.onRestoreHistory(from, message.id)
         break
       case 'loadPage':
-        this.handlers.onOpenPage(message.page)
+        h.onOpenPage(from, message.page)
         break
       case 'linkProject':
-        this.handlers.onLinkProject(message.id)
+        h.onLinkProject(from, message.id)
         break
       case 'createProject':
-        this.handlers.onCreateProject(message.name)
+        h.onCreateProject(from, message.name)
         break
       case 'runWorkflow':
-        this.handlers.onRunWorkflow(message.name, message.args)
+        h.onRunWorkflow(from, message.name, message.args)
         break
       case 'answer':
-        this.handlers.onAnswer(message.id, message.answer)
+        h.onAnswer(from, message.id, message.answer)
         break
       case 'approve':
-        this.handlers.onApprove(message.id, message.choice)
+        h.onApprove(from, message.id, message.choice)
         break
       case 'openApprovalDiff':
-        this.handlers.onOpenApprovalDiff(message.id, message.index)
+        h.onOpenApprovalDiff(from, message.id, message.index)
         break
       case 'clearPlan':
-        this.handlers.onClearPlan()
+        h.onClearPlan(from)
         break
       case 'continueAtLimit':
-        this.handlers.onContinueAtLimit(message.go)
+        h.onContinueAtLimit(from, message.go)
         break
       case 'openTaskDiff':
-        this.handlers.onOpenTaskDiff(message.turnId, message.path)
+        h.onOpenTaskDiff(from, message.turnId, message.path)
         break
       case 'revertTask':
-        this.handlers.onRevertTask(message.turnId)
+        h.onRevertTask(from, message.turnId)
         break
       case 'resumeTask':
-        this.handlers.onResumeTask(message.restart)
+        h.onResumeTask(from, message.restart)
         break
       case 'dismissInterrupted':
-        this.handlers.onDismissInterrupted()
+        h.onDismissInterrupted(from)
         break
     }
   }
 
-  /** Post to every open webview. A no-op when none is open, which is the
-   *  common case: the extension activates long before anyone looks at it. */
-  post(message: HostMessage): void {
-    for (const webview of this.webviews) {
-      // A webview disposed between its close and our onDidDispose handler
-      // rejects (or throws); drop it rather than surface the error.
-      try {
-        void Promise.resolve(webview.postMessage(message)).catch(() => this.webviews.delete(webview))
-      } catch {
-        this.webviews.delete(webview)
-      }
+  // ---- posting --------------------------------------------------------------
+
+  /** Post to one surface. */
+  postTo(surface: Surface, message: HostMessage): void {
+    const entry = this.live.get(surface.id)
+    if (entry) this.send(entry, message)
+  }
+
+  /** Post to every surface showing this conversation. */
+  postToConversation(conversationId: string, message: HostMessage): void {
+    for (const entry of this.live.values()) {
+      if (entry.surface.conversationId === conversationId) this.send(entry, message)
     }
   }
 
-  /** Bring the chat into view: the editor tab when one is open, else the sidebar. */
-  async reveal(): Promise<void> {
-    if (this.panel) {
+  /** Post to every surface. A no-op when none is open, which is the common
+   *  case: the extension activates long before anyone looks at it. */
+  broadcast(message: HostMessage): void {
+    for (const entry of this.live.values()) this.send(entry, message)
+  }
+
+  private send(entry: Live, message: HostMessage): void {
+    // A webview disposed between its close and our onDidDispose handler
+    // rejects (or throws). Its dispose handler tidies up; nothing to surface.
+    try {
+      void Promise.resolve(entry.webview.postMessage(message)).catch(() => undefined)
+    } catch {
+      // Disposed.
+    }
+  }
+
+  /** Bring a surface into view; with none given, the chat used last, else the sidebar. */
+  async reveal(surface?: Surface): Promise<void> {
+    const target = surface ?? this.focused()
+    const panel = target ? this.live.get(target.id)?.panel : undefined
+    if (panel) {
       try {
-        this.panel.reveal(undefined, false)
+        panel.reveal(undefined, false)
         return
       } catch {
-        this.panel = undefined
+        // Disposed without our handler hearing about it: fall back to the sidebar.
       }
     }
-    if (this.view) {
-      this.view.show(true)
+    await this.revealSidebar()
+  }
+
+  /** Bring the sidebar view into view (VSCode creates it if it has not yet). */
+  async revealSidebar(): Promise<void> {
+    if (this.sidebarView) {
+      this.sidebarView.show(true)
       return
     }
     await vscode.commands.executeCommand(`${ChatViewProvider.viewType}.focus`)
   }
 
-  sendInit(session: SessionSnapshot, messages: ChatMessageView[], conversationId: string | null, state: ConversationState): void {
-    this.post({ type: 'init', protocolVersion: PROTOCOL_VERSION, session, messages, conversationId, state })
+  sendInit(surface: Surface, session: SessionSnapshot, messages: ChatMessageView[], state: ConversationState): void {
+    this.postTo(surface, {
+      type: 'init',
+      protocolVersion: PROTOCOL_VERSION,
+      session,
+      messages,
+      conversationId: surface.conversationId,
+      state,
+      surface: surface.kind,
+    })
   }
 
   private buildHtml(webview: vscode.Webview): string {

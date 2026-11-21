@@ -53,7 +53,9 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: New Chat` | Create a new conversation tab and focus the panel |
 | `Yellowscript: Connect to Nest` | Discover (or use the configured URL) and connect |
 | `Yellowscript: Disconnect` | Drop the connection and stop auto-reconnecting |
-| `Yellowscript: Open in Editor Tab` | Open the chat as an editor tab (also the bird button in the editor title bar) |
+| `Yellowscript: New Chat in Editor Tab` | A new chat in its own editor tab (also the bird button in the editor title bar). Each tab is its own chat: drag it to another group, split it, or move it to a new window. It reopens on its chat after a reload |
+| `Yellowscript: Move Chat to Editor Tab` | Move the sidebar's chat into an editor tab (the button in the sidebar's title bar). Closing the tab puts the chat in history; one still running carries on in the sidebar's strip |
+| `Yellowscript: Move Chat to Sidebar` | Put an editor tab's chat back in the sidebar's strip (the sidebar button in the chat tab's title bar, or in its own toolbar). A run carries on. Double-clicking a chat in the strip does the reverse |
 | `Yellowscript: Choose Project` | Link this workspace to a Nest project |
 | `Yellowscript: Run Workflow` | Pick one of your Nest workflows |
 | `Yellowscript: Sign In to Nest` | Username and password (swapped at once for a key Nest issues to this app), or paste an `rst_` API key |

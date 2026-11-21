@@ -11,7 +11,45 @@
 
   // renderMarkdown escapes the whole input before emitting any tag of its own
   // (see markdown.ts): the only safe way to put model text into {@html}.
-  const html = $derived(message.role === 'assistant' ? renderMarkdown(message.content) : '')
+  // Rendered again only when the text changed: a reasoning or tool update
+  // replaces the message too, and re-rendering a long answer on each of those
+  // was most of what kept a streaming turn's page busy.
+  let renderedFrom: string | null = null
+  let rendered = ''
+  const html = $derived.by(() => {
+    const content = message.role === 'assistant' ? message.content : ''
+    if (content !== renderedFrom) {
+      renderedFrom = content
+      rendered = content ? renderMarkdown(content) : ''
+    }
+    return rendered
+  })
+
+  // The reasoning, in paragraphs: as it streams only the last one changes, so
+  // the rest is not laid out again on every token. Built only while open.
+  let thinkingOpen = $state(false)
+  const paragraphs = $derived(thinkingOpen && message.reasoning ? message.reasoning.split(/\n{2,}/) : [])
+
+  /** The open reasoning box scrolls on its own: it keeps to its end while
+   *  you are there, and stays put once you scroll up inside it. */
+  function followOwnEnd(node: HTMLElement) {
+    let stick = true
+    const onScroll = () => {
+      stick = node.scrollHeight - node.scrollTop - node.clientHeight < 16
+    }
+    node.addEventListener('scroll', onScroll, { passive: true })
+    const observer = new MutationObserver(() => {
+      if (stick) node.scrollTop = node.scrollHeight
+    })
+    observer.observe(node, { childList: true, subtree: true, characterData: true })
+    node.scrollTop = node.scrollHeight
+    return {
+      destroy() {
+        node.removeEventListener('scroll', onScroll)
+        observer.disconnect()
+      },
+    }
+  }
   const stats = $derived(message.stats)
   const working = $derived(message.streaming === true && !message.content && !(message.tools?.length))
 
@@ -51,9 +89,13 @@
     {#if message.pending}<span class="note">Queued</span>{/if}
   {:else}
     {#if message.reasoning}
-      <details class="reasoning">
+      <details class="reasoning" bind:open={thinkingOpen}>
         <summary>Thinking</summary>
-        <div class="reasoning-body">{message.reasoning}</div>
+        {#if thinkingOpen}
+          <div class="reasoning-body" use:followOwnEnd>
+            {#each paragraphs as paragraph, i (i)}<p>{paragraph}</p>{/each}
+          </div>
+        {/if}
       </details>
     {/if}
     {#if tools.length}
@@ -154,7 +196,18 @@
     padding-left: 8px;
   }
   .reasoning summary { cursor: pointer; opacity: 0.65; user-select: none; }
-  .reasoning-body { margin-top: 4px; white-space: pre-wrap; opacity: 0.75; max-height: 240px; overflow-y: auto; }
+  .reasoning-body {
+    margin-top: 4px;
+    white-space: pre-wrap;
+    opacity: 0.75;
+    max-height: 240px;
+    overflow-y: auto;
+    /* Its own scroll: reaching its end does not carry on into the transcript. */
+    overscroll-behavior: contain;
+    contain: content;
+  }
+  .reasoning-body p { margin: 0 0 0.6em; }
+  .reasoning-body p:last-child { margin-bottom: 0; }
   .streaming .body > :global(:last-child)::after {
     content: '▍';
     animation: blink 1s steps(2, start) infinite;

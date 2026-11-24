@@ -14,32 +14,23 @@ import * as vscode from 'vscode'
 import { hostname } from 'node:os'
 
 import { ConnectionManager } from './connection.ts'
-import { ChatSession } from './chat/session.ts'
-import { buildWorkspaceContext } from './tools/workspace-context.ts'
-import * as nodeFs from 'node:fs'
-import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
 import { NestClient } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider } from './ui/chat-view.ts'
-import { diagnosticsAfterWrite, symbolProvider, workspaceRoots, approvalStore } from './ui/tool-providers.ts'
-import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
-import type { PendingCommand } from './tools/types.ts'
-import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
-import { nodeCommandContext } from './tools/command-context.ts'
-import { usableReadRoots } from './tools/read-scope.ts'
-import { makeCommandGate } from './ui/run-command.ts'
-import { describeRunning } from './tools/background-processes.ts'
+import { symbolProvider, workspaceRoots } from './ui/tool-providers.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
 import { conversationStore } from './ui/conversation-store.ts'
 import { createProjects, type Projects } from './host/projects.ts'
 import { createTasks, type Tasks } from './host/tasks.ts'
 import { FIX_DIAGNOSTIC_COMMAND, createEditorActions, type EditorActions } from './host/editor-actions.ts'
 import { createConnectionCommands, loggedDiscovery, type ConnectionCommands } from './host/connection-commands.ts'
-import { config, extraReadRoots } from './host/config.ts'
+import { config } from './host/config.ts'
 import { createTooling, type Tooling } from './host/tooling.ts'
 import { createSurfaces, type Surfaces } from './host/surfaces.ts'
-import { createSessions, type SessionHooks, type Sessions } from './host/sessions.ts'
+import { createSessions, type Sessions } from './host/sessions.ts'
+import { createAgentSetup } from './host/agent-setup.ts'
+import { composeSession } from './agent/compose.ts'
 
 let manager: ConnectionManager | undefined
 let statusBar: StatusBar | undefined
@@ -136,6 +127,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     send: (surface, text, attachments) => sessions.send(surface, text, undefined, attachments),
   })
 
+  // What every chat's agent runs against: the workspace, the tools, the gates.
+  const agentSetup = createAgentSetup({ manager, tooling, projects, tasks, log: output })
   sessions = createSessions({
     connection: manager,
     conversations,
@@ -151,7 +144,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log: output,
     project: () => projects.linked(),
     configuredUrl: () => config().get<string>('serverUrl', ''),
-    createSession,
+    createSession: (conversationId, hooks) => composeSession(agentSetup, conversationId, hooks),
   })
   surfaces = createSurfaces({
     view: () => chatView,
@@ -317,129 +310,6 @@ export function deactivate(): void {
   manager = undefined
 }
 
-// ---------------------------------------------------------------------------
-// Per-conversation sessions
-// ---------------------------------------------------------------------------
-
-/** One conversation's ChatSession, with everything its agent runs against. */
-function createSession(id: string, hooks: SessionHooks): ChatSession {
-  const session: ChatSession = new ChatSession({
-    getClient: () => manager?.activeClient ?? null,
-    context: hooks.context,
-    diagnosticsAfterWrite,
-    onPlanChanged: (steps) => tasks.writePlan(steps),
-    workspaceContext: () => {
-      const root = workspaceRoots()[0]
-      if (!root) return null
-      // What it is told about keeping notes, plans and memories follows the
-      // tools it actually has, and whether the workspace has a project.
-      return buildWorkspaceContext(root, undefined, {
-        tools: tooling.current().names,
-        project: projects.linked()?.name ?? null,
-      })
-    },
-    liveState: () => describeRunning(tooling.processes.list()),
-    maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
-    onContextTrimmed: (report) => {
-      output?.info(
-        `context: trimmed to fit (~${report.before} → ~${report.after} of ${report.usable ?? '?'} usable tokens; ` +
-          `${report.stubbed} old results stubbed, ${report.shrunk} calls shrunk, ${report.capped} messages capped)` +
-          (report.overLimit ? '  [STILL OVER the window]' : ''),
-      )
-    },
-    onUnauthorized: () => manager?.handleUnauthorized(),
-    tools: () => (workspaceRoots().length > 0 ? tooling.current() : null),
-    toolContext: () => ({
-      workspaceRoots: workspaceRoots(),
-      readRoots: extraReadRoots(),
-      askRead: async (request) => {
-        const outside = request.outsideFolder
-        const choice = await session.askApproval({
-          kind: 'tool',
-          title: outside ? 'Read outside the workspace' : 'Read a file that may hold secrets',
-          subject: request.label,
-          detail: outside
-            ? `It is outside the workspace. Reading only; nothing there is ever written. "Always" allows reading ${outside}.`
-            : `${request.reason}. What it says goes to the model and is saved with this chat.`,
-          options: [
-            { id: 'read', label: 'Allow this time', kind: 'allow' },
-            ...(outside ? [{ id: 'always', label: 'Always for this folder', kind: 'always' as const }] : []),
-            { id: 'deny', label: 'Deny', kind: 'deny' },
-          ],
-        })
-        if (choice === 'always' && outside) {
-          await config().update('extraReadRoots', [...new Set([...extraReadRoots(), outside])], vscode.ConfigurationTarget.Workspace)
-        }
-        return choice === 'read' || choice === 'always'
-      },
-    }),
-    approveChange: (pending) => {
-      const roots = workspaceRoots()
-      if (roots.length === 0) {
-        output?.warn('No workspace folder is open, so writes cannot be reviewed or applied.')
-        return Promise.resolve(false)
-      }
-      const gate = makeApprovalGate({
-        ask: (request) => session.askApproval(request),
-        checkpoints: checkpointForWorkspace(roots[0]!),
-        root: roots[0]!,
-        store: approvalStore(),
-        recordCheckpoint: (checkpoint, files) => tasks.recordCheckpoint(id, roots[0]!, checkpoint, files),
-        task: {
-          trusted: () => tasks.trusted(id),
-          trust: () => tasks.trust(id),
-        },
-      })
-      return gate(pending)
-    },
-    approveCommand: (pending) =>
-      makeCommandGate({
-        channel: tooling.commandChannel,
-        processes: tooling.processes,
-        ask: (request) => session.askApproval(request),
-        classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
-        conversationId: id,
-        nonInteractive: () => config().get<boolean>('commands.nonInteractive') !== false,
-      })(pending),
-    conversationId: id,
-    projectId: () => projects.linked()?.id ?? null,
-    onPersist: hooks.onPersist,
-    emit: hooks.emit,
-  })
-  return session
-}
-
 async function openSettingsCommand(): Promise<void> {
   await vscode.commands.executeCommand('workbench.action.openSettings', 'redstartYellowscript')
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** What the command classifier needs to know about this workspace and run. */
-function commandContextFor(conversationId: string, pending: PendingCommand): CommandContext {
-  return nodeCommandContext({
-    cwd: pending.cwd,
-    roots: workspaceRoots().map((root) => {
-      try {
-        return nodeFs.realpathSync.native(root)
-      } catch {
-        return root
-      }
-    }),
-    readRoots: usableReadRoots(extraReadRoots()),
-    builtInSafe: config().get<boolean>('commands.builtInSafe') !== false,
-    projectChecks: config().get<boolean>('commands.autoRunProjectChecks') !== false,
-    background: pending.background === true,
-    // package.json as this run's first checkpoint of it holds it.
-    packageJsonBeforeRun: (file) => {
-      const key = file.toLowerCase()
-      for (const entry of tasks.checkpoints(conversationId)) {
-        const staged = entry.files.find((f) => f.workspaceAbsolute.toLowerCase() === key)
-        if (staged) return staged.wasAbsent ? '' : staged.content
-      }
-      return null
-    },
-  })
 }

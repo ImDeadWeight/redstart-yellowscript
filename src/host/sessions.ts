@@ -15,6 +15,7 @@
 // =============================================================================
 
 import { describeState, type ConnectionState } from '../connection.ts'
+import type { SessionHooks } from '../agent/compose.ts'
 import { ContextTracker } from '../agent/context-budget.ts'
 import { AttentionTracker, LONG_RUN_MS } from '../chat/attention.ts'
 import { attachmentLabel } from '../chat/attachments.ts'
@@ -41,15 +42,6 @@ export interface SessionViews {
   needsAttention(conversationId: string, what: string): void
 }
 
-/** What a session is given by the host that keeps it. */
-export interface SessionHooks {
-  emit(message: HostMessage): void
-  /** The transcript changed durably: save it. */
-  onPersist(): void
-  /** The connected client's context window. */
-  context(): ContextTracker | null
-}
-
 export interface SessionsDeps {
   connection: { readonly state: ConnectionState; readonly activeClient: NestClient | null }
   conversations: ConversationStore
@@ -61,7 +53,7 @@ export interface SessionsDeps {
   project: () => { id: string; name: string } | null
   /** The server address the person set, if any (redstartYellowscript.serverUrl). */
   configuredUrl: () => string
-  /** Build one conversation's session (agent/compose.ts in the extension). */
+  /** Build one conversation's session (composeSession, in the extension). */
   createSession: (conversationId: string, hooks: SessionHooks) => ChatSession
 }
 

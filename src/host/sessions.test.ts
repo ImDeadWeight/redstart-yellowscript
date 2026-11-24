@@ -13,7 +13,8 @@ import type { NestClient, StreamResult } from '../nest/client.ts'
 import type { Surface } from '../ui/chat-view.ts'
 import { conversationStore } from '../ui/conversation-store.ts'
 import type { PlanStep } from '../agent/agent-core.ts'
-import { createSessions, titleFor, type SessionHooks } from './sessions.ts'
+import type { SessionHooks } from '../agent/compose.ts'
+import { createSessions, titleFor } from './sessions.ts'
 
 function memento() {
   const data = new Map<string, unknown>()

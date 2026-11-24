@@ -15,10 +15,8 @@ import { hostname } from 'node:os'
 
 import { ConnectionManager, describeState } from './connection.ts'
 import { ChatSession } from './chat/session.ts'
-import { findBrowser } from './browser/cdp.ts'
 import { buildWorkspaceContext } from './tools/workspace-context.ts'
 import * as nodeFs from 'node:fs'
-import * as nodePath from 'node:path'
 import { PLAN_DIR, PLAN_FILE } from './chat/plan-file.ts'
 import { ContextTracker } from './agent/context-budget.ts'
 import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
@@ -34,16 +32,7 @@ import { NestClient } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider, type Surface } from './ui/chat-view.ts'
-import { createToolRegistry, type ToolRegistry } from './tools/registry.ts'
-import {
-  diagnosticsAfterWrite,
-  diagnosticsProvider,
-  symbolProvider,
-  editorStateProvider,
-  resolveRipgrep,
-  workspaceRoots,
-  approvalStore,
-} from './ui/tool-providers.ts'
+import { diagnosticsAfterWrite, symbolProvider, workspaceRoots, approvalStore } from './ui/tool-providers.ts'
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import type { PendingCommand } from './tools/types.ts'
 import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
@@ -53,25 +42,20 @@ import { AttentionTracker, LONG_RUN_MS } from './chat/attention.ts'
 import { attachmentLabel } from './chat/attachments.ts'
 import type { AttachmentView } from './chat/protocol.ts'
 import { makeCommandGate } from './ui/run-command.ts'
-import { BackgroundProcesses, describeRunning } from './tools/background-processes.ts'
-import { McpHost, withProjectMeta, type McpTool } from './nest/mcp-host.ts'
-import { approvalInfo, callWithApproval } from './nest/approval.ts'
-import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
+import { describeRunning } from './tools/background-processes.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
-import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import { conversationStore, isBlank, type Conversation, type HistoryEntry } from './ui/conversation-store.ts'
 import { createProjects, type Projects } from './host/projects.ts'
 import { createTasks, type Tasks } from './host/tasks.ts'
 import { FIX_DIAGNOSTIC_COMMAND, createEditorActions, type EditorActions } from './host/editor-actions.ts'
 import { createConnectionCommands, loggedDiscovery, type ConnectionCommands } from './host/connection-commands.ts'
 import { config, extraReadRoots } from './host/config.ts'
+import { createTooling, type Tooling } from './host/tooling.ts'
 
 let manager: ConnectionManager | undefined
 let statusBar: StatusBar | undefined
 let output: vscode.LogOutputChannel | undefined
 let chatView: ChatViewProvider | undefined
-let tools: ToolRegistry | undefined
-let mcpHost: McpHost | null = null
 let conversations: ReturnType<typeof conversationStore>
 /** A conversation the sidebar should open on once VSCode creates its view
  *  (a command ran before the view existed). */
@@ -84,26 +68,15 @@ let projects!: Projects
  *  own transcript and request lifecycle, so switching tabs is a pure view
  *  change and a running turn keeps streaming in its own tab. */
 let sessions = new Map<string, ChatSession>()
-/** The merged registry — local ys_* tools + live Nest tools. Rebuilt whenever the
- *  Nest tool set changes (on connect and on re-list). Cached because the agent
- *  loop reads it per turn. */
-let mergedTools: ToolRegistry | null = null
+/** The ys_* tools, the Nest's tools, and the processes they start. */
+let tooling!: Tooling
 /** Each conversation's running task: its trust, its checkpoints, reverting it. */
 let tasks!: Tasks
 /** Attachments, the @ picker, Add Selection and Fix with Yellowscript. */
 let editorActions!: EditorActions
-/** Resolved once — the binary does not move while the window is open, and
- *  probing the filesystem on every search would be wasteful. */
-let ripgrepPath: string | null = null
-/** Live output of approved commands, and the background processes they started. */
-let commandChannel: vscode.OutputChannel | undefined
-let backgroundProcesses: BackgroundProcesses | undefined
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Redstart Yellowscript', { log: true })
-  commandChannel = vscode.window.createOutputChannel('Yellowscript Commands')
-  backgroundProcesses = new BackgroundProcesses((id, chunk) => commandChannel?.append(`[${id}] ${chunk}`))
-  context.subscriptions.push(commandChannel, { dispose: () => void backgroundProcesses?.stopAll() })
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
   tasks = createTasks({ log: output, roots: workspaceRoots })
@@ -136,13 +109,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     conversations,
     onSessionChanged: () => pushSession(),
     onSignedIn: () => followAccount(),
-    onConnected: () => connectMcpHost(),
-    onDisconnect: () => {
-      mcpHost?.stop()
-      mcpHost = null
-      mergedTools = null
-      pushTools()
+    onConnected: () => {
+      const client = manager?.activeClient
+      if (client) tooling.connectNest(client)
     },
+    onDisconnect: () => tooling.disconnectNest(),
   })
   const authProvider = new RedstartAuthProvider(manager, {
     signIn: async () => {
@@ -157,50 +128,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     account: () => connection.account(),
     store: context.workspaceState,
     post: (to, message) => chatView?.postTo(to, message),
-    mcp: () => mcpHost,
+    mcp: () => tooling.mcp(),
     onLinkChanged: () => pushSession(),
     send: (from, text, workflow) => sendTo(from, text, workflow),
   })
 
-  // The ys_* tools. Built at activation so a missing ripgrep is a known,
-  // reportable state rather than a surprise on the first search — the search
-  // tools drop to literal matching and say so in the description the model
-  // plans against. Nothing sends these to the Nest yet; that is 2.3.
-  ripgrepPath = resolveRipgrep()
-  tools = createToolRegistry({
-    ripgrepPath,
-    diagnostics: diagnosticsProvider,
-    symbols: symbolProvider,
-    editorState: editorStateProvider,
-    processes: backgroundProcesses,
-    unifiedDiff: vscode.workspace.getConfiguration('redstartYellowscript').get<boolean>('tools.unifiedDiff') === true,
-    browser: {
-      // Looked up on use, so a browser installed later is found.
-      browser: () => findBrowser(),
-      screenshotDir: () => {
-        const root = workspaceRoots()[0]
-        return root ? nodePath.join(root, PLAN_DIR, 'screenshots') : null
-      },
-    },
+  tooling = createTooling({
+    log: output,
+    roots: workspaceRoots,
+    broadcast: (message) => chatView?.broadcast(message),
+    askerFor: (conversationId) => sessions.get(conversationId)?.askApproval,
+    projectId: () => projects.linked()?.id,
   })
-  const roots = workspaceRoots()
-  output.info(
-    `tools: ${tools.names.length} registered (${tools.names.join(', ')}); ` +
-      `search backend: ${ripgrepPath === null ? 'DEGRADED — ripgrep not found' : 'ripgrep'}; ` +
-      `workspace folders: ${roots.length}`,
-  )
-  if (roots.length === 0) {
-    // Worth stating plainly. With no folder open every ys_* tool refuses by
-    // design, and that reads as a broken extension unless it is spelled out.
-    output.warn('No workspace folder is open — every ys_* tool will refuse until one is.')
-  }
-  if (ripgrepPath === null) {
-    // Worth a log line with the appRoot: the layout has changed between VSCode
-    // versions before, and this is the fact needed to add the new one.
-    output.warn(`ripgrep was not found under appRoot ${vscode.env.appRoot}`)
-  } else {
-    output.debug(`ripgrep: ${ripgrepPath}`)
-  }
+  context.subscriptions.push(...tooling.disposables)
 
   editorActions = createEditorActions({
     roots: workspaceRoots,
@@ -314,11 +254,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // Clicking "Restart and continue" is the person's go-ahead for them.
       const resumed = session.resumeInterrupted()
       if (!resumed) return
-      if (restart && backgroundProcesses) {
+      if (restart) {
         for (const p of resumed.processes) {
           try {
-            const started = backgroundProcesses.start(p.command, p.cwd)
-            commandChannel?.appendLine(`\n$ ${p.command}    (restarted for an interrupted task as ${started.id})`)
+            const started = tooling.processes.start(p.command, p.cwd)
+            tooling.commandChannel.appendLine(`\n$ ${p.command}    (restarted for an interrupted task as ${started.id})`)
           } catch (err) {
             output?.warn(`could not restart ${p.command}: ${err instanceof Error ? err.message : String(err)}`)
           }
@@ -407,7 +347,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.openHistory', openHistoryCommand),
     vscode.commands.registerCommand('redstartYellowscript.chooseProject', () => showPage('projects')),
     vscode.commands.registerCommand('redstartYellowscript.runWorkflow', () => showPage('workflows')),
-    vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
+    vscode.commands.registerCommand('redstartYellowscript.inspectTools', () => tooling.inspect()),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', () => tasks.revertLastWrite()),
     vscode.commands.registerCommand('redstartYellowscript.revertLastTask', () => tasks.revertLastTask()),
     vscode.commands.registerCommand('redstartYellowscript.addSelection', () => editorActions.addSelection()),
@@ -425,9 +365,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
-  // A dev server the model started must not outlive the window.
-  backgroundProcesses?.stopAll()
-  mcpHost?.stop()
+  tooling?.stopAll()
   statusBar?.dispose()
   statusBar = undefined
   // Cancel every conversation's in-flight turn before tearing down.
@@ -508,13 +446,12 @@ function getSession(id: string): ChatSession {
         if (!root) return null
         // What it is told about keeping notes, plans and memories follows the
         // tools it actually has, and whether the workspace has a project.
-        const registry = mergedTools ?? tools
         return buildWorkspaceContext(root, undefined, {
-          ...(registry ? { tools: registry.names } : {}),
+          tools: tooling.current().names,
           project: projects.linked()?.name ?? null,
         })
       },
-      liveState: () => (backgroundProcesses ? describeRunning(backgroundProcesses.list()) : null),
+      liveState: () => describeRunning(tooling.processes.list()),
       maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
       onContextTrimmed: (report) => {
         output?.info(
@@ -524,7 +461,7 @@ function getSession(id: string): ChatSession {
         )
       },
       onUnauthorized: () => manager?.handleUnauthorized(),
-      tools: () => (workspaceRoots().length > 0 ? (mergedTools ?? (tools ?? null)) : null),
+      tools: () => (workspaceRoots().length > 0 ? tooling.current() : null),
       toolContext: () => ({
         workspaceRoots: workspaceRoots(),
         readRoots: extraReadRoots(),
@@ -569,16 +506,14 @@ function getSession(id: string): ChatSession {
         return gate(pending)
       },
       approveCommand: (pending) =>
-        backgroundProcesses && commandChannel
-          ? makeCommandGate({
-              channel: commandChannel,
-              processes: backgroundProcesses,
-              ask: (request) => getSession(id).askApproval(request),
-              classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
-              conversationId: id,
-              nonInteractive: () => config().get<boolean>('commands.nonInteractive') !== false,
-            })(pending)
-          : Promise.resolve(null),
+        makeCommandGate({
+          channel: tooling.commandChannel,
+          processes: tooling.processes,
+          ask: (request) => getSession(id).askApproval(request),
+          classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
+          conversationId: id,
+          nonInteractive: () => config().get<boolean>('commands.nonInteractive') !== false,
+        })(pending),
       conversationId: id,
       projectId: () => projects.linked()?.id ?? null,
       onPersist: () => persistConversation(id),
@@ -943,71 +878,6 @@ function openHistoryCommand(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
-
-/**
- * Run a ys_* tool by hand and show what the model would receive.
- *
- * This is the only way to exercise the VSCode-backed providers — diagnostics
- * and editor context — outside an agent turn, since unit tests cannot reach the
- * real `vscode` API. It doubles as the answer to "what can the agent actually
- * see in this workspace?", which is a fair question for a user to ask about a
- * tool that reads their files.
- */
-async function inspectToolsCommand(): Promise<void> {
-  // Show the channel FIRST. Every failure below is then visible in it, rather
-  // than the command appearing to do nothing — which is exactly what an earlier
-  // version of this did when it returned early without saying so.
-  output?.show(true)
-  output?.info('--- Inspect Workspace Tools ---')
-
-  if (!tools) {
-    output?.error('The tool registry was never built. The extension did not activate cleanly.')
-    vscode.window.showErrorMessage('Yellowscript: tools are not available — see the output channel.')
-    return
-  }
-
-  const roots = workspaceRoots()
-  output?.info(`workspace folders: ${roots.length > 0 ? roots.join(', ') : '(none open)'}`)
-  output?.info(`search backend: ${ripgrepPath === null ? 'DEGRADED — ripgrep not found' : ripgrepPath}`)
-  output?.info(`registered: ${tools.names.join(', ')}`)
-
-  if (roots.length === 0) {
-    output?.warn('No folder is open, so every tool will refuse. Open a folder and run this again.')
-    return
-  }
-
-  // Run the zero-argument tools and one filesystem probe. These are the checks
-  // that cannot be made from a unit test: ys_diagnostics and ys_editor_context
-  // read live VSCode state through the providers, and this is the only place
-  // that wiring gets exercised outside an agent turn.
-  const probes: Array<{ name: string; args: string }> = [
-    { name: 'ys_editor_context', args: '{}' },
-    { name: 'ys_diagnostics', args: '{}' },
-    { name: 'ys_list_directory', args: '{"path":"."}' },
-    { name: 'ys_glob', args: '{"pattern":"**/*.ts"}' },
-  ]
-
-  for (const probe of probes) {
-    try {
-      const result = await tools.execute(probe.name, probe.args, { workspaceRoots: roots })
-      const status = result.isError ? 'ERROR' : 'ok'
-      output?.info(
-        `\n=== ${probe.name}(${probe.args}) -> ${status}${result.truncated ? ', truncated' : ''} ===\n${result.content}`,
-      )
-    } catch (err) {
-      // A tool throwing is a bug — the contract says failures come back as
-      // results. Surface it loudly rather than swallowing it.
-      output?.error(`${probe.name} THREW (this is a bug, not a refusal)`, err)
-    }
-  }
-
-  output?.info('\n--- done ---')
-  vscode.window.showInformationMessage('Yellowscript: tool report written to the output channel.')
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1070,105 +940,4 @@ function commandContextFor(conversationId: string, pending: PendingCommand): Com
       return null
     },
   })
-}
-
-/**
- * Bring up the MCP host against the connected Nest. Phase 4.2/4.3: discovers the
- * built-in MCP server via /redstart/mcp-servers, opens the SSE stream, lists
- * tools, and merges them with the local ys_* set under a disjointness assertion.
- *
- * Re-run on every (re)connect — the tool set follows the active profile, so a
- * cached list is stale the moment an operator switches profiles without the
- * connection dropping. On failure the extension still works with just the local
- * ys_* tools — the MCP host is a bonus, not a hard dependency.
- */
-function connectMcpHost(): void {
-  const client = manager?.activeClient
-  if (!client) return
-
-  // Drop any previous session: a reconnect means a new SSE stream and a fresh
-  // tool set.
-  mcpHost?.stop()
-  mcpHost = null
-  mergedTools = null
-  let currentDisabled = new Set<string>()
-  pushTools()
-  // Approvals for Nest's own tools: per connection, because the grant cache
-  // belongs to the account this client is signed in as.
-  const approvals = makeNestApprovalDeps(client, (m) => output?.warn(m))
-  const host = new McpHost(
-    {
-      baseUrl: client.baseUrl,
-      listMcpServers: (signal) => client.listMcpServers(signal),
-      fetch: (input, init) => fetch(input, init),
-      getCredential: () => client.getCredential(),
-    },
-    {
-      onTools: (mcpTools: readonly McpTool[]) => {
-        const refs: NestToolRef[] = mcpTools
-          .filter((t) => !currentDisabled.has(t.name))
-          .map((t) => {
-            const ref: NestToolRef = {
-              name: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema,
-              execute: async (args: unknown, context) => {
-                // Ask on the card of the conversation that made the call.
-                const asker = context.conversationId ? sessions.get(context.conversationId) : undefined
-                return (
-                  await callWithApproval(t.name, args, approvalInfo(t.meta), {
-                    ...approvals,
-                    ...(asker ? { prompt: (request) => promptInChat(request, asker.askApproval) } : {}),
-                    call: (meta) => host.callToolResult(t.name, args, withProjectMeta(meta, projects.linked()?.id)),
-                  })
-                ).text
-              },
-            }
-            if (t.meta) ref.meta = t.meta
-            return ref
-          })
-        const base = tools ?? mergedTools
-        if (!base) {
-          output?.warn('mcp: local tools not ready, dropping Nest tools')
-          return
-        }
-        try {
-          mergedTools = mergeNestTools(base, refs)
-          output?.info(
-            `mcp: merged ${refs.length} Nest tools with ${base.names.length} local ys_* tools`,
-          )
-          pushTools()
-        } catch (err) {
-          output?.error(`mcp: merge rejected — ${(err as Error).message}`)
-        }
-      },
-      onConnection: (conn) => {
-        output?.info(
-          `mcp: connected to ${conn.servers[0]?.name ?? 'unknown'} (${conn.servers.length} server(s))`,
-        )
-        // Track server-banned tool names for UX greying (HANDOFF 4.4). The
-        // gateway also strips them server-side — this is the visibility layer.
-        currentDisabled = new Set(conn.disabledTools)
-      },
-      onError: (err) => {
-        output?.error(`mcp: ${err.message}`)
-        // A dead MCP host should not brick the extension — clear the merged set
-        // so the model sees only local tools, and let the next reconnect retry.
-        mergedTools = null
-        pushTools()
-      },
-    },
-  )
-
-  mcpHost = host
-  void host.connect().catch((err: unknown) => {
-    output?.error('mcp: connect failed', err)
-  })
-}
-
-/** Push the current tool set to the webview so the picker and cards reflect it. */
-function pushTools(): void {
-  const current = mergedTools ?? tools
-  if (!current) return
-  chatView?.broadcast({ type: 'tools', names: current.names })
 }

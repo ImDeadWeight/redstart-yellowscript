@@ -50,6 +50,8 @@ export interface Tooling {
   connectNest(client: NestClient): void
   /** Disconnecting: drop the MCP host and the Nest's tools. */
   disconnectNest(): void
+  /** Start again a process an interrupted task had running ("Restart and continue"). */
+  restart(process: { command: string; cwd: string }): void
   /** The command: run the zero-argument tools and show what the model would get. */
   inspect(): Promise<void>
   /** The window is closing: no process or stream outlives it. */
@@ -257,6 +259,14 @@ export function createTooling(deps: ToolingDeps): Tooling {
     mcp: () => mcpHost,
     connectNest,
     disconnectNest,
+    restart(p) {
+      try {
+        const started = processes.start(p.command, p.cwd)
+        commandChannel.appendLine(`\n$ ${p.command}    (restarted for an interrupted task as ${started.id})`)
+      } catch (err) {
+        log.warn(`could not restart ${p.command}: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
     inspect,
     stopAll() {
       // A dev server the model started must not outlive the window.

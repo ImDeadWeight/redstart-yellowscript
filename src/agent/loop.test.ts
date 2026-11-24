@@ -80,6 +80,14 @@ describe('assembleToolCalls', () => {
     assert.ok(calls[0]?.id)
   })
 
+  test('a synthesised id names the round trip after the first, so ids do not repeat', () => {
+    const first = assembleToolCalls([delta({ index: 0, function: { name: 'ys_glob', arguments: '{}' } })], 1)
+    const later = assembleToolCalls([delta({ index: 0, function: { name: 'ys_glob', arguments: '{}' } })], 2)
+    assert.notEqual(first[0]?.id, later[0]?.id)
+    // A server's own id is kept as sent.
+    assert.equal(assembleToolCalls([delta({ index: 0, id: 'abc', function: { name: 'ys_glob' } })], 3)[0]?.id, 'abc')
+  })
+
   test('drops a fragment that never received a name', () => {
     // Not executable, and guessing a default would run the wrong tool.
     assert.deepEqual(assembleToolCalls([delta({ index: 0, function: { arguments: '{"a":1}' } })]), [])

@@ -35,13 +35,16 @@
 import type { StreamChannel } from '../nest/streaming.ts'
 import type { ToolEffect } from '../tools/types.ts'
 import { parseAttachments } from './attachments.ts'
+import type { TurnPart } from './turn-parts.ts'
+
+export type { TurnPart } from './turn-parts.ts'
 
 /**
  * Bumped when a message shape changes incompatibly. The webview announces the
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 5
+export const PROTOCOL_VERSION = 6
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -73,6 +76,10 @@ export interface ChatMessageView {
   /** The tools this assistant turn ran, in order. Kept on the turn (not only
    *  sent as live messages) so a rebuilt panel can draw the cards again. */
   tools?: ToolCardView[]
+  /** The turn in the order it happened: thoughts, text and tool calls
+   *  (chat/turn-parts.ts). Absent on turns saved before it existed, which
+   *  draw from `content`, `reasoning` and `tools` instead. */
+  parts?: TurnPart[]
   /** A user message's images, files and selections (chat/attachments.ts). */
   attachments?: AttachmentView[]
   /** What this turn's run changed (writes, commands, processes, page
@@ -100,6 +107,8 @@ export interface ToolCardView {
   /** One line for the card, once the call has finished. */
   summary?: string
   truncated?: boolean
+  /** A command's output, its last part: what the card shows under the command. */
+  output?: string
 }
 
 /** The assistant's ask_user question, waiting for the person (agent-core). */
@@ -179,6 +188,19 @@ export interface ConversationState {
   approval: ApprovalView | null
   /** A run that was still going when the window closed or crashed. */
   interrupted?: InterruptedView | null
+  /** How full the model's context window is, as of the last request. */
+  context?: ContextUsageView | null
+}
+
+/** The context meter's numbers. */
+export interface ContextUsageView {
+  /** Tokens in the last request and its reply. */
+  used: number
+  /** The model's window; null while unknown. */
+  size: number | null
+  /** Older tool results were trimmed to fit, this many times in this chat's
+   *  latest run. */
+  trimmed?: number
 }
 
 /** A run cut off by a reload or a crash, offered to be continued. */
@@ -229,6 +251,8 @@ export interface TurnStats {
   tokensPerSecond?: number
   promptTokens?: number
   completionTokens?: number
+  /** The whole context the last request filled: prompt (cached too) and reply. */
+  contextTokens?: number
   /** 'stop', 'length', 'tool_calls' … straight from the model. */
   finishReason?: string
 }
@@ -412,6 +436,8 @@ export type HostMessage =
       truncated: boolean
       /** What the call changed, for the run's task summary. */
       effect?: ToolEffect
+      /** A command's output tail, for the card. */
+      output?: string
     }
    /** Non-fatal notice to show inline (e.g. a server-side tool denial in Phase 2). */
     | { type: 'notice'; level: 'info' | 'warning' | 'error'; message: string }

@@ -217,7 +217,7 @@ export interface AgentLoopOptions {
  * name (a chunk boundary in an awkward place) but a call that never gets one is
  * not executable, and inventing a default would run the wrong tool.
  */
-export function assembleToolCalls(deltas: readonly ToolCallDelta[]): ToolCall[] {
+export function assembleToolCalls(deltas: readonly ToolCallDelta[], iteration = 1): ToolCall[] {
   const byIndex = new Map<number, { id?: string; name: string; args: string }>()
 
   for (const delta of deltas) {
@@ -243,8 +243,11 @@ export function assembleToolCalls(deltas: readonly ToolCallDelta[]): ToolCall[] 
     if (entry.name === '') continue
     calls.push({
       // An id is required to match the result back to the call. Servers
-      // normally send one; synthesise a stable one when they do not.
-      id: entry.id ?? `call_${index}_${entry.name}`,
+      // normally send one; synthesise a stable one when they do not. Past the
+      // first round trip it names the round too: the same tool at the same
+      // index in a later round is a different call, and the panel and the
+      // results are matched by id.
+      id: entry.id ?? `call_${index}_${entry.name}${iteration > 1 ? `_r${iteration}` : ''}`,
       type: 'function',
       function: { name: entry.name, arguments: entry.args },
     })
@@ -353,7 +356,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         // A turn cut short ends the flow as an answer with what arrived. No
         // calls from it run, not even ones recovered from its partial text.
         streamCut = result.aborted
-        acc.toolCalls = result.aborted ? [] : assembleToolCalls(result.toolCalls)
+        acc.toolCalls = result.aborted ? [] : assembleToolCalls(result.toolCalls, iterations)
       },
     },
     tools: {

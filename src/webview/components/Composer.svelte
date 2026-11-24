@@ -1,12 +1,15 @@
 <script lang="ts">
   import type { AttachmentView, SessionSnapshot, WorkflowView } from '../../chat/protocol.ts'
-  import { MAX_IMAGES, attachmentLabel } from '../../chat/attachments.ts'
   import { untrack } from 'svelte'
   import { post } from '../host.ts'
   import { draftFor, flushDraft, hasLocalDraft, setDraft } from '../drafts.ts'
   import { view } from '../store.svelte.ts'
-  import { atQuery, composerPlaceholder, fitWithin, matchWorkflows, slashQuery, type ViewState } from '../view-model.ts'
+  import { atQuery, composerPlaceholder, matchWorkflows, slashQuery, type ViewState } from '../view-model.ts'
+  import { imageFiles, withImages } from '../images.ts'
   import Icon from './Icon.svelte'
+  import AttachmentChips from './AttachmentChips.svelte'
+  import AttachButton from './AttachButton.svelte'
+  import ContextMeter from './ContextMeter.svelte'
 
   let { session, viewState }: { session: SessionSnapshot; viewState: ViewState } = $props()
 
@@ -112,51 +115,37 @@
   /** The model cannot read images: say so instead of sending them. */
   const imagesBlocked = $derived(session.vision === false && imageCount > 0)
 
-  /** An image file, downscaled to 1,280px at most, as a data URL. */
-  async function readImage(file: File): Promise<AttachmentView | null> {
-    const url = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result))
-      reader.onerror = () => reject(reader.error)
-      reader.readAsDataURL(file)
-    })
-    const img = new Image()
-    await new Promise((resolve, reject) => {
-      img.onload = resolve
-      img.onerror = reject
-      img.src = url
-    })
-    const { width, height } = fitWithin(img.naturalWidth, img.naturalHeight)
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-    canvas.getContext('2d')?.drawImage(img, 0, 0, width, height)
-    // PNG keeps a small screenshot sharp; anything bigger goes as JPEG.
-    const dataUrl = file.type === 'image/png' && width * height <= 600_000 ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.85)
-    return { kind: 'image', name: file.name || 'pasted image', dataUrl }
-  }
-
   async function addImages(files: readonly File[]) {
-    for (const file of files) {
-      if (!file.type.startsWith('image/')) continue
-      if (attachments.filter((a) => a.kind === 'image').length >= MAX_IMAGES) break
-      const image = await readImage(file).catch(() => null)
-      if (image) attachments = [...attachments, image]
-    }
+    attachments = await withImages(attachments, files)
   }
 
   function onPaste(event: ClipboardEvent) {
-    const files = [...(event.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'))
+    const files = imageFiles(event.clipboardData?.files)
     if (files.length === 0) return
     event.preventDefault()
     void addImages(files)
   }
 
   function onDrop(event: DragEvent) {
-    const files = [...(event.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'))
+    const files = imageFiles(event.dataTransfer?.files)
     if (files.length === 0) return
     event.preventDefault()
     void addImages(files)
+  }
+
+  /** The paperclip's "Workspace file…": type the @ that opens the picker. */
+  function startFilePick() {
+    const at = box?.selectionStart ?? text.length
+    const before = text.slice(0, at)
+    const insert = before && !/\s$/.test(before) ? ' @' : '@'
+    text = before + insert + text.slice(at)
+    caret = before.length + insert.length
+    fileDismissed = false
+    void Promise.resolve().then(() => {
+      resize()
+      box?.focus()
+      box?.setSelectionRange(caret, caret)
+    })
   }
 
   function trackCaret() {
@@ -295,26 +284,7 @@
       {/if}
     </div>
   {/if}
-  {#if attachments.length}
-    <div class="attachments">
-      {#each attachments as attachment, i (i)}
-        <span class="attachment" title={attachment.kind === 'selection' ? attachment.text.slice(0, 400) : attachmentLabel(attachment)}>
-          {#if attachment.kind === 'image'}
-            <img src={attachment.dataUrl} alt={attachment.name} />
-          {:else}
-            <Icon name="file" size={12} />
-          {/if}
-          <span class="label">{attachmentLabel(attachment)}</span>
-          <button type="button" class="remove" aria-label="Remove {attachmentLabel(attachment)}" onclick={() => removeAttachment(i)}>
-            <Icon name="x" size={10} />
-          </button>
-        </span>
-      {/each}
-    </div>
-    {#if imagesBlocked}
-      <div class="note">This model cannot read images. Remove them to send, or load a model that can.</div>
-    {/if}
-  {/if}
+  <AttachmentChips {attachments} {imagesBlocked} onRemove={removeAttachment} />
   <textarea
     bind:this={box}
     bind:value={text}
@@ -332,6 +302,7 @@
     onpaste={onPaste}
   ></textarea>
   <div class="bar">
+    <AttachButton disabled={!session.canSend} onImages={(files) => void addImages(files)} onWorkspaceFile={startFilePick} />
     <button
       type="button"
       class="chip"
@@ -343,6 +314,7 @@
       <span>{session.project ? session.project.name : 'No project'}</span>
     </button>
     <span class="model" title={session.serverUrl ?? ''}>{session.model ?? ''}</span>
+    <ContextMeter usage={viewState.conversation.context} />
     {#if session.busy}
       <button type="button" class="secondary" onclick={() => post({ type: 'abort' })}>
         <Icon name="stop" size={12} />Stop
@@ -378,23 +350,6 @@
     outline: none;
   }
   textarea:disabled { opacity: 0.6; }
-  .attachments { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 6px 0; }
-  .attachment {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    max-width: 100%;
-    padding: 2px 4px 2px 6px;
-    font-size: 0.8em;
-    border: 1px solid var(--ys-card-border);
-    border-radius: 10px;
-    background: var(--ys-card);
-  }
-  .attachment img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
-  .attachment .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .remove { display: flex; padding: 2px; color: inherit; background: none; border: none; border-radius: 50%; cursor: pointer; opacity: 0.6; }
-  .remove:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
-  .note { padding: 4px 8px 0; font-size: 0.8em; color: var(--vscode-editorWarning-foreground); }
   .bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px; }
   .chip {
     display: flex;
@@ -436,7 +391,7 @@
     z-index: 5;
     border-radius: 6px;
     border: 1px solid var(--vscode-widget-border, var(--ys-card-border));
-    background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background));
+    background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
     box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
   }
   .option {

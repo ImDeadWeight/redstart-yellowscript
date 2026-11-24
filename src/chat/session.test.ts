@@ -4,7 +4,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { ChatSession, RESUME_PROMPT, type SessionDeps } from './session.ts'
+import { ChatSession, RESUME_PROMPT, outputTail, type SessionDeps } from './session.ts'
+import { applyHostMessage, initialViewState } from '../webview/view-model.ts'
 import { BackgroundProcesses } from '../tools/process-runner.ts'
 import type { HostMessage } from './protocol.ts'
 import type { ChatCompletionRequest, NestClient, StreamHandlers, StreamResult } from '../nest/client.ts'
@@ -474,6 +475,64 @@ describe('ChatSession with tools', () => {
 
     const turn = h.session.snapshot().find((message) => message.role === 'assistant')
     assert.match(turn?.content ?? '', /It says 42\./)
+  })
+
+  test('records the turn in order, and the panel rebuilds the same order from the stream', async () => {
+    // think → say → call (no server id, twice across rounds) → think → answer.
+    let round = 0
+    const script: StreamScript = async (_req, handlers) => {
+      round++
+      if (round <= 2) {
+        handlers.onReasoning?.(`plan ${round}`)
+        handlers.onContent?.(`looking ${round}`)
+        // No id: the loop synthesises one, which must differ between rounds.
+        return emptyResult({
+          content: `looking ${round}`,
+          reasoning: `plan ${round}`,
+          toolCalls: [{ index: 0, function: { name: 'ys_read_file', arguments: '{"path":"note.txt"}' } }],
+        })
+      }
+      handlers.onReasoning?.('got it')
+      handlers.onContent?.('It ')
+      handlers.onContent?.('says 42.')
+      return emptyResult({ content: 'It says 42.', reasoning: 'got it', timings: { prompt_n: 100, cache_n: 900, predicted_n: 20 } })
+    }
+    const h = withTools(script)
+    await h.session.send('read it twice')
+
+    const turn = h.session.snapshot().find((m) => m.role === 'assistant')!
+    assert.deepEqual(
+      turn.parts?.map((p) => (p.kind === 'tool' ? 'tool' : `${p.kind}:${p.text}`)),
+      ['reasoning:plan 1', 'text:looking 1', 'tool', 'reasoning:plan 2', 'text:looking 2', 'tool', 'reasoning:got it', 'text:It says 42.'],
+    )
+    const ids = turn.parts!.filter((p) => p.kind === 'tool').map((p) => (p as { callId: string }).callId)
+    assert.equal(new Set(ids).size, 2, 'each round trip\'s call keeps its own card')
+    assert.equal(turn.tools?.length, 2)
+    assert.ok(turn.tools!.every((t) => t.status === 'done'))
+
+    // The webview, applying exactly what was emitted, arrives at the same turn.
+    let view = initialViewState()
+    view = { ...view, conversationId: 'test' }
+    for (const message of h.emitted) view = applyHostMessage(view, message)
+    const drawn = view.messages.find((m) => m.role === 'assistant')!
+    assert.deepEqual(drawn.parts, turn.parts)
+    assert.deepEqual(drawn.tools?.map((t) => [t.callId, t.status]), turn.tools?.map((t) => [t.callId, t.status]))
+
+    // And the context meter reads the last request: prompt + cached + reply.
+    assert.equal(turn.stats?.contextTokens, 1_020)
+    assert.equal(view.conversation.context?.used, 1_020)
+  })
+
+  test('a command card carries the end of its output', () => {
+    assert.equal(outputTail('ok\r\n'), 'ok')
+    assert.equal(outputTail('   '), undefined)
+    const long = Array.from({ length: 2_000 }, (_, i) => `line ${i}`).join('\n')
+    const tail = outputTail(`Exit code 1 · 2.0s\n${long}`, 100)!
+    // The head line (how it ended) survives the cut.
+    assert.ok(tail.startsWith('Exit code 1 · 2.0s\n…\n'))
+    assert.ok(tail.endsWith('line 1999'))
+    // Cut on a line break, not mid-line.
+    assert.match(tail.split('\n')[2]!, /^line \d+$/)
   })
 
   test('emits tool/call and tool/result carrying the turn id', async () => {

@@ -21,6 +21,7 @@ import type {
   AnswerView,
   ChatMessageView,
   ConversationState,
+  ContextUsageView,
   HostMessage,
   PlanStepView,
   AttachmentView,
@@ -38,6 +39,7 @@ import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext, ToolEffect } from '../tools/types.ts'
 import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
 import { userContent } from './attachments.ts'
+import { appendPart } from './turn-parts.ts'
 
 /** Outbound protocol messages, before the owning conversation's id is tagged
  *  on. Distributes the `conversationId` omission across the union so callers can
@@ -137,6 +139,11 @@ export class ChatSession {
   private inFlight: InFlightRun | null = null
   /** A run from an earlier window that never ended: offered to continue. */
   private interrupted: InFlightRun | null = null
+  /** Tokens the last request filled (prompt, cached, reply); null: none yet
+   *  this window, so the last saved turn's stats stand in. */
+  private contextUsed: number | null = null
+  /** Times the running (or last) run trimmed old results to fit. */
+  private trimmed = 0
 
   constructor(deps: SessionDeps) {
     this.deps = deps
@@ -193,7 +200,22 @@ export class ChatSession {
       atTurnLimit: this.limitWait !== null,
       approval: this.approvals.view(),
       interrupted: this.interrupted ? { startedAt: this.interrupted.startedAt, processes: this.interrupted.processes.map((p) => p.command) } : null,
+      context: this.contextUsage(),
     }
+  }
+
+  /** The context meter: the last request's size against the window. */
+  private contextUsage(): ContextUsageView | null {
+    let used = this.contextUsed
+    if (used === null) {
+      for (let i = this.messages.length - 1; i >= 0 && used === null; i--) {
+        const tokens = this.messages[i]!.stats?.contextTokens
+        if (typeof tokens === 'number') used = tokens
+      }
+    }
+    if (used === null) return null
+    const size = this.deps.context?.()?.contextSize ?? null
+    return { used, size, ...(this.trimmed ? { trimmed: this.trimmed } : {}) }
   }
 
   /** The running turn's record, for persistence; null when idle. */
@@ -416,16 +438,23 @@ export class ChatSession {
       const handlers = {
         onContent: (chunk: string) => {
           turn.content += chunk
+          turn.parts = appendPart(turn.parts, { kind: 'text', text: chunk })
           this.emit({ type: 'turn/delta', id: turn.id, channel: 'content', text: chunk })
         },
         onReasoning: (chunk: string) => {
           turn.reasoning = (turn.reasoning ?? '') + chunk
+          turn.parts = appendPart(turn.parts, { kind: 'reasoning', text: chunk })
           this.emit({ type: 'turn/delta', id: turn.id, channel: 'reasoning', text: chunk })
         },
         onModel: (model: string) => {
           this.model = model
         },
+        onTimings: (timings: StreamTimings) => {
+          const used = contextTokens(timings)
+          if (used !== undefined) this.contextUsed = used
+        },
       }
+      this.trimmed = 0
 
       // The seam. With tools available the turn becomes a loop — stream,
       // execute, feed results back — and without them it stays the single
@@ -461,7 +490,15 @@ export class ChatSession {
             ...(this.deps.maxTurns ? { maxIterations: this.deps.maxTurns() } : {}),
             handlers: {
               ...handlers,
-              ...(this.deps.onContextTrimmed ? { onContextTrimmed: this.deps.onContextTrimmed } : {}),
+              onContextTrimmed: (report: FitReport) => {
+                this.trimmed++
+                this.emitState()
+                this.deps.onContextTrimmed?.(report)
+              },
+              // Each new request: the meter shows what the last one filled.
+              onIteration: (iteration: number) => {
+                if (iteration > 1) this.emitState()
+              },
               onToolCall: (call, recovered) => {
                 const card: ToolCardView = {
                   callId: call.id,
@@ -471,6 +508,7 @@ export class ChatSession {
                   status: 'running',
                 }
                 turn.tools = [...(turn.tools ?? []), card]
+                turn.parts = appendPart(turn.parts, { kind: 'tool', callId: call.id })
                 this.emit({
                   type: 'tool/call',
                   turnId: turn.id,
@@ -482,6 +520,8 @@ export class ChatSession {
               },
               onToolResult: (call, toolResult) => {
                 const effect = toolResult.effect
+                const showsOutput = (effect?.kind === 'command' && effect.ran) || (!toolResult.isError && readsProcessOutput(call.function.name, call.function.arguments))
+                const output = showsOutput ? outputTail(toolResult.content) : undefined
                 if (effect) {
                   effects.push(effect)
                   turn.run = [...effects]
@@ -500,6 +540,7 @@ export class ChatSession {
                         status: toolResult.isError ? 'error' : 'done',
                         summary: toolResult.summary,
                         truncated: toolResult.truncated,
+                        ...(output ? { output } : {}),
                       }
                     : card,
                 )
@@ -512,6 +553,7 @@ export class ChatSession {
                   isError: toolResult.isError,
                   truncated: toolResult.truncated,
                   ...(toolResult.effect ? { effect: toolResult.effect } : {}),
+                  ...(output ? { output } : {}),
                 })
               },
             },
@@ -539,6 +581,7 @@ export class ChatSession {
         turn.error = 'The model returned an empty response.'
       }
 
+      this.emitState()
       this.emit({
         type: 'turn/completed',
         id: turn.id,
@@ -713,8 +756,37 @@ function buildStats(timings: StreamTimings | undefined, finishReason: string | u
   if (rate !== null) stats.tokensPerSecond = rate
   if (typeof timings?.prompt_n === 'number') stats.promptTokens = timings.prompt_n
   if (typeof timings?.predicted_n === 'number') stats.completionTokens = timings.predicted_n
+  const used = timings ? contextTokens(timings) : undefined
+  if (used !== undefined) stats.contextTokens = used
   if (finishReason) stats.finishReason = finishReason
   return Object.keys(stats).length > 0 ? stats : undefined
+}
+
+/** What a request filled of the window: its prompt, cached or not, and the reply. */
+function contextTokens(timings: StreamTimings): number | undefined {
+  if (typeof timings.prompt_n !== 'number') return undefined
+  return timings.prompt_n + (timings.cache_n ?? 0) + (timings.predicted_n ?? 0)
+}
+
+/** The most a command card shows of its output: the end, where the result is. */
+export const OUTPUT_TAIL_CHARS = 6_000
+
+/** A command's output for its card: the first line (the exit code, how it
+ *  ended) and the end of the rest, cut on a line break. */
+export function outputTail(text: string, max = OUTPUT_TAIL_CHARS): string | undefined {
+  const trimmed = text.replace(/\r\n/g, '\n').trimEnd()
+  if (!trimmed) return undefined
+  if (trimmed.length <= max) return trimmed
+  const nl = trimmed.indexOf('\n')
+  const head = nl === -1 ? '' : trimmed.slice(0, nl)
+  const tail = trimmed.slice(-max)
+  const cut = tail.indexOf('\n')
+  return `${head ? `${head}\n` : ''}…\n${cut >= 0 && cut < 400 ? tail.slice(cut + 1) : tail}`
+}
+
+/** A process `output` read: shown on its card like a command's. */
+function readsProcessOutput(name: string, args: string): boolean {
+  return name === 'ys_process' && /"action"\s*:\s*"output"/.test(args)
 }
 
 /** Turn an exception into something worth putting in front of a user. */

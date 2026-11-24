@@ -11,6 +11,7 @@ out/
 # stale without hurting anyone.
 docs/STATUS.md
 
-sample-workspace/.yellowscript/
-sample-workspace/create hello.html
+# The sample workspace is a local playground for trying Yellowscript; what
+# the agent builds there is not part of this repo.
+sample-workspace/
 bench/results/

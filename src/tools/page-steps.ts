@@ -8,7 +8,7 @@
 // model need not hold a browser session across turns.
 //
 // This file parses and validates what the model sent, and knows how keys
-// map to DevTools key events. Running them is browser-check.ts's job.
+// map to DevTools key events. Running them is browser/page-check.ts's job.
 // No `vscode` import.
 // =============================================================================
 

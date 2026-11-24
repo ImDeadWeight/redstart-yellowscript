@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { after, describe, test } from 'node:test'
 
 import { loadTasks, runCheck, runTask, summarize } from './harness.ts'
-import { findBrowser } from '../tools/browser-check.ts'
+import { findBrowser } from '../browser/cdp.ts'
 import type { CompletionStreamer } from '../agent/loop.ts'
 import type { ChatCompletionRequest, StreamResult } from '../nest/client.ts'
 

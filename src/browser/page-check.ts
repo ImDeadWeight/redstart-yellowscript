@@ -1,70 +1,39 @@
 // =============================================================================
-// ys_check_page — load a page in a headless browser and report what happened.
+// Loading a page in a headless browser and reporting what happened.
 // =============================================================================
 // A model writing a canvas game or a website cannot see it run. This loads the
-// page in a browser the machine already has (Edge, Chrome or Chromium, run
-// headless with a throwaway profile), lets it run for a moment, and returns
+// page, lets it run for a moment, runs the steps it was given, and returns
 // what a developer would look at first:
 //
 // - uncaught exceptions and console errors and warnings (the game loop that
 //   throws on its third frame shows up here),
 // - requests that failed (a 404 on a sprite or a script),
 // - a DOM summary: title, canvases and their sizes, the visible text,
-// - a screenshot, saved for the person, and given to the model only when it
-//   can read images.
-//
-// It speaks the Chrome DevTools Protocol over Node's built-in WebSocket, so it
-// needs no npm dependency and no browser download.
+// - screenshots.
 //
 // SCOPE: only loopback URLs (a dev server on this machine) and files inside the
-// workspace. It is a read-only check of the user's own work, not a web browser
-// for the model, so there is nothing to approve and nothing it can reach out to.
+// workspace (resolveTarget). The tool that exposes this to the model is
+// tools/check-page-tool.ts.
 //
 // No `vscode` import.
 // =============================================================================
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { killTree } from './command-run.ts'
-import { assertWorkspaceToolName, stringArg, toolError, toolOk, type Tool, type ToolContext, type ToolResult } from './types.ts'
-import { PathScopeError, resolveWithinWorkspace } from './workspace-path.ts'
-import { EVAL_TIMEOUT_MS, MAX_EVAL_CHARS, describeStep, keyEvent, parseSteps, parseViewport, type PageStep } from './page-steps.ts'
+import { Cdp, launch } from './cdp.ts'
+import { killTree } from '../tools/command-run.ts'
+import { EVAL_TIMEOUT_MS, MAX_EVAL_CHARS, describeStep, keyEvent, type PageStep } from '../tools/page-steps.ts'
+import { PathScopeError, resolveWithinWorkspace } from '../tools/workspace-path.ts'
 
 export const DEFAULT_WAIT_MS = 2_000
 export const MAX_WAIT_MS = 15_000
 const LOAD_TIMEOUT_MS = 15_000
 const MAX_EVENTS = 40
 const MAX_TEXT_CHARS = 1_500
-
-/** Where browsers usually live; the first that exists is used. */
-export function browserCandidates(platform = process.platform, env = process.env): string[] {
-  const fromEnv = env.YELLOWSCRIPT_BROWSER ? [env.YELLOWSCRIPT_BROWSER] : []
-  if (platform === 'win32') {
-    const roots = [env['PROGRAMFILES(X86)'], env.PROGRAMFILES, env.LOCALAPPDATA].filter((r): r is string => !!r)
-    return [
-      ...fromEnv,
-      ...roots.map((r) => path.join(r, 'Microsoft', 'Edge', 'Application', 'msedge.exe')),
-      ...roots.map((r) => path.join(r, 'Google', 'Chrome', 'Application', 'chrome.exe')),
-    ]
-  }
-  if (platform === 'darwin') {
-    return [
-      ...fromEnv,
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    ]
-  }
-  return [...fromEnv, '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge', '/snap/bin/chromium']
-}
-
-export function findBrowser(candidates = browserCandidates()): string | null {
-  return candidates.find((p) => fs.existsSync(p)) ?? null
-}
 
 /** The URL to load, or why it may not be loaded. */
 export function resolveTarget(target: string, roots: readonly string[]): { url: string } | { error: string } {
@@ -130,106 +99,6 @@ export interface PageCheck {
   /** The `eval` expression's JSON value, or why it failed. */
   evaluation?: { ok: boolean; text: string }
   viewport?: string
-}
-
-/** A minimal CDP client over one browser WebSocket, flat sessions. */
-class Cdp {
-  private nextId = 1
-  private readonly pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>()
-  private readonly listeners: Array<(method: string, params: any, sessionId?: string) => void> = []
-  private readonly ws: WebSocket
-
-  constructor(ws: WebSocket) {
-    this.ws = ws
-    ws.addEventListener('message', (event) => {
-      const msg = JSON.parse(String(event.data))
-      if (typeof msg.id === 'number') {
-        const p = this.pending.get(msg.id)
-        if (!p) return
-        this.pending.delete(msg.id)
-        if (msg.error) p.reject(new Error(msg.error.message ?? 'CDP error'))
-        else p.resolve(msg.result)
-      } else if (msg.method) {
-        for (const l of this.listeners) l(msg.method, msg.params, msg.sessionId)
-      }
-    })
-  }
-
-  static connect(url: string): Promise<Cdp> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url)
-      ws.addEventListener('open', () => resolve(new Cdp(ws)), { once: true })
-      ws.addEventListener('error', () => reject(new Error('could not connect to the browser')), { once: true })
-    })
-  }
-
-  send(method: string, params: object = {}, sessionId?: string): Promise<any> {
-    const id = this.nextId++
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-      this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
-    })
-  }
-
-  on(listener: (method: string, params: any, sessionId?: string) => void): void {
-    this.listeners.push(listener)
-  }
-
-  close(): void {
-    try {
-      this.ws.close()
-    } catch {
-      // closing anyway
-    }
-  }
-}
-
-/** Start the browser and resolve with its DevTools WebSocket URL. */
-function launch(browser: string, profile: string): Promise<{ child: ChildProcess; wsUrl: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      browser,
-      [
-        '--headless=new',
-        '--disable-gpu',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-extensions',
-        '--mute-audio',
-        '--window-size=1280,800',
-        '--remote-debugging-port=0',
-        `--user-data-dir=${profile}`,
-        'about:blank',
-      ],
-      { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
-    )
-    let stderr = ''
-    const timer = setTimeout(() => {
-      killTree(child)
-      reject(new Error('the browser did not start within 15s'))
-    }, LOAD_TIMEOUT_MS)
-    child.stderr?.setEncoding('utf8')
-    child.stderr?.on('data', (chunk: string) => {
-      stderr += chunk
-      const m = /DevTools listening on (ws:\/\/\S+)/.exec(stderr)
-      if (m) {
-        clearTimeout(timer)
-        // Nothing more is read from stderr; a held pipe would keep Node alive.
-        child.stderr?.removeAllListeners('data')
-        child.stderr?.destroy()
-        child.unref()
-        resolve({ child, wsUrl: m[1]! })
-      }
-    })
-    child.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      reject(new Error(`the browser exited (code ${code}) before it was ready`))
-    })
-  })
 }
 
 /** What the page shows, evaluated inside it. */
@@ -474,100 +343,4 @@ export function formatPageCheck(check: PageCheck, screenshotPath: string | null)
   if (check.summary) lines.push('--- page ---', check.summary)
   if (screenshotPath) lines.push(`Screenshot saved to ${screenshotPath}.`)
   return lines.join('\n')
-}
-
-export interface CheckPageDeps {
-  /** The browser to drive, or null when none was found. */
-  browser: () => string | null
-  /** Where screenshots are saved (absolute directory), or null to not save. */
-  screenshotDir: () => string | null
-}
-
-export function createCheckPageTool(deps: CheckPageDeps): Tool {
-  return {
-    definition: {
-      name: assertWorkspaceToolName('ys_check_page'),
-      description:
-        'Load a page headless and report exceptions, console errors, failed requests and what it shows ' +
-        '(title, canvases, text), with a screenshot. Steps act on it after load, in order; eval reads a value ' +
-        'after them. A game: {"steps": [{"key": "ArrowRight", "hold_ms": 800}, {"key": "Space"}], "eval": ' +
-        '"window.__game.player"} (a game exposes its state as window.__game). A form: {"steps": [{"type": "hi", "into": "#q"}, {"click": "#go"}, ' +
-        '{"wait_for": ".results li"}]}.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          target: { type: 'string', description: 'http://localhost:… URL, or a workspace .html path.' },
-          wait_s: { type: 'number', description: "Seconds to run after load, so a game loop's errors show (default 2, max 15)." },
-          steps: {
-            type: 'array',
-            description: 'One action each: key (+hold_ms), click (selector or [x, y]), type (+into), wait_ms, wait_for, screenshot, inspect.',
-            items: { type: 'object' },
-          },
-          eval: { type: 'string', description: 'A JS expression; its JSON value is reported.' },
-          viewport: { type: 'string', description: 'e.g. "390x844".' },
-        },
-        required: ['target'],
-        additionalProperties: false,
-      },
-    },
-    async execute(args: unknown, context: ToolContext): Promise<ToolResult> {
-      const target = stringArg(args, 'target')
-      if (!target) return toolError('ys_check_page requires a "target": a localhost URL or a workspace HTML file.')
-      const resolved = resolveTarget(target, context.workspaceRoots)
-      if ('error' in resolved) return toolError(resolved.error)
-      const browser = deps.browser()
-      if (!browser) {
-        return toolError(
-          'No Chrome, Edge or Chromium was found on this machine, so the page cannot be checked. ' +
-            'Set the YELLOWSCRIPT_BROWSER environment variable to a browser executable.',
-        )
-      }
-      const waitS = Number((args as { wait_s?: unknown })?.wait_s)
-      const o = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-      const parsed = parseSteps(o.steps)
-      if ('error' in parsed) return toolError(parsed.error)
-      const viewport = parseViewport(o.viewport)
-      if (viewport && 'error' in viewport) return toolError(viewport.error)
-      const expression = typeof o.eval === 'string' && o.eval.trim() ? o.eval : undefined
-      let check: PageCheck
-      try {
-        check = await checkPage({
-          url: resolved.url,
-          browser,
-          ...(Number.isFinite(waitS) ? { waitMs: waitS * 1000 } : {}),
-          ...(parsed.steps.length ? { steps: parsed.steps } : {}),
-          ...(expression ? { evaluate: expression } : {}),
-          ...(viewport ? { viewport } : {}),
-        })
-      } catch (err) {
-        return toolError(`The page check failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-      let saved: string | null = null
-      const dir = deps.screenshotDir()
-      if (check.screenshot && dir) {
-        try {
-          fs.mkdirSync(dir, { recursive: true })
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-          // The labelled ones are for the person; only the last goes to the model.
-          for (const shot of check.shots ?? []) fs.writeFileSync(path.join(dir, `page-${stamp}-${shot.label}.png`), Buffer.from(shot.data, 'base64'))
-          saved = path.join(dir, `page-${stamp}.png`)
-          fs.writeFileSync(saved, Buffer.from(check.screenshot, 'base64'))
-        } catch {
-          saved = null
-        }
-      }
-      const order: PageEvent['kind'][] = ['exception', 'error', 'request-failed']
-      const problems = check.events.filter((e) => order.includes(e.kind)).sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))
-      const failedStep = check.steps?.find((s) => !s.ok)
-      const result = toolOk(formatPageCheck(check, saved), `ys_check_page — ${failedStep ? 'a step failed' : problems.length ? 'problems found' : 'no errors'}`)
-      result.effect = {
-        kind: 'check',
-        target: resolved.url,
-        problems: problems.length + (check.loaded ? 0 : 1) + (failedStep ? 1 : 0),
-        first: !check.loaded ? 'did not finish loading' : failedStep ? `step ${failedStep.step} failed: ${failedStep.error}` : (problems[0]?.text.split('\n')[0]!.slice(0, 160) ?? null),
-      }
-      if (check.screenshot) result.images = [`data:image/png;base64,${check.screenshot}`]
-      return result
-    },
-  }
 }

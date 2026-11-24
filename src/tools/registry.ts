@@ -39,7 +39,7 @@ import { repairJson, type RepairKind } from './argument-repair.ts'
 import { checkWrite, stricter, type WriteVerdict } from './protected-paths.ts'
 import * as fs from 'node:fs'
 import type { BackgroundProcesses } from './background-processes.ts'
-import { createCheckPageTool, type CheckPageDeps } from './browser-check.ts'
+import { createCheckPageTool, type CheckPageDeps } from './check-page-tool.ts'
 
 /** One entry of the OpenAI-compatible `tools` array. */
 export interface ToolPayloadEntry {

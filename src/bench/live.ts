@@ -33,7 +33,8 @@ import { runAgentLoop } from '../agent/loop.ts'
 import { ContextTracker } from '../agent/context-budget.ts'
 import { createToolRegistry } from '../tools/registry.ts'
 import { BackgroundProcesses } from '../tools/background-processes.ts'
-import { createCheckPageTool, findBrowser } from '../tools/browser-check.ts'
+import { findBrowser } from '../browser/cdp.ts'
+import { createCheckPageTool } from '../tools/check-page-tool.ts'
 
 const baseUrl = process.env.YELLOWSCRIPT_TEST_LIVE_NEST
 const token = process.env.YELLOWSCRIPT_TEST_TOKEN

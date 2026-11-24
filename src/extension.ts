@@ -21,7 +21,7 @@ import {
   type DiscoveredNest,
 } from './nest/discovery.ts'
 import { ChatSession } from './chat/session.ts'
-import { findBrowser } from './tools/browser-check.ts'
+import { findBrowser } from './browser/cdp.ts'
 import { buildWorkspaceContext } from './tools/workspace-context.ts'
 import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'

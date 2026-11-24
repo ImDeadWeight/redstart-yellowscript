@@ -58,11 +58,12 @@ export function original(taskDir, rel) {
  * `evaluate` are as ys_check_page takes them; the result has `evaluation`.
  */
 export async function checkPageHeadless(url, { steps, evaluate, waitMs = 1_500 } = {}) {
-  const mod = await import(new URL('../../../src/tools/browser-check.ts', import.meta.url).href)
+  const { findBrowser } = await import(new URL('../../../src/browser/cdp.ts', import.meta.url).href)
+  const { checkPage } = await import(new URL('../../../src/browser/page-check.ts', import.meta.url).href)
   const { parseSteps } = await import(new URL('../../../src/tools/page-steps.ts', import.meta.url).href)
-  const browser = mod.findBrowser()
+  const browser = findBrowser()
   if (!browser) return null
   const parsed = parseSteps(steps)
   if (parsed.error) throw new Error(parsed.error)
-  return mod.checkPage({ url, browser, waitMs, screenshot: false, steps: parsed.steps, ...(evaluate ? { evaluate } : {}) })
+  return checkPage({ url, browser, waitMs, screenshot: false, steps: parsed.steps, ...(evaluate ? { evaluate } : {}) })
 }

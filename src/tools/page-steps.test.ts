@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import * as http from 'node:http'
 
 import { MAX_STEPS, describeStep, keyEvent, parseSteps, parseViewport } from './page-steps.ts'
-import { createCheckPageTool, findBrowser } from './browser-check.ts'
+import { findBrowser } from '../browser/cdp.ts'
+import { createCheckPageTool } from './check-page-tool.ts'
 
 describe('parseSteps', () => {
   test('each kind of step', () => {

@@ -34,12 +34,10 @@ import {
   type ConversationView,
   type HostMessage,
   type PageName,
-  type ProjectView,
   type SessionSnapshot,
-  type WorkflowView,
   tabLabel,
 } from './chat/protocol.ts'
-import { NestClient, normalizeBaseUrl, type NestProject } from './nest/client.ts'
+import { NestClient, normalizeBaseUrl } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider, type Surface } from './ui/chat-view.ts'
@@ -74,6 +72,7 @@ import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
 import { conversationStore, isBlank, type Conversation, type HistoryEntry } from './ui/conversation-store.ts'
+import { createProjects, type Projects } from './host/projects.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -90,10 +89,8 @@ let pendingSidebarConversation: string | null = null
 /** The currently signed-in account username, used to scope conversation history.
  *  Set from `/auth/me` on connect/sign-in; cleared on sign-out/disconnect. */
 let currentAccountId: string | null = null
-/** Where the workspace's project link is kept (per workspace, like the tabs). */
-let workspaceMemento: vscode.Memento | undefined
-/** The account's workflows, from the last prompts/list. */
-let workflowCache: WorkflowView[] = []
+/** This workspace's Nest project, and the account's workflows. */
+let projects!: Projects
 /** One ChatSession per conversation, keyed by conversation id. Tabs own their
  *  own transcript and request lifecycle, so switching tabs is a pure view
  *  change and a running turn keeps streaming in its own tab. */
@@ -136,7 +133,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(commandChannel, { dispose: () => void backgroundProcesses?.stopAll() })
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
-  workspaceMemento = context.workspaceState
 
   const pruned = conversations.prune(14)
   if (pruned > 0) {
@@ -166,6 +162,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await chatView?.reveal()
     },
     signOut: () => signOutCommand(),
+  })
+  projects = createProjects({
+    connection: manager,
+    account: () => currentAccountId,
+    store: context.workspaceState,
+    post: (to, message) => chatView?.postTo(to, message),
+    mcp: () => mcpHost,
+    onLinkChanged: () => pushSession(),
+    send: (from, text, workflow) => sendTo(from, text, workflow),
   })
 
   // The ys_* tools. Built at activation so a missing ripgrep is a known,
@@ -300,17 +305,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     onOpenHistory: (from) => pushHistoryPanel(from),
     onOpenPage: (from, page) => {
-      if (page === 'projects') void pushProjects(from)
-      else void pushWorkflows(from)
+      if (page === 'projects') void projects.push(from)
+      else void projects.pushWorkflows(from)
     },
     onLinkProject: (from, id) => {
-      void linkProject(from, id)
+      void projects.link(from, id)
     },
     onCreateProject: (from, name) => {
-      void createProjectFromPanel(from, name)
+      void projects.create(from, name)
     },
     onRunWorkflow: (from, name, args) => {
-      void runWorkflow(from, name, args)
+      void projects.runWorkflow(from, name, args)
     },
     onAnswer: (from, id, answer) => {
       if (from.conversationId) getSession(from.conversationId).answer(id, answer)
@@ -612,7 +617,7 @@ function getSession(id: string): ChatSession {
         const registry = mergedTools ?? tools
         return buildWorkspaceContext(root, undefined, {
           ...(registry ? { tools: registry.names } : {}),
-          project: linkedProject()?.name ?? null,
+          project: projects.linked()?.name ?? null,
         })
       },
       liveState: () => (backgroundProcesses ? describeRunning(backgroundProcesses.list()) : null),
@@ -687,7 +692,7 @@ function getSession(id: string): ChatSession {
             })(pending)
           : Promise.resolve(null),
       conversationId: id,
-      projectId: () => linkedProject()?.id ?? null,
+      projectId: () => projects.linked()?.id ?? null,
       onPersist: () => persistConversation(id),
       emit: (message) => {
         // A task is one user message's run: it starts when that message runs
@@ -819,142 +824,13 @@ function snapshot(id: string | null): SessionSnapshot {
   if ('url' in state && state.url) base.serverUrl = state.url
   const model = session?.currentModel
   if (model) base.model = model
-  const project = connected ? linkedProject() : null
+  const project = connected ? projects.linked() : null
   if (project) base.project = { id: project.id, name: project.name }
   const tracker = connected ? contextFor(manager?.activeClient ?? null) : null
   if (tracker) base.vision = tracker.vision
   const configured = config().get<string>('serverUrl', '').trim()
   if (configured) base.configuredUrl = configured
   return base
-}
-
-// ---------------------------------------------------------------------------
-// Projects — this workspace's link to a Nest project
-// ---------------------------------------------------------------------------
-// Conversations stay in the workspace; the PROJECT is what is shared with the
-// other Redstart apps: its instructions and memories reach the model because
-// every request names it (`redstart_project`), and Nest checks the caller may
-// read it. The link is kept per workspace and is only valid for the server and
-// account it was made with: another Nest, or another account, starts unlinked.
-
-const PROJECT_LINK_KEY = 'redstartYellowscript.projectLink'
-
-interface ProjectLink {
-  server: string
-  account: string
-  id: string
-  name: string
-}
-
-function linkScope(): { server: string; account: string } | null {
-  const state = manager?.state
-  if (!state || state.status !== 'connected' || !('url' in state) || !state.url) return null
-  return { server: state.url, account: currentAccountId ?? '' }
-}
-
-function linkedProject(): ProjectLink | null {
-  const scope = linkScope()
-  const link = workspaceMemento?.get<ProjectLink>(PROJECT_LINK_KEY)
-  if (!scope || !link) return null
-  return link.server === scope.server && link.account === scope.account ? link : null
-}
-
-async function pushProjects(to: Surface): Promise<void> {
-  const client = manager?.activeClient
-  const linkedId = linkedProject()?.id ?? null
-  chatView?.postTo(to, { type: 'projects', projects: null, linkedId })
-  if (!client) {
-    chatView?.postTo(to, { type: 'projects', projects: [], linkedId, error: 'Not connected to a Nest.' })
-    return
-  }
-  try {
-    const { projects } = await client.listProjects()
-    // A linked project that is gone (deleted in the chat app) is unlinked
-    // here, so the panel does not claim a project the requests no longer get.
-    if (linkedId && !projects.some((p) => p.id === linkedId)) {
-      await workspaceMemento?.update(PROJECT_LINK_KEY, undefined)
-      pushSession()
-    }
-    chatView?.postTo(to, {
-      type: 'projects',
-      projects: projects.map(toProjectView),
-      linkedId: linkedProject()?.id ?? null,
-    })
-  } catch (err) {
-    chatView?.postTo(to, { type: 'projects', projects: [], linkedId, error: describeError(err, 'Could not load projects') })
-  }
-}
-
-function toProjectView(p: NestProject): ProjectView {
-  const view: ProjectView = { id: p.id, name: p.name }
-  const instructions = p.instructions?.trim()
-  if (instructions) view.instructions = instructions.length > 160 ? `${instructions.slice(0, 159)}…` : instructions
-  if (p.folder) view.folder = p.folder
-  return view
-}
-
-async function linkProject(from: Surface, id: string | null): Promise<void> {
-  const scope = linkScope()
-  if (!scope) return
-  if (id === null) {
-    await workspaceMemento?.update(PROJECT_LINK_KEY, undefined)
-  } else {
-    const client = manager?.activeClient
-    const project = client ? (await client.listProjects().catch(() => ({ projects: [] as NestProject[] }))).projects.find((p) => p.id === id) : undefined
-    if (!project) {
-      chatView?.postTo(from, { type: 'notice', level: 'error', message: 'That project is no longer on the Nest.' })
-      return
-    }
-    const link: ProjectLink = { ...scope, id: project.id, name: project.name }
-    await workspaceMemento?.update(PROJECT_LINK_KEY, link)
-  }
-  pushSession()
-  await pushProjects(from)
-}
-
-async function createProjectFromPanel(from: Surface, name: string): Promise<void> {
-  const client = manager?.activeClient
-  if (!client) return
-  try {
-    const project = await client.createProject(name)
-    await linkProject(from, project.id)
-  } catch (err) {
-    chatView?.postTo(from, { type: 'notice', level: 'error', message: describeError(err, 'Could not create the project') })
-    await pushProjects(from)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Workflows — the account's saved instructions, run from `/` or the page
-// ---------------------------------------------------------------------------
-
-async function pushWorkflows(to: Surface): Promise<void> {
-  if (!mcpHost) {
-    chatView?.postTo(to, { type: 'workflows', workflows: [], error: 'Workflows need the Nest connection. Try reconnecting.' })
-    return
-  }
-  try {
-    workflowCache = (await mcpHost.listPrompts()).map((p) => ({ ...p, arguments: p.arguments.map((a) => ({ ...a })) }))
-    chatView?.postTo(to, { type: 'workflows', workflows: workflowCache })
-  } catch (err) {
-    chatView?.postTo(to, { type: 'workflows', workflows: [], error: describeError(err, 'Could not load workflows') })
-  }
-}
-
-async function runWorkflow(from: Surface, name: string, args: Record<string, string>): Promise<void> {
-  if (!mcpHost) return
-  try {
-    // Nest composes the text from its own copy of the workflow.
-    const text = await mcpHost.getPrompt(name, args)
-    const title = workflowCache.find((w) => w.name === name)?.title ?? name
-    sendTo(from, text, { name, title })
-  } catch (err) {
-    chatView?.postTo(from, { type: 'notice', level: 'error', message: describeError(err, `Could not run the workflow "${name}"`) })
-  }
-}
-
-function describeError(err: unknown, lead: string): string {
-  return `${lead}: ${err instanceof Error ? err.message : String(err)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,8 +1045,8 @@ function showPage(page: PageName): void {
     const target = to ?? chatView?.sidebar()
     if (!target) return
     chatView?.postTo(target, { type: 'showPage', page })
-    if (page === 'projects') void pushProjects(target)
-    else void pushWorkflows(target)
+    if (page === 'projects') void projects.push(target)
+    else void projects.pushWorkflows(target)
   })
 }
 
@@ -1859,7 +1735,7 @@ function connectMcpHost(): void {
                   await callWithApproval(t.name, args, approvalInfo(t.meta), {
                     ...approvals,
                     ...(asker ? { prompt: (request) => promptInChat(request, asker.askApproval) } : {}),
-                    call: (meta) => host.callToolResult(t.name, args, withProjectMeta(meta, linkedProject()?.id)),
+                    call: (meta) => host.callToolResult(t.name, args, withProjectMeta(meta, projects.linked()?.id)),
                   })
                 ).text
               },

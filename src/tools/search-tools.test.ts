@@ -86,6 +86,13 @@ describe('ys_glob — degraded mode', () => {
     const result = await tool.execute({ pattern: '**/*.rs' }, ctx)
     assert.equal(result.isError, false)
     assert.match(result.content, /No files match/)
+    assert.doesNotMatch(result.content, /folder/)
+  })
+
+  test('no file matches, but a folder does: it says so (Crestline: vitest-examples/)', async () => {
+    const result = await tool.execute({ pattern: '**/*deep*' }, ctx)
+    assert.equal(result.isError, false)
+    assert.match(result.content, /No files match "\*\*\/\*deep\*"\. It matches a folder, though: src\/deep\/\. List one with ys_list_directory\./)
   })
 
   test('refuses a negated pattern rather than returning everything else', async () => {

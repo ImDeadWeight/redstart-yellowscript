@@ -166,6 +166,8 @@ export interface StagnationLimits {
   minSentenceWords: number
   theorizingChars: number
   reversals: number
+  /** Reasoning characters reversals also need before they fire. */
+  reversalChars: number
 }
 
 export interface StagnationMonitor {

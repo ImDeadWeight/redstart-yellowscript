@@ -201,6 +201,11 @@ export function looksLikePrompt(tail: string): string | null {
     .filter((l) => l.trim() !== '')
   if (lines.length === 0) return null
   const last = lines[lines.length - 1]!.trim()
+  // clack's outro (`└  You're all set!`) means the run finished. An open
+  // question's box closes with a bare └. Until 2026-11-24 the ◆ above a
+  // success ("◆  Successfully setup add-ons: vitest") read as a question,
+  // and the model was told a working `sv add` had done nothing.
+  if (/^└\s*\S/u.test(last)) return null
   const clean = (l: string) => l.replace(/^[\s│|◆◇●○◯❯>?✔✖•*-]+/u, '').trim()
   if (/\((y\/n|yes\/no)\)|\[(y\/n|yes\/no)\]/i.test(last)) return clean(last)
   if (/press (enter|return|any key)/i.test(last)) return clean(last)
@@ -211,6 +216,10 @@ export function looksLikePrompt(tail: string): string | null {
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 12); i--) {
     const line = lines[i]!.trim()
     if (/^[◆?]\s+\S/u.test(line)) {
+      // A question asks something, or offers choices under it (radios,
+      // checkboxes, the arrow-key hint); "◆  Successfully …" does neither.
+      const below = lines.slice(i + 1).join('\n')
+      if (!/\?/.test(line) && !/\?\s*$/m.test(below) && !/[○◯◻◼]|↑\/↓|›/u.test(below)) continue
       // The header, and the question under it when it is on its own line:
       // "Directory not empty: … Continue?".
       const question = lines

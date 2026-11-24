@@ -113,7 +113,15 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
         // Say why a match might be missing: a model that does not know ignored
         // files are excluded will keep re-running the same search.
         const why = degraded ? '' : ' Files excluded by .gitignore are not searched.'
-        return toolOk(`No files match "${pattern}".${why}`, `ys_glob "${pattern}" — no matches`)
+        // ys_glob matches files. A folder the pattern names is worth saying:
+        // in the Crestline run `**/*vitest*` found nothing, though
+        // src/lib/vitest-examples/ was there, and the model concluded vitest
+        // had never been added.
+        const folders = await matchingFolders(roots, pattern, context.signal)
+        const also = folders.length
+          ? ` It matches ${folders.length === 1 ? 'a folder' : 'these folders'}, though: ${folders.map((f) => `${f}/`).join(', ')}. List one with ys_list_directory.`
+          : ''
+        return toolOk(`No files match "${pattern}".${also}${why}`, `ys_glob "${pattern}" — no matches${folders.length ? `, ${folders.length} folder(s)` : ''}`)
       }
 
       const note = truncated ? `\n\n[stopped at ${MAX_GLOB_RESULTS} results — narrow the pattern]` : ''
@@ -124,6 +132,28 @@ export function createGlobTool(ripgrepPath: string | null): Tool {
       return toolOk(text, `ys_glob "${pattern}" — ${found.length} file(s)`, truncated)
     },
   }
+}
+
+/** Up to five folders whose path matches `pattern`, found from the files under them. */
+export async function matchingFolders(roots: readonly string[], pattern: string, signal?: AbortSignal): Promise<string[]> {
+  const matcher = globToRegExp(pattern)
+  const out: string[] = []
+  for (const root of roots) {
+    const walked = await walkFiles(root, { ...(signal ? { signal } : {}) })
+    const prefix = roots.length > 1 ? `${path.basename(root)}/` : ''
+    const seen = new Set<string>()
+    for (const file of walked.files) {
+      const parts = file.split('/')
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join('/')
+        if (seen.has(dir)) continue
+        seen.add(dir)
+        if (matcher.test(dir)) out.push(`${prefix}${dir}`)
+        if (out.length >= 5) return out
+      }
+    }
+  }
+  return out
 }
 
 interface GlobOutcome {

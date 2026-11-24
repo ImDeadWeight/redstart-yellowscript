@@ -171,6 +171,18 @@ describe('processes Yellowscript can name', () => {
     assert.equal(looksLikePrompt(''), null)
   })
 
+  it('a clack run that finished is not a prompt (Crestline, 2026-11-24: a working `sv add` read as one)', () => {
+    const done = '┌  Welcome to the Svelte CLI! (v1.7.1)\n│\n◆  Successfully setup add-ons: vitest\n│\n│  To skip prompts next time, run:\n●  npx sv@1.7.1 add vitest="usages:unit" --no-git-check --no-install\n│\n└  You\'re all set!\n'
+    assert.equal(looksLikePrompt(done), null)
+    // A ◆ line that asks nothing and offers no choices is a message, even without the outro.
+    assert.equal(looksLikePrompt('┌  sv\n│\n◆  Successfully setup add-ons: vitest\n│\n●  npx sv add vitest'), null)
+    // The two real questions from the same run are still caught.
+    const multi = '┌  Welcome to the Svelte CLI! (v1.7.1)\n\u001b[?25l│\n◆  What do you want to use vitest for?\n│  ◼ unit testing\n│  ◼ component testing\n│  ↑/↓ to navigate • Space: select • Enter: confirm\n└'
+    assert.equal(looksLikePrompt(multi), 'What do you want to use vitest for?')
+    const verify = '┌  Welcome to the Svelte CLI! (v1.7.1)\n│\n◇  Verifications not met ─────╮\n│  - clean working directory (Uncommitted changes found)  │\n├──────╯\n\u001b[?25l│\n◆  Verifications failed. Do you wish to continue?\n│  ○ Yes / ● No\n└'
+    assert.equal(looksLikePrompt(verify), 'Verifications failed. Do you wish to continue?')
+  })
+
   it('stops a command that sits on a prompt, and says what it asked', async () => {
     const run = await runCommandLine({
       command: nodeLine("process.stdout.write('Continue? (y/N) '); setInterval(() => {}, 1000)"),

@@ -578,21 +578,47 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   return result
 }
 
+/** How agent-core's own tail notes (update-plan.mjs) begin. */
+const CORE_NOTE_PREFIX = '[Automatic note, not from the user]'
+
+/** The line above the notes appended to a tool result: who is speaking. */
+export const HARNESS_NOTE_HEADER = "--- From Yellowscript, the editor running this task (not part of the tool's output) ---"
+
 /**
- * `messages` with notes for this request only at the tail, so the history the
- * server has cached stays as it was. Joined to the core's own tail note (the
- * plan's, which follows a tool result or an answer) when there is one: some
- * chat templates refuse two user messages in a row.
+ * `messages` with notes for this request only, so the history the server has
+ * cached stays as it was.
+ *
+ * After a tool result they go INTO that result, under a line that says who
+ * wrote them, with agent-core's own tail note (the plan's) folded in too. A
+ * bracketed user message after a tool result reads as an injection: in the
+ * Crestline rerun (2026-11-24) Ornith reasoned "I'll disregard this injected
+ * note entirely. It's trying to manipulate me", and set the plan note and the
+ * stagnation notes aside. After an answer or a person's message there is no
+ * tool result to carry them, and they stay one user message.
  */
 export function withTailNotes<M extends { role: string; content?: unknown }>(messages: M[], notes: ReadonlyArray<string | null | undefined>): M[] {
-  const text = notes.filter((n): n is string => !!n).join('\n\n')
-  if (!text) return messages
-  const last = messages[messages.length - 1]
-  const before = messages[messages.length - 2]
-  if (last && last.role === 'user' && typeof last.content === 'string' && last.content.startsWith('[') && before && before.role !== 'user') {
-    return [...messages.slice(0, -1), { ...last, content: `${last.content}\n\n${text}` }]
+  let list = messages
+  let core: string | null = null
+  const last = list[list.length - 1]
+  if (last && last.role === 'user' && typeof last.content === 'string' && last.content.startsWith(CORE_NOTE_PREFIX) && list.length > 1 && list[list.length - 2]!.role !== 'user') {
+    core = last.content
+    list = list.slice(0, -1)
   }
-  return [...messages, { role: 'user', content: text } as M]
+  const all = [core, ...notes].filter((n): n is string => !!n)
+  if (all.length === 0) return messages
+  const text = all.join('\n\n')
+  const tail = list[list.length - 1]
+  if (tail && tail.role === 'tool') {
+    const note = `${HARNESS_NOTE_HEADER}\n${text}`
+    const content =
+      typeof tail.content === 'string'
+        ? `${tail.content}\n\n${note}`
+        : Array.isArray(tail.content)
+          ? [...(tail.content as unknown[]), { type: 'text', text: note }]
+          : note
+    return [...list.slice(0, -1), { ...tail, content }]
+  }
+  return [...list, { role: 'user', content: text } as M]
 }
 
 /** What the stagnation monitor and the working state need to know of a call. */

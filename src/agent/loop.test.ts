@@ -13,6 +13,7 @@ import {
   STAGNATION_OFF,
   withHostTools,
   withTailNotes,
+  HARNESS_NOTE_HEADER,
   type CompletionStreamer,
 } from './loop.ts'
 import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
@@ -677,7 +678,7 @@ describe('runAgentLoop — long runs', () => {
     assert.ok(result.toolRuns.every((r) => !r.result.content.startsWith('[Earlier result')))
     // What the stubbed reads showed rides at the tail as the working state.
     const tail = String(lastRequest.messages.at(-1)!.content)
-    assert.match(tail, /^\[Working state of this run/)
+    assert.match(tail, /--- From Yellowscript[^\n]*\n\[Working state of this run/)
     assert.match(tail, /ys_read_file big\.txt: /)
     // Not before anything was trimmed.
     assert.ok(!client.requests[0]!.messages.some((m) => String(m.content).includes('[Working state')))
@@ -838,11 +839,13 @@ describe('runAgentLoop — a run that is going nowhere', () => {
       handlers: { onRecovery: (r) => seen.push(`${r.detector}:${r.level}`) },
     })
     assert.deepEqual(seen, ['same-failure:1'])
+    // In the last tool result, under a line saying who wrote it: not a user message.
     const tail = client.requests[3]!.messages.at(-1)!
-    assert.equal(tail.role, 'user')
-    assert.match(String(tail.content), /You seem to be stuck.*cannot assign to constant.*Quote the failing observation exactly/s)
-    // A note for one request only: the next one does not carry it.
-    assert.ok(!String(client.requests[2]!.messages.at(-1)!.content).includes('You seem to be stuck'))
+    assert.equal(tail.role, 'tool')
+    assert.match(String(tail.content), /Cannot assign to constant\n\n--- From Yellowscript, the editor running this task[^\n]*\n\[You seem to be stuck.*Quote the failing observation exactly/s)
+    // A note for one request only: the stored history does not carry it.
+    assert.ok(!client.requests[2]!.messages.some((m) => String(m.content).includes('You seem to be stuck')))
+    assert.ok(!result.toolRuns.some((r) => r.result.content.includes('You seem to be stuck')))
     assert.equal(result.recoveries.length, 1)
     assert.equal(result.stopReason, 'complete')
   })
@@ -890,6 +893,8 @@ describe('runAgentLoop — a run that is going nowhere', () => {
     const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onRecovery: (r) => seen.push(r.detector) } })
     assert.deepEqual(seen, ['reasoning-loop'])
     assert.equal(requests.length, 2)
+    // No tool result yet: the note is a user message.
+    assert.equal(requests[1]!.messages.at(-1)!.role, 'user')
     assert.match(String(requests[1]!.messages.at(-1)!.content), /going in a circle/)
     assert.equal(result.content, 'Fixed.')
     assert.equal(result.stopReason, 'complete')
@@ -899,19 +904,32 @@ describe('runAgentLoop — a run that is going nowhere', () => {
 
 describe('withTailNotes', () => {
   const tool = { role: 'tool', content: 'result' }
-  test('adds the notes as one user message at the end', () => {
-    assert.deepEqual(withTailNotes([tool], ['a', null, 'b']).at(-1), { role: 'user', content: 'a\n\nb' })
+  const planNote = '[Automatic note, not from the user] Current plan:\n[>] Write the tests'
+  test('after a tool result, the notes go into it, under a line that says who wrote them', () => {
+    const out = withTailNotes([tool], ['a', null, 'b'])
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.content, `result\n\n${HARNESS_NOTE_HEADER}\na\n\nb`)
     const same = [tool]
     assert.equal(withTailNotes(same, [null, '']), same, 'nothing to add: the same array')
+    // The stored message is not edited.
+    assert.equal(tool.content, 'result')
   })
-  test("joins the core's own tail note instead of adding a second user message", () => {
-    const withPlan = [tool, { role: 'user', content: '[Plan: step 2 of 3]' }]
-    const out = withTailNotes(withPlan, ['note'])
-    assert.equal(out.length, 2)
-    assert.equal(out[1]!.content, '[Plan: step 2 of 3]\n\nnote')
-    // A person's own message is never edited.
-    const person = [{ role: 'user', content: '[x] do it' }]
-    assert.equal(withTailNotes(person, ['note']).length, 2)
+  test("agent-core's plan note is folded into the tool result too, not left as a user message", () => {
+    const out = withTailNotes([tool, { role: 'user', content: planNote }], ['note'])
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.content, `result\n\n${HARNESS_NOTE_HEADER}\n${planNote}\n\nnote`)
+    // Alone, it moves as well.
+    assert.equal(withTailNotes([tool, { role: 'user', content: planNote }], []).length, 1)
+  })
+  test('a result with image parts gets a text part', () => {
+    const out = withTailNotes([{ role: 'tool', content: [{ type: 'text', text: 'shot' }, { type: 'image_url' }] }], ['n'])
+    assert.deepEqual((out[0]!.content as unknown[]).at(-1), { type: 'text', text: `${HARNESS_NOTE_HEADER}\nn` })
+  })
+  test("with no tool result (after an answer, or a person's message) the notes stay a user message", () => {
+    assert.deepEqual(withTailNotes([{ role: 'assistant', content: 'done' }], ['n']).at(-1), { role: 'user', content: 'n' })
+    // A person's own message is never edited, even when it starts like a note.
+    const person = [{ role: 'user', content: '[Automatic note, not from the user] mine' }]
+    assert.equal(withTailNotes(person, ['n']).length, 2)
   })
 })
 

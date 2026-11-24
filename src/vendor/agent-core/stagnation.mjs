@@ -66,8 +66,12 @@ export const STAGNATION_LIMITS = Object.freeze({
 	minSentenceWords: 5,
 	/** e: reasoning characters since the last new evidence that fire. */
 	theorizingChars: 40_000,
-	/** e: self-reversals since the last new evidence that fire. */
-	reversals: 8
+	/** e: self-reversals since the last new evidence that fire, once there is
+	 *  also `reversalChars` of reasoning: a model that says "wait" and
+	 *  "actually" as a habit fit 8 into 4k characters (Ornith on Crestline,
+	 *  2026-11-24) without being stuck. */
+	reversals: 8,
+	reversalChars: 15_000
 });
 
 /**
@@ -103,7 +107,9 @@ export const DEBUGGING_PROCEDURE =
  * @typedef {object} Recovery
  * @property {Detector} detector
  * @property {1 | 2 | 3} level 1 note, 2 refuse the repeated action, 3 stop
- * @property {string} evidence what was seen, in one or two sentences
+ * @property {string} evidence what was seen, in one or two sentences, in no
+ *   one's voice: the model's note wraps it in "you", the person's summary in
+ *   "I", and a host's timeline line shows it bare
  * @property {string} note what the model reads (levels 1 and 2), or the person (level 3)
  * @property {boolean} stop the run should end here
  * @property {string} [action] what is refused until new evidence (level 2): an
@@ -334,6 +340,10 @@ export function createStagnationMonitor(overrides = {}) {
 	let reversals = 0;
 
 	let level = 0;
+	/** Since the last firing: a write applied, and a command that newly worked.
+	 *  Both, and the run made real headway: the next firing starts over at 1. */
+	let wroteSinceFiring = false;
+	let newSuccessSinceFiring = false;
 	/** @type {string | null} the action refused until new evidence */
 	let blocked = null;
 	/** @type {Recovery[]} */
@@ -352,6 +362,13 @@ export function createStagnationMonitor(overrides = {}) {
 	 * @returns {Recovery}
 	 */
 	const fire = (detector, evidence, action) => {
+		// Real headway since the last firing (it wrote something, and a command
+		// that had not worked now does): this is a new problem, not the old
+		// one again. Also what keeps a firing that was wrong from making the
+		// next one harsher.
+		if (wroteSinceFiring && newSuccessSinceFiring) level = 0;
+		wroteSinceFiring = false;
+		newSuccessSinceFiring = false;
 		level = Math.min(3, level + 1);
 		const lvl = /** @type {Recovery['level']} */ (level);
 		const refuse = action ?? BLOCKED_KIND[detector] ?? 'kind:write';
@@ -457,6 +474,7 @@ export function createStagnationMonitor(overrides = {}) {
 				// A command that works and had not been run before is news too.
 				if (call.kind === 'command' && !succeeded.has(family)) {
 					succeeded.add(family);
+					newSuccessSinceFiring = true;
 					progress();
 				}
 				// New evidence lifts a refusal: a read, diagnostics, a search
@@ -487,6 +505,7 @@ export function createStagnationMonitor(overrides = {}) {
 			}
 			for (const write of outcome.writes ?? []) {
 				writesApplied++;
+				wroteSinceFiring = true;
 				progress();
 				const list = versions.get(write.path) ?? (write.before !== undefined ? [hash(write.before)] : []);
 				const next = hash(write.after);
@@ -531,7 +550,7 @@ export function createStagnationMonitor(overrides = {}) {
 					const example = [...counts].sort((x, y) => y[1] - x[1])[0][0];
 					return fire(
 						'reasoning-loop',
-						`Your reasoning is going in a circle: of your last ${sentences.length} sentences, ${repeats} repeat earlier ones (for example "${example.slice(0, 80)}", ${top} times).`
+						`The reasoning is going in a circle: of the last ${sentences.length} sentences, ${repeats} repeat earlier ones (for example "${example.slice(0, 80)}", ${top} times).`
 					);
 				}
 			}
@@ -553,10 +572,10 @@ export function createStagnationMonitor(overrides = {}) {
 			const failure = sameFailure();
 			if (failure) recovery = fire('same-failure', failure.evidence, failure.action);
 			else if (oscillation) recovery = fire('oscillation', oscillation, oscillationPath);
-			else if (charsSinceEvidence >= limits.theorizingChars || reversals >= limits.reversals) {
+			else if (charsSinceEvidence >= limits.theorizingChars || (reversals >= limits.reversals && charsSinceEvidence >= limits.reversalChars)) {
 				recovery = fire(
 					'theorizing',
-					`You have written ${Math.round(charsSinceEvidence / 1000)}k characters of reasoning${reversals ? ` and changed your mind ${reversals} times` : ''} since anything new came back from a tool.`
+					`${Math.round(charsSinceEvidence / 1000)}k characters of reasoning${reversals ? `, with ${reversals} changes of mind,` : ''} since anything new came back from a tool.`
 				);
 			} else if (roundsWithoutProgress >= limits.noProgressRounds) {
 				recovery = fire('no-progress', `The last ${roundsWithoutProgress} rounds found no new error, read no new file and wrote nothing.`);

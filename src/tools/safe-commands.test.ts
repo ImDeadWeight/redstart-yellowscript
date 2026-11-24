@@ -213,3 +213,52 @@ test('a line that ends processes always asks, and never offers Always', () => {
   assert.equal(endsProcesses('npm test'), false)
   assert.deepEqual(pidsIn('taskkill /pid 20092 /pid 8080 /T /F'), [20092, 8080])
 })
+
+describe('&& chains, part by part', () => {
+  /** A context that can move: `at` keeps everything but the folder. */
+  const moving = (over: Partial<CommandContext> = {}): CommandContext => {
+    const base = ctx(over)
+    return { ...base, at: (cwd) => moving({ ...over, cwd }) }
+  }
+  const classify = (line: string, over: Partial<CommandContext> = {}) => classifyCommand(line, moving(over))
+
+  test('cd into a workspace folder, then a safe command: runs unasked, judged from that folder', () => {
+    for (const line of ['cd app && dir', 'cd app && ls -la', 'cd app && cat package.json', 'cd app && git status', 'pwd && ls']) {
+      assert.equal(classify(line).tier, 'A', `${line}: ${JSON.stringify(classify(line))}`)
+    }
+    // The project's own check, from the folder it was cd'd to (Crestline: `cd Crestline && npm run check`).
+    const check = classify('cd app && npm run lint')
+    assert.equal(check.tier, 'B', JSON.stringify(check))
+    // Windows: cd /d, and backslashes.
+    assert.equal(classify('cd /d app && dir .svelte-kit\generated', { platform: 'win32', cwd: 'C:\ws', roots: ['C:\ws'] }).tier, 'A')
+  })
+
+  test('a cd that leaves the workspace, or a part that is not safe, asks', () => {
+    assert.equal(classify(`cd ${sibling} && ls`).tier, 'C')
+    assert.equal(classify('cd .. && ls').tier, 'C')
+    assert.equal(classify('cat a && rm b').tier, 'C')
+    // Without a context that can move, a chain that changes folder asks.
+    assert.equal(classifyCommand('cd app && ls', ctx()).tier, 'C')
+    // Only &&: a pipe or a redirect anywhere still asks, quotes or not.
+    for (const line of ['cd app && ls | sh', 'cd app && ls > out.txt', 'cd app; ls', 'cd app || ls']) assert.equal(classify(line).tier, 'C', line)
+    // && inside quotes is not split on, and the line is not judged part by part: it asks.
+    assert.equal(classify('echo "a && b"').tier, 'C')
+  })
+
+  test('one part that asks is named, so "Always allow" can be offered for it alone', () => {
+    const install = classify('cd app && npm install')
+    assert.ok(install.tier === 'C' && install.asks === 'npm install', JSON.stringify(install))
+    // Two parts that ask: the whole line asks, and nothing is named.
+    const two = classify('cd app && npm install && node build.js')
+    assert.ok(two.tier === 'C' && two.asks === undefined, JSON.stringify(two))
+    // A part that discards work keeps its "asked every time".
+    const discard = classify('cd app && git reset --hard')
+    assert.ok(discard.tier === 'C' && discard.neverAlways && discard.asks === undefined, JSON.stringify(discard))
+  })
+})
+
+test("tasklist lists this machine's processes unasked; another machine's asks", () => {
+  assert.equal(tier('tasklist /FO CSV /NH', { platform: 'win32' }), 'A')
+  assert.equal(tier('tasklist /FI "IMAGENAME eq node.exe" /FO TABLE', { platform: 'win32' }), 'A')
+  assert.equal(tier('tasklist /S server01', { platform: 'win32' }), 'C')
+})

@@ -199,7 +199,8 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
     const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
     return (
       `Commands (ys_run_command, ys_process) run in Windows ${shell}, not bash: use dir, type, ` +
-      'findstr, cd (no ls, cat, rm, pwd, grep, true). Node, npm and npx work as usual. ' +
+      'findstr, cd (no ls, cat, rm, pwd, grep, true), and backslashes in paths (cmd reads dir a/b as dir a /b). ' +
+      'Node, npm and npx work as usual. ' +
       FILES_NOTE
     )
   }
@@ -210,8 +211,9 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
  *  changing files belongs to the ys_ tools, which checkpoint; and where the
  *  processes it started are. */
 const FILES_NOTE =
-  'Read-only commands and the project\'s test, build and lint scripts run without asking; a chained or piped ' +
-  'line asks. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir. ' +
+  'Read-only commands and the project\'s test, build and lint scripts run without asking, and so does a line ' +
+  'chained with && when each part would; a piped or redirected line asks. To run in a subfolder, pass "cwd" ' +
+  'instead of starting with cd. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir. ' +
   'Commands cannot answer prompts: pass the non-interactive flag (--yes, -y, …); one that waits for input is stopped. ' +
   'Every process you start gets an id (c1 for a command, p1 for a background one) and its pid in the result, and ' +
   'ys_process {"action":"list"} shows them all; do not look for your processes with tasklist, Get-Process or ps, ' +

@@ -68,3 +68,11 @@ describe('a command that ended on a prompt', () => {
     }
   })
 })
+
+describe('a cmd.exe "Invalid switch"', () => {
+  it('says that a / in a path is a switch there', () => {
+    const run = { exitCode: 1, signal: null, stdout: '', stderr: 'Invalid switch - "generated".', durationMs: 100, timedOut: false }
+    assert.match(formatCommandRun(run), /write paths with backslashes/)
+    assert.doesNotMatch(formatCommandRun({ ...run, stderr: 'not found' }), /backslashes/)
+  })
+})

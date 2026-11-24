@@ -67,9 +67,12 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
     // except for a line that discards work, which asks every time.
     const safe = tier && tier.tier !== 'C' ? tier : null
     const neverAlways = tier?.tier === 'C' ? tier.neverAlways : undefined
-    const allowedAlready = !safe && !neverAlways && isCommandAllowed(pending.command, allowedCommands())
+    // In a chain whose other parts are safe (`cd app && npm install`), the
+    // one part that asks is what "Always allow" is offered for and matched on.
+    const asked = tier?.tier === 'C' && tier.asks ? tier.asks : pending.command
+    const allowedAlready = !safe && !neverAlways && isCommandAllowed(asked, allowedCommands())
     if (!safe && !allowedAlready) {
-      const prefix = neverAlways ? null : allowPrefixFor(pending.command)
+      const prefix = neverAlways ? null : allowPrefixFor(asked)
       const choice = await deps.ask({
         kind: 'command',
         title: pending.background ? 'Start a command in the background' : 'Run a command',

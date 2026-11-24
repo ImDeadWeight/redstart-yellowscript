@@ -124,6 +124,11 @@ export function formatCommandRun(run: CommandRun): string {
   if (stdout) parts.push(`--- stdout ---\n${capHeadTail(stdout)}`)
   if (stderr) parts.push(`--- stderr ---\n${capHeadTail(stderr)}`)
   if (!stdout && !stderr && !run.spawnError) parts.push('(no output)')
+  // cmd.exe reads `dir .svelte-kit/generated` as the switch /generated; the
+  // bare error sent the model through three tries (Crestline, 2026-11-24).
+  if (/Invalid switch - /i.test(`${stdout}\n${stderr}`)) {
+    parts.push('[cmd.exe reads a "/" in a path as a switch ("dir a/b" is "dir a /b"): write paths with backslashes.]')
+  }
   return parts.join('\n')
 }
 

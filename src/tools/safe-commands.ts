@@ -65,6 +65,9 @@ export interface CommandContext {
   localBin(name: string): boolean
   /** A secrets file (protected-paths.ts) lies under this directory. */
   hasSecretsUnder(dir: string): boolean
+  /** The same context in another folder: what a chain's `cd` moves to.
+   *  Absent: a chain that changes folder asks. */
+  at?(cwd: string): CommandContext
 }
 
 export type CommandTier =
@@ -82,6 +85,10 @@ export type CommandTier =
       reason: string
       /** Set for lines that discard work: asked every time, no "Always allow". */
       neverAlways?: string
+      /** In a `&&` chain whose other parts are all safe: the one part that
+       *  asks. "Always allow" is offered for it, and an allowed prefix is
+       *  matched against it. */
+      asks?: string
     }
 
 const c = (reason: string, neverAlways?: string): CommandTier => (neverAlways ? { tier: 'C', reason, neverAlways } : { tier: 'C', reason })
@@ -320,6 +327,8 @@ function tierA(program: string, args: readonly string[], ctx: CommandContext): C
   if (program === 'pwd' && args.length === 0) return { tier: 'A', rule: 'where am I (pwd)' }
   if (program === 'cd' && args.length === 0) return { tier: 'A', rule: 'where am I (cd)' }
   if (program === 'echo') return { tier: 'A', rule: 'echo' }
+  // What is running, on this machine only (/s, /u and /p reach another).
+  if (program === 'tasklist' && !args.some((x) => /^\/(s|u|p)$/i.test(x))) return { tier: 'A', rule: 'listing processes (tasklist)' }
   if ((program === 'where' || program === 'which') && positional.length > 0 && positional.every((a) => !/[\\/:]/.test(a))) return { tier: 'A', rule: `where am I (${program})` }
   if (program === 'command' && args[0] === '-v' && args.length === 2 && !/[\\/]/.test(args[1]!)) return { tier: 'A', rule: 'where am I (command -v)' }
 
@@ -493,7 +502,11 @@ export function pidsIn(line: string): number[] {
 
 /** The tier of one command line. */
 export function classifyCommand(line: string, ctx: CommandContext): CommandTier {
-  if (SHELL_COMPOSITION.test(line)) return c('the line chains, pipes or redirects')
+  if (SHELL_COMPOSITION.test(line)) {
+    // `a && b`, and nothing else: each part on its own.
+    const chain = andChain(line, ctx.platform)
+    return chain ? classifyChain(chain, ctx) : c('the line pipes, redirects, or chains other than with &&')
+  }
   if (EXPANSION.test(line)) return c('the line uses shell expansion ($, %, !, ^, braces or ~)')
   if (ctx.platform === 'win32' && line.includes("'")) return c("cmd.exe does not treat ' as a quote")
   const words = splitWords(line, ctx.platform)
@@ -516,6 +529,108 @@ export function classifyCommand(line: string, ctx: CommandContext): CommandTier 
   const b = packageScript(program, args, ctx) ?? localTool(program, args, ctx) ?? otherChecks(program, args, ctx)
   if (b && b.tier === 'B') return ctx.projectChecks ? b : c("running the project's checks without asking is turned off")
   return b ?? a ?? c('not on the safe lists')
+}
+
+// --- && chains ----------------------------------------------------------------
+
+/**
+ * The parts of a line joined only by `&&` outside quotes, or null when it
+ * composes any other way (a pipe, `;`, `||`, a redirect, a subshell).
+ */
+export function andChain(line: string, platform: NodeJS.Platform): string[] | null {
+  const parts: string[] = []
+  let current = ''
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (quote) {
+      if (ch === quote) quote = null
+      current += ch
+    } else if (ch === '"' || (ch === "'" && platform !== 'win32')) {
+      quote = ch
+      current += ch
+    } else if (ch === '&' && line[i + 1] === '&') {
+      parts.push(current)
+      current = ''
+      i++
+    } else {
+      current += ch
+    }
+  }
+  if (quote) return null
+  parts.push(current)
+  const trimmed = parts.map((p) => p.trim())
+  if (trimmed.length < 2 || trimmed.some((p) => p === '' || SHELL_COMPOSITION.test(p))) return null
+  return trimmed
+}
+
+/** A `cd` part: the folder it moves to, a refusal, or null when it is not a cd. */
+function cdStep(part: string, ctx: CommandContext): { to: string } | CommandTier | null {
+  const words = splitWords(part, ctx.platform)
+  const program = words?.[0]?.toLowerCase()
+  if (!words || (program !== 'cd' && program !== 'chdir')) return null
+  if (EXPANSION.test(part)) return c('cd uses shell expansion')
+  let args = words.slice(1)
+  const switchesDrive = ctx.platform === 'win32' && args[0]?.toLowerCase() === '/d'
+  if (switchesDrive) args = args.slice(1)
+  if (args.length === 0) return { to: ctx.cwd }
+  if (args.length > 1) return c('cd is given more than one folder')
+  const to = path.resolve(ctx.cwd, args[0]!)
+  if (!inside(ctx.roots, to)) return c(`cd ${args[0]} leaves the workspace`)
+  // cmd.exe's cd changes another drive's folder without moving there.
+  if (ctx.platform === 'win32' && !switchesDrive && path.parse(to).root.toLowerCase() !== path.parse(ctx.cwd).root.toLowerCase()) {
+    return c('cd to another drive without /d does not move there')
+  }
+  return { to }
+}
+
+/**
+ * A `&&` chain, part by part: safe when every part would be on its own, with
+ * a leading `cd` into a workspace folder moving where the rest is judged
+ * from. Models write `cd Crestline && npm run check` for nearly everything
+ * (2026-11-24), and as a whole line it asked every time, with no "Always
+ * allow". When exactly one part asks, the tier says which (`asks`).
+ */
+function classifyChain(parts: readonly string[], ctx: CommandContext): CommandTier {
+  let here = ctx
+  const rules: string[] = []
+  const lines: string[] = []
+  let rewritten = false
+  let env: Record<string, string> | undefined
+  let projectCheck = false
+  let asking: { part: string; tier: Extract<CommandTier, { tier: 'C' }> } | null = null
+  for (const part of parts) {
+    const moved = cdStep(part, here)
+    if (moved && 'tier' in moved) return moved
+    if (moved) {
+      if (moved.to !== here.cwd) {
+        const next = here.at?.(moved.to)
+        if (!next) return c('the chain changes folder')
+        here = next
+      }
+      lines.push(part)
+      continue
+    }
+    const tier = classifyCommand(part, here)
+    if (tier.tier === 'C') {
+      // Discards work, or a second part that asks: the whole line asks, with no "Always allow".
+      if (tier.neverAlways) return { ...tier, reason: `"${part}": ${tier.reason}` }
+      if (asking) return c(`more than one part asks ("${asking.part}", "${part}")`)
+      asking = { part, tier }
+      lines.push(part)
+      continue
+    }
+    if (tier.tier === 'B') projectCheck = true
+    rules.push(tier.rule)
+    if (tier.run) rewritten = true
+    lines.push(tier.run ?? part)
+    if (tier.env) env = { ...env, ...tier.env }
+  }
+  if (asking) return { tier: 'C', reason: `"${asking.part}": ${asking.tier.reason}`, asks: asking.part }
+  const result: CommandTier = { tier: projectCheck ? 'B' : 'A', rule: rules.join('; ') || 'changing folder (cd)' }
+  if (rewritten) result.run = lines.join(' && ')
+  if (env) result.env = env
+  return result
 }
 
 /** Credentials in URLs (`https://user:token@host`) masked, for the model. */

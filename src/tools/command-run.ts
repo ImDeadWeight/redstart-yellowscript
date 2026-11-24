@@ -101,7 +101,8 @@ export function formatCommandRun(run: CommandRun): string {
       `Stopped after ${seconds}s: it was waiting for input, and a command run here cannot answer a prompt` +
       `${run.waitingForInput ? ` (it asked: "${run.waitingForInput}")` : ''}. It and everything it started have ended. ` +
       'Run it again non-interactively: give the answer as an option (often --yes, -y, --no-interactive or --force, ' +
-      "or the option for that specific question), as the tool's --help describes."
+      "or the option for that specific question), as the tool's --help describes. " +
+      'The person cannot answer it either: ask_user does not reach a running program.'
   else if (run.stopped) head = `Stopped after ${seconds}s, with everything it started.`
   else if (run.timedOut) head = `Timed out after ${seconds}s and was stopped (exit code ${run.exitCode ?? 'none'}). For a server or watcher, use ys_process (action "start").`
   else if (run.exitCode === null) head = `Ended by signal ${run.signal ?? 'unknown'} · ${seconds}s`
@@ -113,7 +114,8 @@ export function formatCommandRun(run: CommandRun): string {
     parts.push(
       `It ended on a prompt nobody could answer ("${run.endedAtPrompt}"), so it took the default and most likely did ` +
         'NOT do the work, whatever the exit code says. Check, then run it again with the answer as an option ' +
-        "(often --yes, -y or --force, or the option for that question, as the tool's --help describes).",
+        "(often --yes, -y or --force, or the option for that question, as the tool's --help describes). " +
+        'The person cannot answer it either: ask_user does not reach a running program.',
     )
   }
   // `git remote -v` and `npm view` can print a token inside a URL.

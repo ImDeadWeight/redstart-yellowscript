@@ -189,9 +189,9 @@ describe('runTask', () => {
     assert.deepEqual([...core.names].sort(), [...CORE_TOOLS].sort())
     // Less, not a sixth: ask_user, update_plan and the core tools' own descriptions are most of it.
     assert.ok(toolListTokens(core) < toolListTokens(full), `${toolListTokens(core)} vs ${toolListTokens(full)}`)
-    const nest = [{ name: 'search_files', description: 'Search', inputSchema: { type: 'object' }, execute: async () => 'x' }]
-    assert.ok(benchTools(base, { catalog: 'core+nest', nestTools: nest }).names.includes('search_files'))
-    assert.ok(!benchTools(base, { catalog: 'core', nestTools: nest }).names.includes('search_files'))
+    const nest = [{ name: 'web_search', description: 'Search the web', inputSchema: { type: 'object' }, execute: async () => 'x' }]
+    assert.ok(benchTools(base, { catalog: 'core+nest', nestTools: nest }).names.includes('web_search'))
+    assert.ok(!benchTools(base, { catalog: 'core', nestTools: nest }).names.includes('web_search'))
     const client = scripted([call('c1', 'read_file', { path: 'src/main.js' }), { content: 'gave up' }])
     const record = await runTask(fixCrash, { client, label: 'scripted', catalog: 'core' })
     assert.equal(record.catalog, 'core')

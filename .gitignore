@@ -12,7 +12,9 @@ out/
 docs/STATUS.md
 
 # The sample workspace is a local playground for trying Yellowscript; what
-# the agent builds there is not part of this repo.
+# the agent builds there is not part of this repo. It is a git repository of
+# its own (`git init` there), so git inside it, and tools that want a clean
+# working tree such as `sv add`, never see this repo's uncommitted changes.
 sample-workspace/
 bench/results/
 # Prepared node_modules for bench tasks (npm run bench:cache).

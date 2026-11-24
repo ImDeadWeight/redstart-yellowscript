@@ -59,3 +59,12 @@ describe('capHeadTail', () => {
     assert.match(capped, /9,006 characters omitted/)
   })
 })
+
+describe('a command that ended on a prompt', () => {
+  it('says that the person cannot answer it either (Crestline: the model asked them to, 2026-11-24)', () => {
+    const base = { exitCode: 0, signal: null, stdout: 'Do you wish to continue?', stderr: '', durationMs: 700, timedOut: false }
+    for (const run of [{ ...base, endedAtPrompt: 'Do you wish to continue?' }, { ...base, exitCode: null, waitingForInput: 'Do you wish to continue?' }]) {
+      assert.match(formatCommandRun(run), /The person cannot answer it either: ask_user does not reach a running program\./)
+    }
+  })
+})

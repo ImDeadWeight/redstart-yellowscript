@@ -56,10 +56,7 @@ import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
 import { nodeCommandContext } from './tools/command-context.ts'
 import { usableReadRoots } from './tools/read-scope.ts'
 import { AttentionTracker, LONG_RUN_MS } from './chat/attention.ts'
-import { MAX_FILE_LINES, attachmentLabel } from './chat/attachments.ts'
-import { formatOutline, outlineOf } from './tools/symbols.ts'
-import { secretReason } from './tools/protected-paths.ts'
-import { resolveWithinWorkspace } from './tools/workspace-path.ts'
+import { attachmentLabel } from './chat/attachments.ts'
 import type { AttachmentView } from './chat/protocol.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { BackgroundProcesses, describeRunning } from './tools/background-processes.ts'
@@ -71,6 +68,7 @@ import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
 import { conversationStore, isBlank, type Conversation, type HistoryEntry } from './ui/conversation-store.ts'
 import { createProjects, type Projects } from './host/projects.ts'
 import { createTasks, type Tasks } from './host/tasks.ts'
+import { FIX_DIAGNOSTIC_COMMAND, createEditorActions, type EditorActions } from './host/editor-actions.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -99,6 +97,8 @@ let sessions = new Map<string, ChatSession>()
 let mergedTools: ToolRegistry | null = null
 /** Each conversation's running task: its trust, its checkpoints, reverting it. */
 let tasks!: Tasks
+/** Attachments, the @ picker, Add Selection and Fix with Yellowscript. */
+let editorActions!: EditorActions
 /** Resolved once — the binary does not move while the window is open, and
  *  probing the filesystem on every search would be wasteful. */
 let ripgrepPath: string | null = null
@@ -194,15 +194,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output.debug(`ripgrep: ${ripgrepPath}`)
   }
 
+  editorActions = createEditorActions({
+    roots: workspaceRoots,
+    symbols: symbolProvider,
+    post: (to, message) => chatView?.postTo(to, message),
+    revealTarget,
+    send: (surface, text, attachments) => sendTo(surface, text, undefined, attachments),
+  })
+
   // A session is created lazily per conversation (see getSession). No singleton
   // here — the tab strip is the source of truth for which conversations exist.
 
   chatView = new ChatViewProvider(context.extensionUri, {
     onSend: (from, text, attachments) => {
-      void resolveAttachments(from, attachments ?? []).then((resolved) => sendTo(from, text, undefined, resolved))
+      void editorActions.resolveAttachments(from, attachments ?? []).then((resolved) => sendTo(from, text, undefined, resolved))
     },
     onSearchFiles: (from, query) => {
-      void searchWorkspaceFiles(query).then((paths) => chatView?.postTo(from, { type: 'fileMatches', query, paths }))
+      void editorActions.searchFiles(query).then((paths) => chatView?.postTo(from, { type: 'fileMatches', query, paths }))
     },
     onAbort: (from) => {
       if (from.conversationId) getSession(from.conversationId).abort()
@@ -415,24 +423,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
     vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', () => tasks.revertLastWrite()),
     vscode.commands.registerCommand('redstartYellowscript.revertLastTask', () => tasks.revertLastTask()),
-    vscode.commands.registerCommand('redstartYellowscript.addSelection', addSelectionToChat),
-    vscode.commands.registerCommand('redstartYellowscript.fixDiagnostic', fixDiagnostic),
-    vscode.languages.registerCodeActionsProvider(
-      { scheme: 'file' },
-      {
-        provideCodeActions: (document, _range, context) =>
-          context.diagnostics
-            .filter((d) => d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning)
-            .slice(0, 1)
-            .map((d) => {
-              const action = new vscode.CodeAction('Fix with Yellowscript', vscode.CodeActionKind.QuickFix)
-              action.command = { command: 'redstartYellowscript.fixDiagnostic', title: 'Fix with Yellowscript', arguments: [document.uri, d] }
-              action.diagnostics = [d]
-              return action
-            }),
-      },
-      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
-    ),
+    vscode.commands.registerCommand('redstartYellowscript.addSelection', () => editorActions.addSelection()),
+    vscode.commands.registerCommand(FIX_DIAGNOSTIC_COMMAND, (uri: vscode.Uri, d: vscode.Diagnostic) => editorActions.fixDiagnostic(uri, d)),
+    vscode.languages.registerCodeActionsProvider({ scheme: 'file' }, editorActions.codeActions, {
+      providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
+    }),
     vscode.commands.registerCommand('redstartYellowscript.showWaiting', () => {
       const id = attention.firstWaiting()
       return id ? showConversation(id) : chatView?.reveal()
@@ -960,6 +955,13 @@ function targetSurface(): Surface | undefined {
   return chatView?.focused() ?? chatView?.sidebar()
 }
 
+/** Bring the chat a command lands in to the front. */
+async function revealTarget(): Promise<Surface | undefined> {
+  const to = targetSurface()
+  await chatView?.reveal(to)
+  return to ?? chatView?.sidebar()
+}
+
 function toViews(list: Conversation[]): ConversationView[] {
   return list.map((c) => {
     const session = sessions.get(c.id)
@@ -1299,93 +1301,6 @@ async function applyServerUrl(entered: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * A message's @file attachments, read now: the content (up to 300 lines) or
- * the outline of a longer file. Files outside the workspace or that may hold
- * secrets are not attached; a notice says so.
- */
-async function resolveAttachments(from: Surface, list: readonly AttachmentView[]): Promise<AttachmentView[]> {
-  const roots = workspaceRoots()
-  const out: AttachmentView[] = []
-  for (const a of list) {
-    if (a.kind !== 'file') {
-      out.push(a)
-      continue
-    }
-    let absolute: string
-    try {
-      absolute = resolveWithinWorkspace(roots, a.path)
-    } catch {
-      chatView?.postTo(from, { type: 'notice', level: 'warning', message: `${a.path} is outside the workspace, so it was not attached.` })
-      continue
-    }
-    if (secretReason(absolute)) {
-      chatView?.postTo(from, { type: 'notice', level: 'warning', message: `${a.path} may hold secrets, so it was not attached.` })
-      continue
-    }
-    try {
-      const text = (await nodeFs.promises.readFile(absolute, 'utf8')).replace(/\r\n/g, '\n')
-      const lines = text.split('\n')
-      if (lines.length <= MAX_FILE_LINES) {
-        out.push({ kind: 'file', path: a.path, content: text.trimEnd(), lines: lines.length })
-      } else {
-        const { symbols } = await outlineOf(symbolProvider, absolute, text)
-        out.push({ kind: 'file', path: a.path, content: formatOutline(symbols, 150).text || '(no symbols found)', lines: lines.length, outline: true })
-      }
-    } catch {
-      out.push({ kind: 'file', path: a.path })
-    }
-  }
-  return out
-}
-
-/** The @ picker: workspace files whose path contains `query`, shortest first. */
-async function searchWorkspaceFiles(query: string): Promise<string[]> {
-  const cleaned = query.replace(/[\\*?{}[\]]/g, '').trim()
-  const pattern = cleaned ? `**/*${cleaned}*` : '**/*'
-  const found = await vscode.workspace.findFiles(pattern, '{**/node_modules/**,**/.git/**,**/.yellowscript/**,**/dist/**,**/out/**}', 200)
-  return found
-    .map((uri) => vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/'))
-    .filter((p) => !secretReason(p))
-    .sort((a, b) => a.length - b.length || a.localeCompare(b))
-    .slice(0, 30)
-}
-
-/** The editor's selection, as a chip in the composer. */
-async function addSelectionToChat(): Promise<void> {
-  const editor = vscode.window.activeTextEditor
-  if (!editor || editor.document.uri.scheme !== 'file') return
-  const selection = editor.selection.isEmpty ? editor.document.lineAt(editor.selection.active.line).range : editor.selection
-  const startLine = selection.start.line + 1
-  const endLine = selection.end.character === 0 && selection.end.line > selection.start.line ? selection.end.line : selection.end.line + 1
-  const range = new vscode.Range(startLine - 1, 0, endLine - 1, editor.document.lineAt(endLine - 1).text.length)
-  const to = targetSurface()
-  await chatView?.reveal(to)
-  const target = to ?? chatView?.sidebar()
-  if (!target) return
-  chatView?.postTo(target, {
-    type: 'addAttachment',
-    attachment: { kind: 'selection', path: vscode.workspace.asRelativePath(editor.document.uri, false).replace(/\\/g, '/'), startLine, endLine, text: editor.document.getText(range) },
-  })
-}
-
-/** "Fix with Yellowscript" on a diagnostic: the problem, and the lines around it. */
-async function fixDiagnostic(uri: vscode.Uri, diagnostic: vscode.Diagnostic): Promise<void> {
-  const document = await vscode.workspace.openTextDocument(uri)
-  const first = Math.max(0, diagnostic.range.start.line - 8)
-  const last = Math.min(document.lineCount - 1, diagnostic.range.end.line + 8)
-  const path = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/')
-  const source = diagnostic.source ? ` (${diagnostic.source}${diagnostic.code !== undefined ? ` ${typeof diagnostic.code === 'object' ? diagnostic.code.value : diagnostic.code}` : ''})` : ''
-  const text = document.getText(new vscode.Range(first, 0, last, document.lineAt(last).text.length))
-  const to = targetSurface()
-  await chatView?.reveal(to)
-  const target = to ?? chatView?.sidebar()
-  if (!target) return
-  sendTo(target, `Fix this problem in ${path} at line ${diagnostic.range.start.line + 1}: ${diagnostic.message}${source}`, undefined, [
-    { kind: 'selection', path, startLine: first + 1, endLine: last + 1, text },
-  ])
-}
 
 /** Which conversations wait on the person, and how long runs take. */
 const attention = new AttentionTracker()

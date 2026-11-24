@@ -11,7 +11,7 @@
 // =============================================================================
 
 import * as vscode from 'vscode'
-import { hostname, tmpdir } from 'node:os'
+import { hostname } from 'node:os'
 
 import { ConnectionManager, describeState, type ConnectionState } from './connection.ts'
 import {
@@ -25,8 +25,7 @@ import { findBrowser } from './browser/cdp.ts'
 import { buildWorkspaceContext } from './tools/workspace-context.ts'
 import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
-import { PLAN_DIR, PLAN_FILE, formatPlanFile, hasOpenSteps, parsePlanFile } from './chat/plan-file.ts'
-import type { PlanStep } from './agent/agent-core.ts'
+import { PLAN_DIR, PLAN_FILE } from './chat/plan-file.ts'
 import { ContextTracker } from './agent/context-budget.ts'
 import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
 import {
@@ -51,9 +50,8 @@ import {
   workspaceRoots,
   approvalStore,
 } from './ui/tool-providers.ts'
-import { makeApprovalGate, checkpointForWorkspace, shadowKey } from './ui/write-approval.ts'
-import { fileBaseline, revertSteps } from './chat/run-log.ts'
-import type { PendingCommand, ToolEffect } from './tools/types.ts'
+import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
+import type { PendingCommand } from './tools/types.ts'
 import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
 import { nodeCommandContext } from './tools/command-context.ts'
 import { usableReadRoots } from './tools/read-scope.ts'
@@ -70,9 +68,9 @@ import { approvalInfo, callWithApproval } from './nest/approval.ts'
 import { makeNestApprovalDeps, promptInChat } from './ui/nest-approval.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
 import { mergeNestTools, type NestToolRef } from './tools/registry.ts'
-import type { Checkpoint, StagedFile } from './tools/checkpoint.ts'
 import { conversationStore, isBlank, type Conversation, type HistoryEntry } from './ui/conversation-store.ts'
 import { createProjects, type Projects } from './host/projects.ts'
+import { createTasks, type Tasks } from './host/tasks.ts'
 
 const CONFIG_SECTION = 'redstartYellowscript'
 
@@ -99,26 +97,8 @@ let sessions = new Map<string, ChatSession>()
  *  Nest tool set changes (on connect and on re-list). Cached because the agent
  *  loop reads it per turn. */
 let mergedTools: ToolRegistry | null = null
-/** Last successful write checkpoint per workspace root, for `Revert Last Write`.
- *  Only the most recent is kept — a multistep revert is out of scope for now. */
-const lastCheckpoint = new Map<string, { checkpoint: Checkpoint; files: readonly StagedFile[] }>()
-
-/** Per conversation: the running task's trust, and every write it checkpointed. */
-interface TaskState {
-  trusted: boolean
-  checkpoints: Array<{ root: string; checkpoint: Checkpoint; files: readonly StagedFile[] }>
-}
-const tasks = new Map<string, TaskState>()
-/** The conversation whose task wrote last, for Revert Last Task. */
-let lastTaskConversation: string | null = null
-function taskFor(conversationId: string): TaskState {
-  let task = tasks.get(conversationId)
-  if (!task) {
-    task = { trusted: false, checkpoints: [] }
-    tasks.set(conversationId, task)
-  }
-  return task
-}
+/** Each conversation's running task: its trust, its checkpoints, reverting it. */
+let tasks!: Tasks
 /** Resolved once — the binary does not move while the window is open, and
  *  probing the filesystem on every search would be wasteful. */
 let ripgrepPath: string | null = null
@@ -133,6 +113,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(commandChannel, { dispose: () => void backgroundProcesses?.stopAll() })
   statusBar = new StatusBar()
   conversations = conversationStore(context.workspaceState)
+  tasks = createTasks({ log: output, roots: workspaceRoots })
 
   const pruned = conversations.prune(14)
   if (pruned > 0) {
@@ -354,10 +335,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (from.conversationId) getSession(from.conversationId).dismissInterrupted()
     },
     onOpenTaskDiff: (from, turnId, file) => {
-      if (from.conversationId) void openTaskDiff(getSession(from.conversationId).runOf(turnId) ?? [], file)
+      if (from.conversationId) void tasks.openDiff(getSession(from.conversationId).runOf(turnId) ?? [], file)
     },
     onRevertTask: (from, turnId) => {
-      if (from.conversationId) void revertTask(getSession(from.conversationId).runOf(turnId) ?? [])
+      if (from.conversationId) void tasks.revert(getSession(from.conversationId).runOf(turnId) ?? [])
     },
     onSearchHistory: (from, query) => {
       const all = historyItems()
@@ -432,8 +413,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('redstartYellowscript.chooseProject', () => showPage('projects')),
     vscode.commands.registerCommand('redstartYellowscript.runWorkflow', () => showPage('workflows')),
     vscode.commands.registerCommand('redstartYellowscript.inspectTools', inspectToolsCommand),
-    vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', revertLastWriteCommand),
-    vscode.commands.registerCommand('redstartYellowscript.revertLastTask', revertLastTaskCommand),
+    vscode.commands.registerCommand('redstartYellowscript.revertLastWrite', () => tasks.revertLastWrite()),
+    vscode.commands.registerCommand('redstartYellowscript.revertLastTask', () => tasks.revertLastTask()),
     vscode.commands.registerCommand('redstartYellowscript.addSelection', addSelectionToChat),
     vscode.commands.registerCommand('redstartYellowscript.fixDiagnostic', fixDiagnostic),
     vscode.languages.registerCodeActionsProvider(
@@ -608,7 +589,7 @@ function getSession(id: string): ChatSession {
       getClient: () => manager?.activeClient ?? null,
       context: () => contextFor(manager?.activeClient ?? null),
       diagnosticsAfterWrite,
-      onPlanChanged: (steps) => writeWorkspacePlan(steps),
+      onPlanChanged: (steps) => tasks.writePlan(steps),
       workspaceContext: () => {
         const root = workspaceRoots()[0]
         if (!root) return null
@@ -666,16 +647,10 @@ function getSession(id: string): ChatSession {
           checkpoints: checkpointForWorkspace(roots[0]!),
           root: roots[0]!,
           store: approvalStore(),
-          recordCheckpoint: (checkpoint, files) => {
-            lastCheckpoint.set(roots[0]!, { checkpoint, files })
-            taskFor(id).checkpoints.push({ root: roots[0]!, checkpoint, files })
-            lastTaskConversation = id
-          },
+          recordCheckpoint: (checkpoint, files) => tasks.recordCheckpoint(id, roots[0]!, checkpoint, files),
           task: {
-            trusted: () => taskFor(id).trusted,
-            trust: () => {
-              taskFor(id).trusted = true
-            },
+            trusted: () => tasks.trusted(id),
+            trust: () => tasks.trust(id),
           },
         })
         return gate(pending)
@@ -699,10 +674,10 @@ function getSession(id: string): ChatSession {
         // (not when it queues) and ends with the turn. "Apply all in this
         // task" lasts until then; its checkpoints stay for Revert Last Task.
         if (message.type === 'message' && message.message.role === 'user' && !message.message.pending) {
-          tasks.set(id, { trusted: false, checkpoints: [] })
+          tasks.start(id)
           attention.runStarted(id)
         } else if (message.type === 'turn/completed' || message.type === 'turn/failed') {
-          taskFor(id).trusted = false
+          tasks.end(id)
           const took = attention.runEnded(id)
           if (took !== null && took > LONG_RUN_MS) notifyUnwatched(id, `finished after ${Math.round(took / 60_000)} min`)
         } else if (message.type === 'conversationState') {
@@ -737,7 +712,7 @@ function getSession(id: string): ChatSession {
     } else {
       // A fresh conversation carries on the workspace's plan while steps are
       // open (.yellowscript/PLAN.md, kept by onPlanChanged).
-      const carried = readWorkspacePlan()
+      const carried = tasks.readPlan()
       if (carried) {
         session.load([], carried)
         output?.info(`plan: carried ${carried.length} step(s) from ${PLAN_DIR}/${PLAN_FILE} into a new conversation`)
@@ -1272,169 +1247,6 @@ async function inspectToolsCommand(): Promise<void> {
   vscode.window.showInformationMessage('Yellowscript: tool report written to the output channel.')
 }
 
-/**
- * Restore the files from the most recent approved write via the shadow git
- * checkpoint. This is the safety net Phase 3 promised: every write is snapshotted
- * before it touches disk, so a bad edit or a confused model can be undone.
- *
- * Only the LAST checkpoint is tracked (a multi-step undo history is out of
- * scope). If no write has happened this session, or the checkpoint was never
- * created (e.g. git was unavailable), we say so rather than guessing.
- */
-async function revertLastWriteCommand(): Promise<void> {
-  const roots = workspaceRoots()
-  if (roots.length === 0) {
-    vscode.window.showWarningMessage('Open a workspace folder before reverting a write.')
-    return
-  }
-  const root = roots[0]!
-  const last = lastCheckpoint.get(root)
-  if (!last) {
-    vscode.window.showInformationMessage('Yellowscript: nothing to revert — no write has been checkpointed yet.')
-    return
-  }
-
-  const files = last.files.map((f) => f.workspaceAbsolute)
-  const choice = await vscode.window.showWarningMessage(
-    `Revert the last Yellowscript write? This restores ${files.length} file${files.length === 1 ? '' : 's'} to their pre-write state:`,
-    { modal: true, detail: files.join('\n') },
-    'Revert',
-  )
-  if (choice !== 'Revert') return
-
-  try {
-    const manager = checkpointForWorkspace(root)
-    await manager.revert(last.checkpoint, last.files)
-    lastCheckpoint.delete(root)
-    vscode.window.showInformationMessage(`Yellowscript: reverted the last write (${files.length} file${files.length === 1 ? '' : 's'}).`)
-    output?.info(`revert: restored ${files.length} file(s) from checkpoint ${last.checkpoint.revision.slice(0, 12)}`)
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err)
-    vscode.window.showErrorMessage(`Could not revert the last write: ${reason}`)
-    output?.error('revert failed', err)
-  }
-}
-
-/** The workspace plan's path, or null with no folder open. */
-function workspacePlanPath(): string | null {
-  const root = workspaceRoots()[0]
-  return root ? nodePath.join(root, PLAN_DIR, PLAN_FILE) : null
-}
-
-/** The open plan in the workspace, or null (no file, or every step closed). */
-function readWorkspacePlan(): PlanStep[] | null {
-  const file = workspacePlanPath()
-  if (!file) return null
-  try {
-    const steps = parsePlanFile(nodeFs.readFileSync(file, 'utf8'))
-    return hasOpenSteps(steps) ? steps : null
-  } catch {
-    return null
-  }
-}
-
-/** Keep the plan on disk; a cleared plan removes the file. Never fails a turn. */
-function writeWorkspacePlan(steps: PlanStep[] | null): void {
-  const file = workspacePlanPath()
-  if (!file) return
-  try {
-    if (steps && steps.length > 0) {
-      nodeFs.mkdirSync(nodePath.dirname(file), { recursive: true })
-      nodeFs.writeFileSync(file, formatPlanFile(steps), 'utf8')
-    } else {
-      nodeFs.rmSync(file, { force: true })
-    }
-  } catch (err) {
-    output?.warn(`plan: could not write ${file}: ${err instanceof Error ? err.message : String(err)}`)
-  }
-}
-
-/**
- * Undo every write the last task made, newest first, so a file written twice
- * ends at its state before the task. Files the task created are removed.
- */
-async function revertLastTaskCommand(): Promise<void> {
-  const task = lastTaskConversation ? tasks.get(lastTaskConversation) : undefined
-  if (!task || task.checkpoints.length === 0) {
-    vscode.window.showInformationMessage('Yellowscript: nothing to revert — the last task made no checkpointed writes.')
-    return
-  }
-  const files = [...new Set(task.checkpoints.flatMap((c) => c.files.map((f) => f.workspaceAbsolute)))]
-  const choice = await vscode.window.showWarningMessage(
-    `Revert the last Yellowscript task? It made ${task.checkpoints.length} write${task.checkpoints.length === 1 ? '' : 's'}; ` +
-      `${files.length} file${files.length === 1 ? '' : 's'} go back to how they were before it (files it created are deleted):`,
-    { modal: true, detail: files.join('\n') },
-    'Revert task',
-  )
-  if (choice !== 'Revert task') return
-
-  try {
-    for (const entry of [...task.checkpoints].reverse()) {
-      await checkpointForWorkspace(entry.root).revert(entry.checkpoint, entry.files)
-    }
-    output?.info(`revert: undid ${task.checkpoints.length} write(s) of the last task (${files.length} file(s))`)
-    task.checkpoints = []
-    lastCheckpoint.clear()
-    vscode.window.showInformationMessage(`Yellowscript: reverted the last task (${files.length} file${files.length === 1 ? '' : 's'}).`)
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err)
-    vscode.window.showErrorMessage(`Could not revert the last task: ${reason}`)
-    output?.error('task revert failed', err)
-  }
-}
-
-/**
- * The task summary's file link: the file now, against its state before the
- * run first wrote it (from the checkpoint stored with the run, so it works
- * after a reload too).
- */
-async function openTaskDiff(run: readonly ToolEffect[], file: string): Promise<void> {
-  const base = fileBaseline(run, file)
-  if (!base) {
-    vscode.window.showInformationMessage(`Yellowscript: there is no checkpoint for ${file} in this task.`)
-    return
-  }
-  try {
-    const before = base.wasAbsent ? '' : await checkpointForWorkspace(base.root).show(base.revision, shadowKey(base.absolutePath))
-    const beforeFile = nodePath.join(tmpdir(), `ys-before-${Date.now()}-${nodePath.basename(base.absolutePath)}`)
-    await nodeFs.promises.writeFile(beforeFile, before, 'utf8')
-    const now = nodeFs.existsSync(base.absolutePath) ? vscode.Uri.file(base.absolutePath) : vscode.Uri.parse(`untitled:${file} (deleted)`)
-    await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(beforeFile), now, `Yellowscript: ${file} since the task`, { preview: true })
-  } catch (err) {
-    vscode.window.showErrorMessage(`Could not open the diff for ${file}: ${err instanceof Error ? err.message : String(err)}`)
-  }
-}
-
-/** The task summary's Revert: undo the run's writes, newest first. */
-async function revertTask(run: readonly ToolEffect[]): Promise<void> {
-  const steps = revertSteps(run)
-  if (steps.length === 0) {
-    vscode.window.showInformationMessage('Yellowscript: this task made no checkpointed writes, so there is nothing to revert.')
-    return
-  }
-  const files = [...new Set(steps.flatMap((s) => s.files.map((f) => f.absolutePath)))]
-  const choice = await vscode.window.showWarningMessage(
-    `Revert this Yellowscript task? ${files.length} file${files.length === 1 ? '' : 's'} go back to how they were before it ` +
-      '(files it created are deleted). Later changes to these files are lost too.',
-    { modal: true, detail: files.join('\n') },
-    'Revert task',
-  )
-  if (choice !== 'Revert task') return
-  try {
-    for (const step of steps) {
-      await checkpointForWorkspace(step.root).revert(
-        { revision: step.revision, label: '' },
-        step.files.map((f) => ({ workspaceAbsolute: f.absolutePath, relativePath: shadowKey(f.absolutePath), content: '', wasAbsent: f.wasAbsent })),
-      )
-    }
-    output?.info(`revert: undid ${steps.length} write(s) of a task (${files.length} file(s))`)
-    vscode.window.showInformationMessage(`Yellowscript: reverted the task (${files.length} file${files.length === 1 ? '' : 's'}).`)
-  } catch (err) {
-    vscode.window.showErrorMessage(`Could not revert the task: ${err instanceof Error ? err.message : String(err)}`)
-    output?.error('task revert failed', err)
-  }
-}
-
 /** Manual fallback for a Nest discovery can't see (different subnet, VPN). */
 async function promptForServerUrl(): Promise<void> {
   const entered = await vscode.window.showInputBox({
@@ -1627,7 +1439,7 @@ function commandContextFor(conversationId: string, pending: PendingCommand): Com
     // package.json as this run's first checkpoint of it holds it.
     packageJsonBeforeRun: (file) => {
       const key = file.toLowerCase()
-      for (const entry of tasks.get(conversationId)?.checkpoints ?? []) {
+      for (const entry of tasks.checkpoints(conversationId)) {
         const staged = entry.files.find((f) => f.workspaceAbsolute.toLowerCase() === key)
         if (staged) return staged.wasAbsent ? '' : staged.content
       }

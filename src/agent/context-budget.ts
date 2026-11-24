@@ -31,23 +31,37 @@
 // list). The overhead is learned from each reply's timings: the prompt the
 // server actually processed, minus this module's estimate of the messages.
 //
+// WHAT A STUB LOSES is kept elsewhere: the loop keeps the run's working state
+// (agent-core working-state.mjs: files changed, open errors, what reads and
+// searches found) and sends it at the tail of every request once trimming has
+// started. Summarising with a model call, as agent-core's compaction.mjs does
+// for chat-ui's conversations, is not used here: inside a run the record is
+// built from the calls themselves, and a tool result is cheap to fetch again.
+// The thresholds are compaction.mjs's, so every Redstart host trims alike.
+//
 // No `vscode` import.
 // =============================================================================
 
-import { compactionBudget } from './agent-core.ts'
+import {
+  compactionBudget,
+  KEEP_RATIO as CORE_KEEP_RATIO,
+  MAX_SINGLE_MESSAGE_TOKENS_RATIO,
+  PER_MESSAGE_OVERHEAD_TOKENS,
+  TRIGGER_RATIO as CORE_TRIGGER_RATIO,
+} from './agent-core.ts'
 
 /** Start trimming when the estimate passes this fraction of the usable window. */
-export const TRIGGER_RATIO = 0.85
+export const TRIGGER_RATIO = CORE_TRIGGER_RATIO
 /** Trim down to this fraction, so one trim buys several turns. */
-export const KEEP_RATIO = 0.5
+export const KEEP_RATIO = CORE_KEEP_RATIO
 /** A single message may take at most this fraction of the usable window. */
-export const MAX_SINGLE_MESSAGE_RATIO = 0.4
+export const MAX_SINGLE_MESSAGE_RATIO = MAX_SINGLE_MESSAGE_TOKENS_RATIO
 /** The newest messages are never stubbed: the model is working on them. */
 export const PROTECTED_TAIL = 4
 /** String arguments longer than this are elided from old tool calls. */
 export const MAX_KEPT_ARGUMENT_CHARS = 200
 /** Per-message template overhead the character estimate does not see. */
-const PER_MESSAGE_TOKENS = 6
+const PER_MESSAGE_TOKENS = PER_MESSAGE_OVERHEAD_TOKENS
 /** Before the first reply has been measured: the gateway's prompt and tools. */
 export const DEFAULT_OVERHEAD_TOKENS = 3_000
 
@@ -102,7 +116,7 @@ export function totalTokens(messages: readonly BudgetMessage[]): number {
 export function resultStub(toolName: string, originalChars: number): string {
   return (
     `${STUB_MARK}${toolName} (${originalChars.toLocaleString('en-US')} characters) removed to fit the context window. ` +
-    'Call the tool again if you still need it.]'
+    'What it showed is kept in the working state at the end. Call the tool again if you need the details.]'
   )
 }
 

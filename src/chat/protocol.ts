@@ -36,6 +36,7 @@ import type { StreamChannel } from '../nest/streaming.ts'
 import type { ToolEffect } from '../tools/types.ts'
 import { parseAttachments } from './attachments.ts'
 import type { TurnPart } from './turn-parts.ts'
+import type { SettingView } from './settings.ts'
 
 export type { TurnPart } from './turn-parts.ts'
 
@@ -235,7 +236,8 @@ export interface WorkflowView {
 }
 
 /** The pages that take over the panel. */
-export type PageName = 'projects' | 'workflows'
+export type PageName = 'projects' | 'workflows' | 'settings'
+export const PAGE_NAMES: readonly PageName[] = ['projects', 'workflows', 'settings']
 
 export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false, approval: null }
 
@@ -351,11 +353,13 @@ export type WebviewMessage =
   | { type: 'searchHistory'; query: string }
   | { type: 'deleteHistory'; id: string }
   | { type: 'restoreHistory'; id: string }
-  /** Load a page's data; the host answers with `projects` or `workflows`. The webview decides what is on screen. */
+  /** Load a page's data; the host answers with `projects`, `workflows` or `settings`. The webview decides what is on screen. */
   | { type: 'loadPage'; page: PageName }
   /** Link this workspace to a Nest project, or unlink it (null). */
   | { type: 'linkProject'; id: string | null }
   | { type: 'createProject'; name: string }
+  /** The Settings page: change one redstartYellowscript.* setting. The host checks `value` against the setting. */
+  | { type: 'updateSetting'; key: string; value: unknown }
   /** Run a workflow with its argument values. */
   | { type: 'runWorkflow'; name: string; args: Record<string, string> }
   /** Answer the open question (`id` is its QuestionView id); null skips it. */
@@ -403,6 +407,8 @@ export type HostMessage =
    | { type: 'projects'; projects: ProjectView[] | null; linkedId: string | null; error?: string }
    /** The account's workflows, for the page and for `/`. */
    | { type: 'workflows'; workflows: WorkflowView[] | null; error?: string }
+   /** The Settings page's data, sent again whenever a setting changes. */
+   | { type: 'settings'; settings: SettingView[] }
    /** Show a page (sent by a command, e.g. "Choose Project"). */
    | { type: 'showPage'; page: PageName }
    /** The question, plan or turn-limit wait changed for a conversation. */
@@ -416,6 +422,8 @@ export type HostMessage =
   | { type: 'turn/delta'; conversationId: string; id: string; channel: StreamChannel; text: string }
   | { type: 'turn/completed'; conversationId: string; id: string; stats?: TurnStats; aborted?: boolean }
   | { type: 'turn/failed'; conversationId: string; id: string; message: string }
+  /** A line about the run itself in the turn's timeline (a stagnation recovery). */
+  | { type: 'turn/notice'; conversationId: string; id: string; text: string }
   // Tool activity gets its own message types rather than a third text channel.
   // A tool call is STRUCTURE, and `turn/delta` carries text — repurposing it
   // would mean the renderer parsing prose to find out what ran. Both carry the
@@ -589,7 +597,9 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
     case 'revertTask':
       return typeof msg.turnId === 'string' ? { type: 'revertTask', turnId: msg.turnId } : null
     case 'loadPage':
-      return msg.page === 'projects' || msg.page === 'workflows' ? { type: 'loadPage', page: msg.page } : null
+      return PAGE_NAMES.includes(msg.page as PageName) ? { type: 'loadPage', page: msg.page as PageName } : null
+    case 'updateSetting':
+      return typeof msg.key === 'string' && 'value' in msg ? { type: 'updateSetting', key: msg.key, value: msg.value } : null
     case 'linkProject':
       return msg.id === null || typeof msg.id === 'string' ? { type: 'linkProject', id: msg.id } : null
     case 'createProject':

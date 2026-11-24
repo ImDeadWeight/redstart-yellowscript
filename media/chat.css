@@ -7,20 +7,29 @@
 
    Colours come from VS Code theme variables so the panel matches any theme,
    including ones that do not exist yet. The --ys-* tokens are derived from
-   them; the Redstart orange is the one accent of our own, and it is used for
-   emphasis only (the active tab, the question card, the plan's current step).
+   them. The Redstart orange is the one accent of our own, and it stands in
+   wherever VS Code would use its own (blue, in most themes) accent: primary
+   buttons, links, focus rings, the selected menu row, the user's bubble, as
+   well as the active tab, the question card and the plan's current step.
    ============================================================================= */
 
 :root {
   --ys-accent: #f97316;
   --ys-accent-border: color-mix(in srgb, var(--ys-accent) 45%, transparent);
   --ys-accent-faint: color-mix(in srgb, var(--ys-accent) 12%, transparent);
+  --ys-accent-hover: color-mix(in srgb, var(--ys-accent) 85%, #000);
+  /* Text on an orange fill: dark, as in Nest (white on #f97316 is 2.8:1). */
+  --ys-on-accent: #1c0a00;
+  /* Orange as text or a thin line: darker on light themes so it stays legible. */
+  --ys-accent-text: var(--ys-accent);
   --ys-surface: var(--vscode-sideBar-background, var(--vscode-editor-background));
   --ys-card: color-mix(in srgb, var(--vscode-foreground) 4%, var(--ys-surface));
   --ys-card-border: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
-  --ys-user-bubble: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, var(--ys-surface));
-  --ys-user-bubble-border: color-mix(in srgb, var(--vscode-textLink-foreground) 25%, transparent);
+  --ys-user-bubble: color-mix(in srgb, var(--ys-accent) 10%, var(--ys-surface));
+  --ys-user-bubble-border: color-mix(in srgb, var(--ys-accent) 30%, transparent);
 }
+
+body.vscode-light { --ys-accent-text: #c2410c; }
 
 * { box-sizing: border-box; }
 
@@ -53,10 +62,12 @@ button.secondary {
   white-space: nowrap;
 }
 button.primary {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: var(--ys-on-accent);
+  background: var(--ys-accent);
+  /* Not --vscode-button-border: themes that set it set it blue. */
+  border-color: var(--ys-accent);
 }
-button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+button.primary:hover:not(:disabled) { background: var(--ys-accent-hover); border-color: var(--ys-accent-hover); }
 button.secondary {
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
@@ -68,12 +79,12 @@ button.link {
   padding: 2px;
   font: inherit;
   font-size: 0.9em;
-  color: var(--vscode-textLink-foreground);
+  color: var(--ys-accent-text);
   background: none;
   border: none;
   cursor: pointer;
 }
-button.link:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+button.link:hover { text-decoration: underline; }
 
 button.icon-button {
   display: flex;
@@ -89,7 +100,11 @@ button.icon-button {
 }
 button.icon-button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
 
-:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+/* VS Code's webview styles colour every focus ring with --vscode-focusBorder
+   (blue); ours are orange, and a click leaves no ring at all. */
+:focus { outline-color: var(--ys-accent); }
+:focus:not(:focus-visible) { outline: none; }
+:focus-visible { outline: 1px solid var(--ys-accent); outline-offset: 1px; }
 
 .sr-only {
   position: absolute;
@@ -138,7 +153,7 @@ button.icon-button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBac
 }
 
 .body a {
-  color: var(--vscode-textLink-foreground);
+  color: var(--ys-accent-text);
 }
 
 .body code {

@@ -15,3 +15,5 @@ docs/STATUS.md
 # the agent builds there is not part of this repo.
 sample-workspace/
 bench/results/
+# Prepared node_modules for bench tasks (npm run bench:cache).
+bench/.cache/

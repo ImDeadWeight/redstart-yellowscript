@@ -69,6 +69,7 @@ export interface ChatViewHandlers {
   onLinkProject: (from: Surface, id: string | null) => void
   onCreateProject: (from: Surface, name: string) => void
   onRunWorkflow: (from: Surface, name: string, args: Record<string, string>) => void
+  onUpdateSetting: (from: Surface, key: string, value: unknown) => void
   onAnswer: (from: Surface, id: string, answer: AnswerView | null) => void
   onApprove: (from: Surface, id: string, choice: string) => void
   onOpenApprovalDiff: (from: Surface, id: string, index: number) => void
@@ -318,6 +319,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
         break
       case 'runWorkflow':
         h.onRunWorkflow(from, message.name, message.args)
+        break
+      case 'updateSetting':
+        h.onUpdateSetting(from, message.key, message.value)
         break
       case 'answer':
         h.onAnswer(from, message.id, message.answer)

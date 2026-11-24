@@ -52,8 +52,8 @@ export interface SurfacesDeps {
   /** The signed-in account, or null. */
   account: () => string | null
   sessions: SurfaceSessions
-  /** The projects and workflows pages. */
-  pages: { push(to: Surface): Promise<void>; pushWorkflows(to: Surface): Promise<void> }
+  /** The projects, workflows and settings pages. */
+  pages: { push(to: Surface): Promise<void>; pushWorkflows(to: Surface): Promise<void>; pushSettings(to: Surface): void }
   notifier: Notifier
 }
 
@@ -406,6 +406,7 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
         if (!target) return
         view()?.postTo(target, { type: 'showPage', page })
         if (page === 'projects') void deps.pages.push(target)
+        else if (page === 'settings') deps.pages.pushSettings(target)
         else void deps.pages.pushWorkflows(target)
       })
     },

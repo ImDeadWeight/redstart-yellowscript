@@ -8,6 +8,7 @@
 //
 //   host/connection-commands  the Nest connection, sign-in, the account
 //   host/projects             the workspace's Nest project, the workflows
+//   host/settings             the Yellowscript Settings page
 //   host/tooling              the ys_* tools, the Nest's tools, processes
 //   host/tasks                each run's checkpoints, reverts, the plan file
 //   host/sessions             one ChatSession per conversation
@@ -31,6 +32,7 @@ import { config } from './host/config.ts'
 import { createConnectionCommands, loggedDiscovery, type ConnectionCommands } from './host/connection-commands.ts'
 import { FIX_DIAGNOSTIC_COMMAND, createEditorActions, type EditorActions } from './host/editor-actions.ts'
 import { createProjects, type Projects } from './host/projects.ts'
+import { createSettings } from './host/settings.ts'
 import { createSessions, type Sessions } from './host/sessions.ts'
 import { createSurfaces, type Surfaces } from './host/surfaces.ts'
 import { createTasks, type Tasks } from './host/tasks.ts'
@@ -127,6 +129,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     projectId: () => projects.linked()?.id,
   })
 
+  const settings = createSettings({
+    post: (to, message) => chatView?.postTo(to, message),
+    broadcast: (message) => chatView?.broadcast(message),
+    log: output,
+  })
+
   // What every chat's agent runs against: the workspace, the tools, the gates.
   const agentSetup = createAgentSetup({ manager, tooling, projects, tasks, log: output })
   // A session is created lazily per conversation. No singleton: the tab strip
@@ -155,7 +163,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     conversations,
     account: () => connection.account(),
     sessions,
-    pages: projects,
+    pages: { push: (to) => projects.push(to), pushWorkflows: (to) => projects.pushWorkflows(to), pushSettings: (to) => settings.push(to) },
     notifier: {
       focused: () => vscode.window.state.focused,
       enabled: () => config().get<boolean>('notifyWhenWaiting') !== false,
@@ -180,6 +188,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       editorActions,
       tasks,
       tooling,
+      settings,
       conversations,
       post: (to, message) => view.postTo(to, message),
       runCommand: (command) => void vscode.commands.executeCommand(`redstartYellowscript.${command}`),
@@ -191,6 +200,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const command = (name: string, run: (...args: never[]) => unknown) => vscode.commands.registerCommand(`redstartYellowscript.${name}`, run)
   context.subscriptions.push(
     ...tooling.disposables,
+    ...settings.disposables,
     output,
     statusBar,
     manager.onDidChangeState((state) => connection.onStateChanged(state)),
@@ -216,7 +226,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     command('signOut', () => connection.signOut()),
     command('showStatus', () => connection.showStatus()),
     command('newChat', () => surfaces.newChat()),
-    command('openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', 'redstartYellowscript')),
+    command('openSettings', () => surfaces.showPage('settings')),
     command('openHistory', () => surfaces.showHistory()),
     command('chooseProject', () => surfaces.showPage('projects')),
     command('runWorkflow', () => surfaces.showPage('workflows')),

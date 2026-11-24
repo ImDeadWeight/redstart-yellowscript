@@ -263,7 +263,7 @@
     border: 1px solid var(--vscode-input-border, var(--ys-card-border));
     background: var(--vscode-input-background);
   }
-  .composer:focus-within { border-color: var(--vscode-focusBorder); }
+  .composer:focus-within { border-color: var(--ys-accent-border); }
   textarea {
     width: 100%;
     min-height: 44px;

@@ -174,7 +174,7 @@
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 4px;
   }
-  input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  input:focus { outline: 1px solid var(--ys-accent); outline-offset: -1px; }
   .wide { justify-content: center; width: 100%; max-width: 280px; padding: 6px 12px; }
   .progress { padding: 8px; color: var(--ys-accent); }
   .hint { margin: 0; max-width: 260px; font-size: 0.85em; opacity: 0.6; }

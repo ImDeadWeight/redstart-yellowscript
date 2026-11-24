@@ -4,7 +4,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { ChatSession, RESUME_PROMPT, outputTail, type SessionDeps } from './session.ts'
+import { ChatSession, RESUME_PROMPT, outputTail, recoveryLine, type SessionDeps } from './session.ts'
+import { STAGNATION_OFF } from '../agent/loop.ts'
 import { applyHostMessage, initialViewState } from '../webview/view-model.ts'
 import { BackgroundProcesses } from '../tools/background-processes.ts'
 import type { HostMessage } from './protocol.ts'
@@ -778,7 +779,8 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
 
   test('waits at the turn limit, and goes on when the person says so', async () => {
     const reads = Array.from({ length: 12 }, () => call('ys_read_file', { path: 'note.txt' }))
-    const h = scripted([...reads, { content: 'Finished.' }], { maxTurns: () => 10 })
+    // Without the stagnation checks, which would stop twelve reads of one file sooner.
+    const h = scripted([...reads, { content: 'Finished.' }], { maxTurns: () => 10, stagnation: () => STAGNATION_OFF })
     const done = h.session.send('read it a lot')
     await until(() => h.session.state().atTurnLimit)
     assert.equal(h.session.state().atTurnLimit, true)
@@ -787,6 +789,38 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
 
     assert.equal(h.session.state().atTurnLimit, false)
     assert.match(h.session.snapshot().at(-1)?.content ?? '', /Finished\./)
+  })
+})
+
+describe('ChatSession — a run that is going nowhere', () => {
+  test('each recovery is a line in the timeline and in the run log; the third stops the run', async () => {
+    const emitted: HostMessage[] = []
+    let n = 0
+    const session = new ChatSession({
+      getClient: () =>
+        fakeClient(async () => emptyResult({ toolCalls: [{ index: 0, id: `c${++n}`, function: { name: 'ys_read_file', arguments: '{"path":"note.txt"}' } }] })),
+      emit: (m) => emitted.push(m),
+      onUnauthorized: async () => {},
+      conversationId: 'c1',
+      tools: () => createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }) }),
+      toolContext: () => ({ workspaceRoots: [os.tmpdir()] }),
+    } as SessionDeps)
+    await session.send('read it a lot')
+    const notices = emitted.filter((m) => m.type === 'turn/notice')
+    assert.equal(notices.length, 3)
+    assert.match((notices[0] as { text: string }).text, /^Changed approach: /)
+    assert.match((notices[2] as { text: string }).text, /^Stopped: not making progress/)
+    const turn = session.snapshot().at(-1)!
+    assert.equal(turn.parts?.filter((p) => p.kind === 'notice').length, 3)
+    assert.equal(turn.run?.filter((e) => e.kind === 'recovery').length, 3)
+    assert.match(turn.content, /How would you like me to continue\?$/)
+  })
+
+  test('recoveryLine says what level 2 paused', () => {
+    assert.equal(recoveryLine({ level: 1, evidence: 'Same error.' }), 'Changed approach: Same error.')
+    assert.equal(recoveryLine({ level: 2, evidence: 'Same error.', action: 'ys_run_command:npm run check' }), 'Changed approach: Same error. Paused `npm run check` until there is new evidence.')
+    assert.equal(recoveryLine({ level: 2, evidence: 'Nothing new.', action: 'kind:search' }), 'Changed approach: Nothing new. Paused searches until there is new evidence.')
+    assert.equal(recoveryLine({ level: 3, evidence: 'Still.' }), 'Stopped: not making progress. Still.')
   })
 })
 

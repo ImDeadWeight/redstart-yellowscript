@@ -9,7 +9,10 @@ import {
   runAgentLoop,
   DEFAULT_MAX_ITERATIONS,
   callSignature,
+  callKind,
+  STAGNATION_OFF,
   withHostTools,
+  withTailNotes,
   type CompletionStreamer,
 } from './loop.ts'
 import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
@@ -327,7 +330,8 @@ describe('runAgentLoop — termination', () => {
         return streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] })
       },
     }
-    const result = await runAgentLoop({ client: forever, request: baseRequest, tools: registry(), toolContext })
+    // Without the stagnation checks, which would stop this sooner as stuck.
+    const result = await runAgentLoop({ client: forever, request: baseRequest, tools: registry(), toolContext, stagnation: STAGNATION_OFF })
     assert.equal(result.iterations, DEFAULT_MAX_ITERATIONS)
   })
 
@@ -671,6 +675,12 @@ describe('runAgentLoop — long runs', () => {
     assert.equal(lastRequest.messages[0]!.content, 'read a.txt', 'the request is never trimmed')
     // The run's record keeps the full results.
     assert.ok(result.toolRuns.every((r) => !r.result.content.startsWith('[Earlier result')))
+    // What the stubbed reads showed rides at the tail as the working state.
+    const tail = String(lastRequest.messages.at(-1)!.content)
+    assert.match(tail, /^\[Working state of this run/)
+    assert.match(tail, /ys_read_file big\.txt: /)
+    // Not before anything was trimmed.
+    assert.ok(!client.requests[0]!.messages.some((m) => String(m.content).includes('[Working state')))
   })
 
   test('a context-exceeded refusal teaches n_ctx, trims, and retries once', async () => {
@@ -808,5 +818,113 @@ describe('runAgentLoop — a model that cannot stop (2026-11-19)', () => {
     const merged = withHostTools(nestHasIt, { ask: { user: async () => null } })
     assert.equal(merged.filter((t) => t.function.name === 'ask_user').length, 1)
     assert.equal(merged.find((t) => t.function.name === 'ask_user')!.function.description, 'nest')
+  })
+})
+
+// --- Stagnation and the working state (agent-runtime plan items 3, 4 and 6) ---
+
+describe('runAgentLoop — a run that is going nowhere', () => {
+  /** A command gate that always fails with the same error at another line. */
+  let line = 0
+  const failingCommands = async () => ({ text: `src/routes/+page.svelte:${++line}:3 Error: Cannot assign to constant`, isError: true, exitCode: 1 })
+  // Letters, not digits: digits alone would make them one call (callSignature).
+  const check = (n: number) => streamResult({ toolCalls: [callDelta('ys_run_command', `{"command":"npm run check -- --${'abcdefghijklmnop'[n]}"}`)] })
+
+  test('the same failure three times puts a note with the evidence at the tail of the next request', async () => {
+    const client = scriptedStreamer([check(1), check(2), check(3), streamResult({ content: 'Changing approach.' })])
+    const seen: string[] = []
+    const result = await runAgentLoop({
+      client, request: baseRequest, tools: registry(), toolContext, approveCommand: failingCommands,
+      handlers: { onRecovery: (r) => seen.push(`${r.detector}:${r.level}`) },
+    })
+    assert.deepEqual(seen, ['same-failure:1'])
+    const tail = client.requests[3]!.messages.at(-1)!
+    assert.equal(tail.role, 'user')
+    assert.match(String(tail.content), /You seem to be stuck.*cannot assign to constant.*Quote the failing observation exactly/s)
+    // A note for one request only: the next one does not carry it.
+    assert.ok(!String(client.requests[2]!.messages.at(-1)!.content).includes('You seem to be stuck'))
+    assert.equal(result.recoveries.length, 1)
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('the third firing stops the run, and the answer tells the person what was tried', async () => {
+    const client = scriptedStreamer(Array.from({ length: 12 }, (_, i) => check(i)))
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: failingCommands })
+    assert.equal(result.stopReason, 'stuck')
+    assert.deepEqual(result.recoveries.map((r) => r.level), [1, 2, 3])
+    assert.match(result.content, /I stopped because I was not making progress/)
+    assert.match(result.content, /How would you like me to continue\?$/)
+    // Level 2 refused the action until there was new evidence.
+    assert.ok(result.toolRuns.some((r) => r.result.summary === 'Not run: paused until there is new evidence'))
+    // The stop is an answer, not one more request.
+    assert.ok(client.requests.length < 12)
+  })
+
+  test('STAGNATION_OFF leaves only the exact-repeat guard (the bench\'s before)', async () => {
+    const client = scriptedStreamer([...Array.from({ length: 6 }, (_, i) => check(i)), streamResult({ content: 'done' })])
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: failingCommands, stagnation: STAGNATION_OFF })
+    assert.deepEqual(result.recoveries, [])
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('a reasoning loop is caught while it streams: that response is dropped and asked for again with the note', async () => {
+    const cycle = 'The sample file fails the same way as mine does here. The JSON output failed because of the Windows paths. Let me try a different approach with the default reporter now. '
+    const requests: ChatCompletionRequest[] = []
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers, signal) {
+        requests.push(structuredClone(request))
+        if (requests.length === 1) {
+          // Loops until it is cut off.
+          let reasoning = ''
+          for (let i = 0; i < 200 && !signal?.aborted; i++) {
+            reasoning += cycle
+            handlers.onReasoning?.(cycle)
+          }
+          return streamResult({ reasoning, aborted: signal?.aborted === true })
+        }
+        handlers.onContent?.('Fixed.')
+        return streamResult({ content: 'Fixed.' })
+      },
+    }
+    const seen: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onRecovery: (r) => seen.push(r.detector) } })
+    assert.deepEqual(seen, ['reasoning-loop'])
+    assert.equal(requests.length, 2)
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /going in a circle/)
+    assert.equal(result.content, 'Fixed.')
+    assert.equal(result.stopReason, 'complete')
+    assert.equal(result.aborted, false)
+  })
+})
+
+describe('withTailNotes', () => {
+  const tool = { role: 'tool', content: 'result' }
+  test('adds the notes as one user message at the end', () => {
+    assert.deepEqual(withTailNotes([tool], ['a', null, 'b']).at(-1), { role: 'user', content: 'a\n\nb' })
+    const same = [tool]
+    assert.equal(withTailNotes(same, [null, '']), same, 'nothing to add: the same array')
+  })
+  test("joins the core's own tail note instead of adding a second user message", () => {
+    const withPlan = [tool, { role: 'user', content: '[Plan: step 2 of 3]' }]
+    const out = withTailNotes(withPlan, ['note'])
+    assert.equal(out.length, 2)
+    assert.equal(out[1]!.content, '[Plan: step 2 of 3]\n\nnote')
+    // A person's own message is never edited.
+    const person = [{ role: 'user', content: '[x] do it' }]
+    assert.equal(withTailNotes(person, ['note']).length, 2)
+  })
+})
+
+describe('callKind', () => {
+  test('what each call gathers or changes', () => {
+    assert.equal(callKind('ys_read_file', '{}'), 'read')
+    assert.equal(callKind('ys_grep', '{}'), 'search')
+    assert.equal(callKind('ys_replace', '{}'), 'write')
+    assert.equal(callKind('ys_run_command', '{}'), 'command')
+    assert.equal(callKind('ys_process', '{"action":"start","command":"npm run dev"}'), 'command')
+    assert.equal(callKind('ys_process', '{"action":"output","id":"p1"}'), 'read')
+    assert.equal(callKind('ys_diagnostics', '{}'), 'diagnostics')
+    assert.equal(callKind('call_tool', '{"name":"search_files","arguments":{}}'), 'search')
+    assert.equal(callKind('read_document', '{}'), 'read')
   })
 })

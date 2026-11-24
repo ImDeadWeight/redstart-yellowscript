@@ -72,7 +72,7 @@ function setup(options: { account?: string | null; focused?: boolean } = {}) {
     conversations,
     account: () => account,
     sessions,
-    pages: { push: async () => {}, pushWorkflows: async () => {} },
+    pages: { push: async () => {}, pushWorkflows: async () => {}, pushSettings: () => {} },
     notifier: {
       focused: () => options.focused ?? false,
       enabled: () => true,

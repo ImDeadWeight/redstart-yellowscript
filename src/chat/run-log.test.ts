@@ -154,3 +154,17 @@ describe('the task summary', () => {
     assert.deepEqual(steps[0]!.files, [{ absolutePath: '/ws/a.js', wasAbsent: false }])
   })
 })
+
+describe('the run log and stagnation recoveries', () => {
+  test('the last recovery is the last line, so the next message knows what was abandoned', () => {
+    const effects: ToolEffect[] = [
+      { kind: 'command', command: 'npm run check', ran: true, exitCode: 1, failed: true, lastLine: 'Error: Cannot assign to constant' },
+      { kind: 'recovery', detector: 'same-failure', level: 1, evidence: 'The same error came back 3 times.' },
+      { kind: 'recovery', detector: 'same-failure', level: 3, evidence: 'Still the same error.' },
+    ]
+    const lines = runLogLines(effects)
+    assert.equal(lines.at(-1), 'stopped as stuck: Still the same error.')
+    assert.equal(lines.filter((l) => l.includes('changed approach')).length, 0, 'only the last one')
+    assert.deepEqual(runLogLines([effects[1]!]), ['changed approach: The same error came back 3 times.'])
+  })
+})

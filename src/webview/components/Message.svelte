@@ -108,6 +108,8 @@
         <Thought text={b.text} live={message.streaming === true && b.key === lastKey} />
       {:else if b.kind === 'text'}
         <Markdown text={b.text} narration={!inAnswer} cursor={message.streaming === true && b.key === lastKey} />
+      {:else if b.kind === 'notice'}
+        <p class="notice" role="status"><Icon name="refresh" size={12} /><span>{b.text}</span></p>
       {:else}
         <div class="tools">
           {#each b.callIds as id (id)}
@@ -282,4 +284,17 @@
   }
   footer { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 0.8em; opacity: 0.55; }
   .warn { color: var(--vscode-editorWarning-foreground); opacity: 1; }
+  /* A line about the run itself: a stagnation recovery. */
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 2px 0;
+    padding: 4px 8px;
+    font-size: 0.86em;
+    border-left: 2px solid var(--ys-accent);
+    border-radius: 0 4px 4px 0;
+    background: var(--ys-accent-faint);
+  }
+  .notice :global(.icon) { flex-shrink: 0; margin-top: 2px; color: var(--ys-accent-text); }
 </style>

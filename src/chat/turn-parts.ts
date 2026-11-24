@@ -19,12 +19,19 @@ export type TurnPart =
   | { kind: 'reasoning'; text: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; callId: string }
+  /** A line from the host about the run itself: "Changed approach: …". */
+  | { kind: 'notice'; text: string }
 
 /** `parts` with a streamed chunk or a tool call added. Never mutates. */
 export function appendPart(parts: readonly TurnPart[] | undefined, part: TurnPart): TurnPart[] {
   const list = parts ? [...parts] : []
   if (part.kind === 'tool') {
     if (!list.some((p) => p.kind === 'tool' && p.callId === part.callId)) list.push(part)
+    return list
+  }
+  // Each notice is its own line, never joined to the one before.
+  if (part.kind === 'notice') {
+    if (part.text) list.push({ kind: 'notice', text: part.text })
     return list
   }
   if (!part.text) return list
@@ -39,6 +46,7 @@ export type TurnBlock =
   | { kind: 'reasoning'; text: string; key: string }
   | { kind: 'text'; text: string; key: string }
   | { kind: 'tools'; callIds: string[]; key: string }
+  | { kind: 'notice'; text: string; key: string }
 
 /** Parts as blocks: consecutive tool calls become one block. Whitespace-only
  *  text (the newline a model writes before a call) is dropped. */

@@ -114,7 +114,7 @@
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 4px;
   }
-  .search:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .search:focus { outline: 1px solid var(--ys-accent); outline-offset: -1px; }
   .list { overflow-y: auto; padding: 0 4px 4px; }
   .row { display: flex; align-items: center; border-radius: 4px; }
   .row:hover { background: var(--vscode-list-hoverBackground); }

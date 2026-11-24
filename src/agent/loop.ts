@@ -29,6 +29,19 @@
 //   steering           never: Yellowscript queues a prompt typed mid-flow
 //                      behind the running turn instead.
 //
+// Around the core, two agent-core records of the run:
+//
+//   stagnation         stagnation.mjs watches every call and the streaming
+//                      reasoning. A firing is a note at the tail of the next
+//                      request, then a refusal of the repeated action, then a
+//                      stop with a summary for the person ('stuck'). A
+//                      reasoning loop is caught while it streams: that
+//                      response is dropped and asked for again with the note.
+//                      onRecovery shows each one in the turn's timeline.
+//   working state      working-state.mjs keeps what the run found, and rides
+//                      at the tail of every request once old results have
+//                      been trimmed (context-budget.ts stubs them).
+//
 // No `vscode` import: the whole loop is testable against a fake streamer.
 // =============================================================================
 
@@ -40,6 +53,17 @@ import { isProcessStart } from '../tools/process-tools.ts'
 import type { PendingCommand, PendingWrite, ToolContext, ToolEffect, ToolResult } from '../tools/types.ts'
 import {
   FALLBACK_ID_PREFIX,
+  callToolTarget,
+  createStagnationMonitor,
+  createWorkingState,
+  failureLine,
+  repeatedCallResult as coreRepeatedCallResult,
+  STAGNATION_LIMITS,
+  type CallInfo,
+  type CallKind,
+  type CallOutcome,
+  type Recovery,
+  type StagnationLimits,
   runAgentLoop as runCoreLoop,
   wireSafeToolCalls,
   type AgentMessage,
@@ -67,15 +91,19 @@ export const DEFAULT_MAX_ITERATIONS = 40
  * the result cannot change, so the call is not run again and the model is
  * told why. A write that failed and is retried unchanged is the usual case.
  */
-export const MAX_IDENTICAL_CALLS = 3
+export const MAX_IDENTICAL_CALLS = STAGNATION_LIMITS.identicalCalls
 
-/** What the model reads instead of a repeated call's result. */
-export function repeatedCallResult(name: string, times: number): string {
-  return (
-    `Not run: you have called ${name} with these exact arguments ${times} times in this task, ` +
-    'and the result will not change. Use what the earlier results said, try a different approach, ' +
-    'or tell the user what is blocking you.'
-  )
+/** What the model reads instead of a repeated call's result (agent-core stagnation.mjs). */
+export const repeatedCallResult: (name: string, times: number) => string = coreRepeatedCallResult
+
+/** Every stagnation detector off but the exact-repeat guard: the bench's "before". */
+export const STAGNATION_OFF: Partial<StagnationLimits> = {
+  sameFailure: Infinity,
+  noProgressRounds: Infinity,
+  sentenceRepeats: Infinity,
+  repeatedShare: Infinity,
+  theorizingChars: Infinity,
+  reversals: Infinity,
 }
 
 /** Just the part of NestClient the loop needs, so tests can supply a fake. */
@@ -103,6 +131,8 @@ export type StopReason =
   | 'aborted'
   /** Hit the iteration cap with the model still calling tools. */
   | 'turn-cap'
+  /** Stopped as stuck (stagnation recovery level 3); the answer says what was tried. */
+  | 'stuck'
 
 export interface AgentResult {
   /** Everything the model said across all iterations, in order. */
@@ -115,6 +145,8 @@ export interface AgentResult {
   timings?: StreamTimings
   model?: string
   finishReason?: string
+  /** Every stagnation recovery in this run, oldest first. */
+  recoveries: Recovery[]
 }
 
 export interface AgentLoopHandlers extends StreamHandlers {
@@ -126,6 +158,8 @@ export interface AgentLoopHandlers extends StreamHandlers {
   onIteration?: (iteration: number) => void
   /** Older messages were trimmed to fit the context window before a request. */
   onContextTrimmed?: (report: FitReport) => void
+  /** The run was noticed going nowhere, and what is done about it. */
+  onRecovery?: (recovery: Recovery) => void
 }
 
 /**
@@ -203,6 +237,9 @@ export interface AgentLoopOptions {
   /** After a write is applied: the problems now reported in those files
    *  (absolute paths), appended to the result. Absent: nothing appended. */
   diagnosticsAfterWrite?: ((files: string[]) => Promise<string | null>) | undefined
+  /** Stagnation thresholds (agent-core STAGNATION_LIMITS). STAGNATION_OFF
+   *  leaves only the exact-repeat guard. */
+  stagnation?: Partial<StagnationLimits> | undefined
 }
 
 /**
@@ -281,17 +318,45 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   let iterations = 0
   /** Images of the result being stored, handed to extraParts right after. */
   let resultImages: string[] = []
-  /** How often each exact call (name + arguments) has been asked for. */
-  const callCounts = new Map<string, number>()
+  const monitor = createStagnationMonitor(options.stagnation)
+  const workingState = createWorkingState()
+  /** Old results have been trimmed in this run: the working state rides along. */
+  let trimmed = false
+  /** The note owed to the next request (a stagnation recovery). */
+  let pendingNote: string | null = null
+  /** Stopped as stuck: what the person reads instead of another request. */
+  let stuck: Recovery | null = null
+  /** A round of calls has run since the last request. */
+  let roundOpen = false
   let hitTurnCap = false
   let streamCut = false
   let last: StreamResult | undefined
+
+  /** End the flow on the stuck summary: it is the answer, painted as one. */
+  const answerStuck = (acc: { content: string; reasoning: string; toolCalls: unknown[] }, recovery: Recovery): void => {
+    handlers.onContent?.(recovery.note)
+    acc.content = recovery.note
+    acc.reasoning = ''
+    acc.toolCalls = []
+  }
 
   const ports: AgentPorts = {
     model: {
       streamTurn: async ({ acc, messages: turnMessages, signal: turnSignal }) => {
         iterations++
         handlers.onIteration?.(iterations)
+        // The round that just ended: does a pattern show?
+        if (roundOpen) {
+          roundOpen = false
+          const recovery = monitor.endRound()
+          if (recovery) {
+            handlers.onRecovery?.(recovery)
+            if (recovery.stop) stuck = recovery
+            else pendingNote = recovery.note
+          }
+        }
+        // Stuck: no request. The summary is the answer, and the flow ends.
+        if (stuck) return answerStuck(acc, stuck)
         const context = options.context
         // Fit the run to the window, editing its messages in place (see
         // context-budget.ts). `force` after the server refused: its numbers
@@ -302,36 +367,90 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           const limits = context.limits()
           if (!limits) return
           const report = fitMessages(turnMessages as BudgetMessage[], limits, force)
+          if (report.stubbed) trimmed = true
           if (report.stubbed || report.shrunk || report.capped) handlers.onContextTrimmed?.(report)
         }
-        const send = () => options.client.streamChatCompletion(
-          {
-            ...options.request,
-            messages: toWire(turnMessages),
-            // Sending tools changes what the gateway injects: it only claims
-            // Nest capabilities when a request actually carries them.
-            tools: toolPayload,
-          },
-          {
-            ...handlers,
-            // Fill the accumulator as chunks arrive, so the core still has the
-            // partial answer if the stream fails mid-turn.
-            onContent: (chunk) => {
-              acc.content += chunk
-              handlers.onContent?.(chunk)
-            },
-            onReasoning: (chunk) => {
-              acc.reasoning += chunk
-              handlers.onReasoning?.(chunk)
-            },
-          },
-          turnSignal,
-        )
+        /** A reasoning loop caught while this response streamed (set in a callback). */
+        const watch: { looping: Recovery | null } = { looping: null }
+        const send = (): Promise<StreamResult> => {
+          // Its own controller, so a reasoning loop can drop this response
+          // without ending the run.
+          const request = new AbortController()
+          const stop = () => request.abort()
+          if (turnSignal?.aborted) request.abort()
+          else turnSignal?.addEventListener('abort', stop, { once: true })
+          monitor.startResponse()
+          workingState.setPlan(options.plan?.get())
+          const note = pendingNote
+          const tail = [note, trimmed && !workingState.empty ? workingState.render() : null]
+          pendingNote = null
+          return options.client
+            .streamChatCompletion(
+              {
+                ...options.request,
+                messages: toWire(withTailNotes(turnMessages, tail)),
+                // Sending tools changes what the gateway injects: it only claims
+                // Nest capabilities when a request actually carries them.
+                tools: toolPayload,
+              },
+              {
+                ...handlers,
+                // Fill the accumulator as chunks arrive, so the core still has the
+                // partial answer if the stream fails mid-turn.
+                onContent: (chunk) => {
+                  acc.content += chunk
+                  handlers.onContent?.(chunk)
+                },
+                onReasoning: (chunk) => {
+                  acc.reasoning += chunk
+                  handlers.onReasoning?.(chunk)
+                  if (watch.looping) return
+                  const recovery = monitor.reasoning(chunk)
+                  if (recovery) {
+                    watch.looping = recovery
+                    request.abort()
+                  }
+                },
+              },
+              request.signal,
+            )
+            .catch((err: unknown) => {
+              // Refused before it streamed (too big, say): the retry still owes the note.
+              if (!watch.looping) pendingNote ??= note
+              throw err
+            })
+            .finally(() => turnSignal?.removeEventListener('abort', stop))
+        }
+        /** Send. A response dropped as a reasoning loop is asked for again
+         *  with the note, or ends the run as stuck (null). */
+        const sendWatched = async (): Promise<StreamResult | null> => {
+          for (;;) {
+            watch.looping = null
+            let result: StreamResult
+            try {
+              result = await send()
+            } catch (err) {
+              if (!watch.looping || turnSignal?.aborted) throw err
+              result = { content: acc.content, reasoning: acc.reasoning, toolCalls: [], aborted: true }
+            }
+            // Set by onReasoning during send(), which TypeScript cannot see.
+            const caught = watch.looping as Recovery | null
+            if (!caught || turnSignal?.aborted) return result
+            handlers.onRecovery?.(caught)
+            if (caught.stop) {
+              stuck = caught
+              return null
+            }
+            pendingNote = caught.note
+            acc.content = ''
+            acc.reasoning = ''
+          }
+        }
         await fit(false)
         let estimate = totalTokens(turnMessages as BudgetMessage[])
-        let result: StreamResult
+        let sent: StreamResult | null
         try {
-          result = await send()
+          sent = await sendWatched()
         } catch (err) {
           // Too big after all: llama-server says how big the window is. Trim
           // to that and try once more; a second refusal is reported as usual.
@@ -339,8 +458,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           context.recordExceeded(err.contextExceeded.nCtx, err.contextExceeded.promptTokens, estimate)
           await fit(true)
           estimate = totalTokens(turnMessages as BudgetMessage[])
-          result = await send()
+          sent = await sendWatched()
         }
+        // Stuck while it streamed: the summary is the answer.
+        if (!sent) return answerStuck(acc, stuck!)
+        const result = sent
         // The prompt the server really processed: what the overhead is.
         if (context && typeof result.timings?.prompt_n === 'number') {
           context.recordPrompt(result.timings.prompt_n + (result.timings.cache_n ?? 0), estimate)
@@ -366,17 +488,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         const recovered = call.id.startsWith(FALLBACK_ID_PREFIX)
         const toolCall = call as ToolCall
         handlers.onToolCall?.(toolCall, recovered)
-        const signature = callSignature(call.function.name, call.function.arguments)
-        const times = (callCounts.get(signature) ?? 0) + 1
-        callCounts.set(signature, times)
-        const resultForModel = times > MAX_IDENTICAL_CALLS
-          ? {
-              content: repeatedCallResult(call.function.name, times - 1),
-              isError: true,
-              summary: 'Not run: repeated call',
-              truncated: false,
-            }
-          : await review(await options.tools.execute(call.function.name, call.function.arguments, options.toolContext), options)
+        roundOpen = true
+        const info = callInfo(call.function.name, call.function.arguments)
+        const refused = monitor.check(info)
+        let resultForModel: ToolResult
+        let outcome: CallOutcome
+        if (refused) {
+          resultForModel = {
+            content: refused.refuse,
+            isError: true,
+            summary: refused.reason === 'repeated' ? 'Not run: repeated call' : 'Not run: paused until there is new evidence',
+            truncated: false,
+          }
+          outcome = { ok: false, refused: refused.reason, text: refused.refuse }
+        } else {
+          const planned = await options.tools.execute(call.function.name, call.function.arguments, options.toolContext)
+          resultForModel = await review(planned, options)
+          outcome = callOutcome(info, planned, resultForModel)
+        }
+        monitor.record(info, outcome)
+        workingState.observe(info, outcome)
         handlers.onToolResult?.(toolCall, resultForModel)
         toolRuns.push({ call: toolCall, result: resultForModel, recovered })
         resultImages = resultForModel.images ?? []
@@ -430,8 +561,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
     },
   })
 
-  const aborted = signal?.aborted === true || last?.aborted === true
-  const stopReason: StopReason = aborted ? 'aborted' : hitTurnCap ? 'turn-cap' : 'complete'
+  const aborted = signal?.aborted === true || (!stuck && last?.aborted === true)
+  const stopReason: StopReason = aborted ? 'aborted' : stuck ? 'stuck' : hitTurnCap ? 'turn-cap' : 'complete'
   const result: AgentResult = {
     content: contentParts.join('\n\n'),
     reasoning: reasoningParts.join('\n\n'),
@@ -439,11 +570,111 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
     iterations,
     stopReason,
     aborted,
+    recoveries: monitor.firings,
   }
   if (last?.timings) result.timings = last.timings
   if (last?.model) result.model = last.model
   if (last?.finishReason) result.finishReason = last.finishReason
   return result
+}
+
+/**
+ * `messages` with notes for this request only at the tail, so the history the
+ * server has cached stays as it was. Joined to the core's own tail note (the
+ * plan's, which follows a tool result or an answer) when there is one: some
+ * chat templates refuse two user messages in a row.
+ */
+export function withTailNotes<M extends { role: string; content?: unknown }>(messages: M[], notes: ReadonlyArray<string | null | undefined>): M[] {
+  const text = notes.filter((n): n is string => !!n).join('\n\n')
+  if (!text) return messages
+  const last = messages[messages.length - 1]
+  const before = messages[messages.length - 2]
+  if (last && last.role === 'user' && typeof last.content === 'string' && last.content.startsWith('[') && before && before.role !== 'user') {
+    return [...messages.slice(0, -1), { ...last, content: `${last.content}\n\n${text}` }]
+  }
+  return [...messages, { role: 'user', content: text } as M]
+}
+
+/** What the stagnation monitor and the working state need to know of a call. */
+export function callInfo(name: string, args: string): CallInfo {
+  return { name, args, kind: callKind(name, args), signature: callSignature(name, args) }
+}
+
+/** What kind of evidence a call gathers, or what it changes. */
+export function callKind(name: string, args: string): CallKind {
+  switch (name) {
+    case 'ys_read_file':
+    case 'ys_editor_context':
+    case 'ys_process_output':
+      return 'read'
+    case 'ys_grep':
+    case 'ys_glob':
+    case 'ys_list_directory':
+    case 'ys_find_symbol':
+    case 'ys_references':
+    case 'ys_outline':
+      return 'search'
+    case 'ys_write_file':
+    case 'ys_edit_file':
+    case 'ys_replace':
+    case 'ys_delete_file':
+    case 'ys_move_file':
+    case 'ys_note':
+      return 'write'
+    case 'ys_run_command':
+    case 'ys_process_start':
+      return 'command'
+    case 'ys_process':
+      return isProcessStart(args) ? 'command' : 'read'
+    case 'ys_diagnostics':
+    case 'ys_check_page':
+      return 'diagnostics'
+    case 'call_tool': {
+      // Nest's catalog dispatcher: what the call it carries does.
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(args)
+      } catch {
+        return 'other'
+      }
+      const target = callToolTarget(name, parsed)
+      return target ? nestToolKind(target.name) : 'other'
+    }
+    default:
+      return nestToolKind(name)
+  }
+}
+
+/** A Nest tool's kind, by the words in its name. */
+function nestToolKind(name: string): CallKind {
+  if (/(^|_)(read|get|view|fetch|open|show)(_|$)/.test(name)) return 'read'
+  if (/(^|_)(search|list|find|query|grep|glob)(_|$)/.test(name)) return 'search'
+  if (/(^|_)(write|create|edit|update|delete|move|rename|replace|save)(_|$)/.test(name)) return 'write'
+  if (/(^|_)(run|exec|execute|python|shell)(_|$)/.test(name)) return 'command'
+  return 'other'
+}
+
+/** How a call went, for the monitor and the working state. */
+function callOutcome(info: CallInfo, planned: ToolResult, result: ToolResult): CallOutcome {
+  const effect = result.effect
+  const rejected = (effect?.kind === 'write' && !effect.applied) || (effect?.kind === 'command' && !effect.ran)
+  const outcome: CallOutcome = { ok: !result.isError && !rejected, text: result.content }
+  if (rejected) outcome.rejected = true
+  let args: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = JSON.parse(info.args)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>
+  } catch {
+    // Arguments that do not parse: nothing to read from them.
+  }
+  if (outcome.ok && info.kind === 'read' && typeof args.path === 'string') outcome.reads = [args.path]
+  if (effect?.kind === 'write' && effect.applied && planned.pendingWrite) {
+    outcome.writes = planned.pendingWrite.changes.map((c) => ({ path: c.path, before: c.before, after: c.after, isNew: c.isNew, isDeleted: c.isDeleted }))
+  }
+  if (info.name === 'ys_note' && outcome.ok && typeof args.text === 'string') {
+    outcome.note = `${typeof args.section === 'string' ? `${args.section}: ` : ''}${args.text}`
+  }
+  return outcome
 }
 
 /** The history as it may be sent: earlier calls with malformed arguments go as
@@ -552,11 +783,14 @@ function commandEffect(pending: PendingCommand, outcome: CommandOutcome | string
   return effect
 }
 
-/** The last line of a failed command's output worth quoting: not a header. */
+/** The line of a failed command's output worth quoting: the one that says
+ *  what failed, without colour codes or a CLI's frame (agent-core
+ *  failureLine; it skips the "Exit code 1 · 2.4s" header). Until 2026-11-24
+ *  it was the last line, which for Crestline's `sv` and `svelte-check` runs
+ *  was "└" and "[39m". */
 function lastMeaningfulLine(text: string): string | null {
-  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !/^(---|\[|Exit code )/.test(l))
-  const last = lines.at(-1)
-  return last ? last.slice(0, 120) : null
+  const line = failureLine(text)
+  return line ? line.slice(0, 120) : null
 }
 
 /** Replace a pending-write result's text with the honest "applied" outcome, so

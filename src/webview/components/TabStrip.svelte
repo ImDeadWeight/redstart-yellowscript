@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { tabLabel, type ConversationView, type SurfaceKind } from '../../chat/protocol.ts'
+  import { tabLabel, type ConversationView, type PageName, type SurfaceKind } from '../../chat/protocol.ts'
   import { post } from '../host.ts'
   import { flushDraft } from '../drafts.ts'
   import { view } from '../store.svelte.ts'
   import Icon from './Icon.svelte'
 
-  function openPage(page: 'projects' | 'workflows') {
+  function openPage(page: PageName) {
     view.openPage(page)
     post({ type: 'loadPage', page })
   }
@@ -85,6 +85,9 @@
   </button>
   <button type="button" class="icon-button" title="History" aria-label="History" onclick={() => post({ type: 'openHistory' })}>
     <Icon name="history" />
+  </button>
+  <button type="button" class="icon-button" title="Settings" aria-label="Settings" onclick={() => openPage('settings')}>
+    <Icon name="settings" />
   </button>
 </nav>
 

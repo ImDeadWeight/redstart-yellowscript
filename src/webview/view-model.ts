@@ -25,6 +25,7 @@ import {
   type SurfaceKind,
   type WorkflowView,
 } from '../chat/protocol.ts'
+import type { SettingView } from '../chat/settings.ts'
 import { appendPart } from '../chat/turn-parts.ts'
 
 export interface HistoryItem {
@@ -63,6 +64,8 @@ export interface ViewState {
   /** null while loading (or never loaded). */
   projects: { items: ProjectView[] | null; linkedId: string | null; error?: string }
   workflows: { items: WorkflowView[] | null; error?: string }
+  /** null until the host first sends them. */
+  settings: SettingView[] | null
   /** Set when the host was built with a different protocol: the panel is stale. */
   stale: boolean
   /** Bumped when the whole transcript is replaced, so the view can jump to the
@@ -87,6 +90,7 @@ export function initialViewState(): ViewState {
     page: null,
     projects: { items: null, linkedId: null },
     workflows: { items: null },
+    settings: null,
     stale: false,
     generation: 0,
     fileMatches: null,
@@ -176,6 +180,10 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
             },
       )
 
+    case 'turn/notice':
+      if (elsewhere(state, message.conversationId)) return state
+      return patch(state, message.id, (m) => ({ ...m, parts: appendPart(m.parts, { kind: 'notice', text: message.text }) }))
+
     case 'turn/completed':
       if (elsewhere(state, message.conversationId)) return state
       return patch(state, message.id, (m) => {
@@ -255,6 +263,9 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
 
     case 'workflows':
       return { ...state, workflows: { items: message.workflows, ...(message.error ? { error: message.error } : {}) } }
+
+    case 'settings':
+      return { ...state, settings: [...message.settings] }
 
     case 'fileMatches':
       return { ...state, fileMatches: { query: message.query, paths: message.paths } }

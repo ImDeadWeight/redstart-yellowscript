@@ -16,6 +16,7 @@ import type { ConnectionCommands } from './connection-commands.ts'
 import type { EditorActions } from './editor-actions.ts'
 import type { Projects } from './projects.ts'
 import type { Sessions } from './sessions.ts'
+import type { Settings } from './settings.ts'
 import type { Surfaces } from './surfaces.ts'
 import type { Tasks } from './tasks.ts'
 import type { Tooling } from './tooling.ts'
@@ -42,6 +43,7 @@ export interface ChatHandlersDeps {
   connection: Pick<ConnectionCommands, 'applyServerUrl' | 'signInFromPanel'>
   editorActions: Pick<EditorActions, 'resolveAttachments' | 'searchFiles'>
   tasks: Pick<Tasks, 'openDiff' | 'revert'>
+  settings: Pick<Settings, 'push' | 'update'>
   tooling: Pick<Tooling, 'restart'>
   conversations: Pick<ConversationStore, 'setDraft'>
   post: (to: Surface, message: HostMessage) => void
@@ -85,7 +87,11 @@ export function chatViewHandlers(deps: ChatHandlersDeps): ChatViewHandlers {
     onOpenHistory: (from) => surfaces.openHistory(from),
     onOpenPage: (from, page) => {
       if (page === 'projects') void projects.push(from)
+      else if (page === 'settings') deps.settings.push(from)
       else void projects.pushWorkflows(from)
+    },
+    onUpdateSetting: (from, key, value) => {
+      void deps.settings.update(from, key, value)
     },
     onLinkProject: (from, id) => {
       void projects.link(from, id)

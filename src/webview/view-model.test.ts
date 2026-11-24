@@ -67,6 +67,22 @@ describe('applyHostMessage', () => {
     assert.equal(s.messages[0]?.stats?.tokensPerSecond, 12)
   })
 
+  test("a notice goes into the turn's timeline, between what came before and after", () => {
+    const s = run(
+      init(),
+      { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '', streaming: true } },
+      { type: 'turn/delta', conversationId: 'c1', id: 't1', channel: 'reasoning', text: 'again and again' },
+      { type: 'turn/notice', conversationId: 'c1', id: 't1', text: 'Changed approach: going in a circle' },
+      { type: 'turn/notice', conversationId: 'other', id: 't1', text: 'NO' },
+      { type: 'turn/delta', conversationId: 'c1', id: 't1', channel: 'reasoning', text: 'fresh' },
+    )
+    assert.deepEqual(s.messages[0]?.parts, [
+      { kind: 'reasoning', text: 'again and again' },
+      { kind: 'notice', text: 'Changed approach: going in a circle' },
+      { kind: 'reasoning', text: 'fresh' },
+    ])
+  })
+
   test('a queued prompt with the same id updates in place', () => {
     const s = run(
       init(),

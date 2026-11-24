@@ -23,6 +23,7 @@
 
 import { toolError, toolOk, type JsonSchema, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { migrateToolName } from './approval.ts'
+import { suggestTools, unknownToolText } from '../agent/agent-core.ts'
 import { createReadFileTool } from './read-file.ts'
 import { createNoteTool } from './notes.ts'
 import { createFindSymbolTool, createOutlineTool, createReferencesTool, type SymbolProvider } from './symbols.ts'
@@ -177,11 +178,12 @@ function registryOver(tools: readonly Tool[], byName: ReadonlyMap<string, Tool>,
       const args = legacy?.args ?? parsed.value
       const tool = runnable.get(target) ?? runnable.get(migrateToolName(target))
       if (!tool) {
-        // Name the alternatives: a model that invented `read_file` can correct
-        // itself to `ys_read_file` if told what exists.
-        return toolError(
-          `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,
-        )
+        // agent-core's teaching text: what happened, and the real tool for
+        // the job (`read_file` → ys_read_file). Without a match, every name,
+        // so the model can still correct itself.
+        const names = [...byName.keys()]
+        const known = suggestTools(name, names).tools.length > 0
+        return toolError(`${unknownToolText(name, names)}${known ? '' : ` Available tools: ${names.join(', ')}.`}`)
       }
 
       // The caller's context, roots and all: a local ys_* tool handed empty

@@ -1,7 +1,7 @@
 // The live view state. One $state object, replaced whole by the pure reducer
 // in view-model.ts on every host message, so the components stay readers.
 
-import type { AttachmentView, HostMessage } from '../chat/protocol.ts'
+import type { AttachmentView, HostMessage, PageName } from '../chat/protocol.ts'
 import { applyHostMessage, initialViewState, type ViewState } from './view-model.ts'
 
 class ViewStore {
@@ -24,7 +24,7 @@ class ViewStore {
     this.current = { ...this.current, history: { ...this.current.history, open: false } }
   }
 
-  openPage(page: 'projects' | 'workflows'): void {
+  openPage(page: PageName): void {
     this.current = {
       ...this.current,
       page,

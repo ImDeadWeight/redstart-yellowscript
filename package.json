@@ -67,24 +67,9 @@
       ],
       "editor/title": [
         {
-          "command": "redstartYellowscript.moveToSidebar",
-          "group": "navigation@101",
-          "when": "activeWebviewPanelId == 'redstartYellowscript.chatPanel'"
-        },
-        {
           "command": "redstartYellowscript.openInEditor",
           "group": "navigation@100",
           "when": "config.redstartYellowscript.editorButton"
-        },
-        {
-          "command": "redstartYellowscript.openHistory",
-          "group": "navigation@102",
-          "when": "activeWebviewPanelId == 'redstartYellowscript.chatPanel'"
-        },
-        {
-          "command": "redstartYellowscript.openSettings",
-          "group": "navigation@103",
-          "when": "activeWebviewPanelId == 'redstartYellowscript.chatPanel'"
         }
       ]
     },
@@ -295,6 +280,7 @@
     "smoke": "node scripts/smoke.mjs",
     "live": "node src/bench/live.ts",
     "bench": "node src/bench/run.ts",
+    "bench:cache": "node scripts/bench-cache.mjs",
     "icons": "node scripts/make-icons.mjs",
     "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
     "sync:agent-core": "node scripts/sync-agent-core.mjs",

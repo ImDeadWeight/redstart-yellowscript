@@ -66,6 +66,8 @@ export interface Surfaces {
   create(): Conversation
   /** Put a conversation on a surface; a pure view change. */
   showIn(surface: Surface, id: string): void
+  /** The conversation on a surface, opening a new chat there when it has none. */
+  conversationOn(surface: Surface): string
   /** A chat in a new editor tab, or the tab it is already in. */
   openInEditor(id: string): void
   /** The sidebar's chat, moved to an editor tab of its own. */
@@ -265,6 +267,10 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
     pushConversations,
     create,
     showIn,
+    conversationOn(surface) {
+      if (!surface.conversationId) showIn(surface, create().id)
+      return surface.conversationId!
+    },
     openInEditor,
 
     moveSidebarToEditor() {

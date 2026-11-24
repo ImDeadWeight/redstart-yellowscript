@@ -13,27 +13,21 @@
 import * as vscode from 'vscode'
 import { hostname } from 'node:os'
 
-import { ConnectionManager, describeState } from './connection.ts'
+import { ConnectionManager } from './connection.ts'
 import { ChatSession } from './chat/session.ts'
 import { buildWorkspaceContext } from './tools/workspace-context.ts'
 import * as nodeFs from 'node:fs'
-import { PLAN_DIR, PLAN_FILE } from './chat/plan-file.ts'
-import { ContextTracker } from './agent/context-budget.ts'
 import { DEFAULT_MAX_ITERATIONS } from './agent/loop.ts'
-import type { HostMessage, SessionSnapshot } from './chat/protocol.ts'
 import { NestClient } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
-import { ChatViewProvider, type Surface } from './ui/chat-view.ts'
+import { ChatViewProvider } from './ui/chat-view.ts'
 import { diagnosticsAfterWrite, symbolProvider, workspaceRoots, approvalStore } from './ui/tool-providers.ts'
 import { makeApprovalGate, checkpointForWorkspace } from './ui/write-approval.ts'
 import type { PendingCommand } from './tools/types.ts'
 import { classifyCommand, type CommandContext } from './tools/safe-commands.ts'
 import { nodeCommandContext } from './tools/command-context.ts'
 import { usableReadRoots } from './tools/read-scope.ts'
-import { AttentionTracker, LONG_RUN_MS } from './chat/attention.ts'
-import { attachmentLabel } from './chat/attachments.ts'
-import type { AttachmentView } from './chat/protocol.ts'
 import { makeCommandGate } from './ui/run-command.ts'
 import { describeRunning } from './tools/background-processes.ts'
 import { AUTH_PROVIDER_ID, RedstartAuthProvider } from './ui/auth-provider.ts'
@@ -45,6 +39,7 @@ import { createConnectionCommands, loggedDiscovery, type ConnectionCommands } fr
 import { config, extraReadRoots } from './host/config.ts'
 import { createTooling, type Tooling } from './host/tooling.ts'
 import { createSurfaces, type Surfaces } from './host/surfaces.ts'
+import { createSessions, type SessionHooks, type Sessions } from './host/sessions.ts'
 
 let manager: ConnectionManager | undefined
 let statusBar: StatusBar | undefined
@@ -57,10 +52,8 @@ let surfaces!: Surfaces
 let connection!: ConnectionCommands
 /** This workspace's Nest project, and the account's workflows. */
 let projects!: Projects
-/** One ChatSession per conversation, keyed by conversation id. Tabs own their
- *  own transcript and request lifecycle, so switching tabs is a pure view
- *  change and a running turn keeps streaming in its own tab. */
-let sessions = new Map<string, ChatSession>()
+/** One ChatSession per conversation, and what follows from its runs. */
+let sessions!: Sessions
 /** The ys_* tools, the Nest's tools, and the processes they start. */
 let tooling!: Tooling
 /** Each conversation's running task: its trust, its checkpoints, reverting it. */
@@ -123,14 +116,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     post: (to, message) => chatView?.postTo(to, message),
     mcp: () => tooling.mcp(),
     onLinkChanged: () => surfaces.pushSession(),
-    send: (from, text, workflow) => sendTo(from, text, workflow),
+    send: (from, text, workflow) => sessions.send(from, text, workflow),
   })
 
   tooling = createTooling({
     log: output,
     roots: workspaceRoots,
     broadcast: (message) => chatView?.broadcast(message),
-    askerFor: (conversationId) => sessions.get(conversationId)?.askApproval,
+    askerFor: (conversationId) => sessions.find(conversationId)?.askApproval,
     projectId: () => projects.linked()?.id,
   })
   context.subscriptions.push(...tooling.disposables)
@@ -140,22 +133,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     symbols: symbolProvider,
     post: (to, message) => chatView?.postTo(to, message),
     revealTarget: () => surfaces.revealTarget(),
-    send: (surface, text, attachments) => sendTo(surface, text, undefined, attachments),
+    send: (surface, text, attachments) => sessions.send(surface, text, undefined, attachments),
   })
 
+  sessions = createSessions({
+    connection: manager,
+    conversations,
+    views: {
+      post: (conversationId, message) => chatView?.postToConversation(conversationId, message),
+      conversationsChanged: () => surfaces.pushConversations(),
+      sessionsChanged: () => surfaces.pushSession(),
+      conversationOn: (surface) => surfaces.conversationOn(surface),
+      needsAttention: (conversationId, what) => surfaces.notifyUnwatched(conversationId, what),
+    },
+    statusBar,
+    tasks,
+    log: output,
+    project: () => projects.linked(),
+    configuredUrl: () => config().get<string>('serverUrl', ''),
+    createSession,
+  })
   surfaces = createSurfaces({
     view: () => chatView,
     conversations,
     account: () => connection.account(),
-    sessions: {
-      find: (id) => sessions.get(id),
-      get: getSession,
-      snapshot,
-      drop: (id) => {
-        sessions.get(id)?.abort()
-        sessions.delete(id)
-      },
-    },
+    sessions,
     pages: projects,
     notifier: {
       focused: () => vscode.window.state.focused,
@@ -169,13 +171,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   chatView = new ChatViewProvider(context.extensionUri, {
     onSend: (from, text, attachments) => {
-      void editorActions.resolveAttachments(from, attachments ?? []).then((resolved) => sendTo(from, text, undefined, resolved))
+      void editorActions.resolveAttachments(from, attachments ?? []).then((resolved) => sessions.send(from, text, undefined, resolved))
     },
     onSearchFiles: (from, query) => {
       void editorActions.searchFiles(query).then((paths) => chatView?.postTo(from, { type: 'fileMatches', query, paths }))
     },
     onAbort: (from) => {
-      if (from.conversationId) getSession(from.conversationId).abort()
+      if (from.conversationId) sessions.get(from.conversationId).abort()
       surfaces.pushSession()
     },
     onNewConversation: (from) => surfaces.newIn(from),
@@ -212,23 +214,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void projects.runWorkflow(from, name, args)
     },
     onAnswer: (from, id, answer) => {
-      if (from.conversationId) getSession(from.conversationId).answer(id, answer)
+      if (from.conversationId) sessions.get(from.conversationId).answer(id, answer)
     },
     onApprove: (from, id, choice) => {
-      if (from.conversationId) getSession(from.conversationId).approve(id, choice)
+      if (from.conversationId) sessions.get(from.conversationId).approve(id, choice)
     },
     onOpenApprovalDiff: (from, id, index) => {
-      if (from.conversationId) getSession(from.conversationId).openApprovalFile(id, index)
+      if (from.conversationId) sessions.get(from.conversationId).openApprovalFile(id, index)
     },
     onClearPlan: (from) => {
-      if (from.conversationId) getSession(from.conversationId).clearPlan()
+      if (from.conversationId) sessions.get(from.conversationId).clearPlan()
     },
     onContinueAtLimit: (from, go) => {
-      if (from.conversationId) getSession(from.conversationId).continueAtLimit(go)
+      if (from.conversationId) sessions.get(from.conversationId).continueAtLimit(go)
     },
     onResumeTask: (from, restart) => {
       if (!from.conversationId) return
-      const session = getSession(from.conversationId)
+      const session = sessions.get(from.conversationId)
       // Clicking "Restart and continue" is the person's go-ahead for them.
       const resumed = session.resumeInterrupted()
       if (!resumed) return
@@ -245,13 +247,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void resumed.sent
     },
     onDismissInterrupted: (from) => {
-      if (from.conversationId) getSession(from.conversationId).dismissInterrupted()
+      if (from.conversationId) sessions.get(from.conversationId).dismissInterrupted()
     },
     onOpenTaskDiff: (from, turnId, file) => {
-      if (from.conversationId) void tasks.openDiff(getSession(from.conversationId).runOf(turnId) ?? [], file)
+      if (from.conversationId) void tasks.openDiff(sessions.get(from.conversationId).runOf(turnId) ?? [], file)
     },
     onRevertTask: (from, turnId) => {
-      if (from.conversationId) void tasks.revert(getSession(from.conversationId).runOf(turnId) ?? [])
+      if (from.conversationId) void tasks.revert(sessions.get(from.conversationId).runOf(turnId) ?? [])
     },
     onSearchHistory: (from, query) => surfaces.searchHistory(from, query),
     onDeleteHistory: (from, id) => surfaces.deleteForever(from, id),
@@ -297,7 +299,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
     }),
     vscode.commands.registerCommand('redstartYellowscript.showWaiting', () => {
-      const id = attention.firstWaiting()
+      const id = sessions.firstWaiting()
       return id ? surfaces.showConversation(id) : chatView?.reveal()
     }),
   )
@@ -310,288 +312,101 @@ export function deactivate(): void {
   statusBar?.dispose()
   statusBar = undefined
   // Cancel every conversation's in-flight turn before tearing down.
-  for (const session of sessions.values()) session.abort()
-  sessions.clear()
+  sessions?.abortAll()
   chatView = undefined
   manager = undefined
-}
-
-/**
- * Record what the model actually did with its tools.
- *
- * `recovered` is the fact worth having. It says the model did NOT emit a
- * structured `tool_calls` field and the call had to be salvaged out of its text
- * or its reasoning — which is the difference between llama.cpp parsing this
- * model's chat template correctly and the fallback carrying the whole feature.
- * That is a per-model property, invisible from the panel, and the thing to check
- * first when switching models or when the agent starts behaving oddly.
- *
- * Arguments are logged trimmed: they are model-authored and can be a whole file
- * of content on a Phase 3 write call.
- */
-/**
- * One context tracker per connected client: n_ctx is read from the Nest once
- * (llama-server's /props), and the gateway's overhead is learned from replies.
- * Keyed weakly, so a reconnect (a new client) starts fresh.
- */
-const contextTrackers = new WeakMap<NestClient, ContextTracker>()
-function contextFor(client: NestClient | null): ContextTracker | null {
-  if (!client) return null
-  let tracker = contextTrackers.get(client)
-  if (!tracker) {
-    tracker = new ContextTracker(client)
-    contextTrackers.set(client, tracker)
-    void tracker.ready().then(() => {
-      // Now known whether the model reads images: the composer says so.
-      surfaces.pushSession()
-      output?.info(`context: n_ctx ${tracker!.contextSize ?? 'unknown (learned from the first refusal)'}`)
-    })
-  }
-  return tracker
-}
-
-function logToolActivity(message: HostMessage): void {
-  if (message.type === 'tool/call') {
-    const args = message.arguments.length > 300 ? `${message.arguments.slice(0, 300)}…` : message.arguments
-    output?.info(
-      `tool call: ${message.name}(${args})` +
-        (message.recovered ? '  [RECOVERED from text — no structured tool_calls]' : ''),
-    )
-  } else if (message.type === 'tool/result') {
-    output?.info(
-      `tool result: ${message.name} -> ${message.isError ? 'ERROR' : 'ok'}` +
-        `${message.truncated ? ', truncated' : ''} — ${message.summary}`,
-    )
-  }
 }
 
 // ---------------------------------------------------------------------------
 // Per-conversation sessions
 // ---------------------------------------------------------------------------
 
-/**
- * The ChatSession for a conversation, created on demand and cached. Each tab
- * owns its transcript, its AbortController, and its prompt queue, so switching
- * tabs never touches another tab's running turn.
- */
-function getSession(id: string): ChatSession {
-  let session = sessions.get(id)
-  if (!session) {
-    session = new ChatSession({
-      getClient: () => manager?.activeClient ?? null,
-      context: () => contextFor(manager?.activeClient ?? null),
-      diagnosticsAfterWrite,
-      onPlanChanged: (steps) => tasks.writePlan(steps),
-      workspaceContext: () => {
-        const root = workspaceRoots()[0]
-        if (!root) return null
-        // What it is told about keeping notes, plans and memories follows the
-        // tools it actually has, and whether the workspace has a project.
-        return buildWorkspaceContext(root, undefined, {
-          tools: tooling.current().names,
-          project: projects.linked()?.name ?? null,
+/** One conversation's ChatSession, with everything its agent runs against. */
+function createSession(id: string, hooks: SessionHooks): ChatSession {
+  const session: ChatSession = new ChatSession({
+    getClient: () => manager?.activeClient ?? null,
+    context: hooks.context,
+    diagnosticsAfterWrite,
+    onPlanChanged: (steps) => tasks.writePlan(steps),
+    workspaceContext: () => {
+      const root = workspaceRoots()[0]
+      if (!root) return null
+      // What it is told about keeping notes, plans and memories follows the
+      // tools it actually has, and whether the workspace has a project.
+      return buildWorkspaceContext(root, undefined, {
+        tools: tooling.current().names,
+        project: projects.linked()?.name ?? null,
+      })
+    },
+    liveState: () => describeRunning(tooling.processes.list()),
+    maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
+    onContextTrimmed: (report) => {
+      output?.info(
+        `context: trimmed to fit (~${report.before} → ~${report.after} of ${report.usable ?? '?'} usable tokens; ` +
+          `${report.stubbed} old results stubbed, ${report.shrunk} calls shrunk, ${report.capped} messages capped)` +
+          (report.overLimit ? '  [STILL OVER the window]' : ''),
+      )
+    },
+    onUnauthorized: () => manager?.handleUnauthorized(),
+    tools: () => (workspaceRoots().length > 0 ? tooling.current() : null),
+    toolContext: () => ({
+      workspaceRoots: workspaceRoots(),
+      readRoots: extraReadRoots(),
+      askRead: async (request) => {
+        const outside = request.outsideFolder
+        const choice = await session.askApproval({
+          kind: 'tool',
+          title: outside ? 'Read outside the workspace' : 'Read a file that may hold secrets',
+          subject: request.label,
+          detail: outside
+            ? `It is outside the workspace. Reading only; nothing there is ever written. "Always" allows reading ${outside}.`
+            : `${request.reason}. What it says goes to the model and is saved with this chat.`,
+          options: [
+            { id: 'read', label: 'Allow this time', kind: 'allow' },
+            ...(outside ? [{ id: 'always', label: 'Always for this folder', kind: 'always' as const }] : []),
+            { id: 'deny', label: 'Deny', kind: 'deny' },
+          ],
         })
-      },
-      liveState: () => describeRunning(tooling.processes.list()),
-      maxTurns: () => config().get<number>('agent.maxTurns') ?? DEFAULT_MAX_ITERATIONS,
-      onContextTrimmed: (report) => {
-        output?.info(
-          `context: trimmed to fit (~${report.before} → ~${report.after} of ${report.usable ?? '?'} usable tokens; ` +
-            `${report.stubbed} old results stubbed, ${report.shrunk} calls shrunk, ${report.capped} messages capped)` +
-            (report.overLimit ? '  [STILL OVER the window]' : ''),
-        )
-      },
-      onUnauthorized: () => manager?.handleUnauthorized(),
-      tools: () => (workspaceRoots().length > 0 ? tooling.current() : null),
-      toolContext: () => ({
-        workspaceRoots: workspaceRoots(),
-        readRoots: extraReadRoots(),
-        askRead: async (request) => {
-          const outside = request.outsideFolder
-          const choice = await getSession(id).askApproval({
-            kind: 'tool',
-            title: outside ? 'Read outside the workspace' : 'Read a file that may hold secrets',
-            subject: request.label,
-            detail: outside
-              ? `It is outside the workspace. Reading only; nothing there is ever written. "Always" allows reading ${outside}.`
-              : `${request.reason}. What it says goes to the model and is saved with this chat.`,
-            options: [
-              { id: 'read', label: 'Allow this time', kind: 'allow' },
-              ...(outside ? [{ id: 'always', label: 'Always for this folder', kind: 'always' as const }] : []),
-              { id: 'deny', label: 'Deny', kind: 'deny' },
-            ],
-          })
-          if (choice === 'always' && outside) {
-            await config().update('extraReadRoots', [...new Set([...extraReadRoots(), outside])], vscode.ConfigurationTarget.Workspace)
-          }
-          return choice === 'read' || choice === 'always'
-        },
-      }),
-      approveChange: (pending) => {
-        const roots = workspaceRoots()
-        if (roots.length === 0) {
-          output?.warn('No workspace folder is open, so writes cannot be reviewed or applied.')
-          return Promise.resolve(false)
+        if (choice === 'always' && outside) {
+          await config().update('extraReadRoots', [...new Set([...extraReadRoots(), outside])], vscode.ConfigurationTarget.Workspace)
         }
-        const gate = makeApprovalGate({
-          ask: (request) => getSession(id).askApproval(request),
-          checkpoints: checkpointForWorkspace(roots[0]!),
-          root: roots[0]!,
-          store: approvalStore(),
-          recordCheckpoint: (checkpoint, files) => tasks.recordCheckpoint(id, roots[0]!, checkpoint, files),
-          task: {
-            trusted: () => tasks.trusted(id),
-            trust: () => tasks.trust(id),
-          },
-        })
-        return gate(pending)
+        return choice === 'read' || choice === 'always'
       },
-      approveCommand: (pending) =>
-        makeCommandGate({
-          channel: tooling.commandChannel,
-          processes: tooling.processes,
-          ask: (request) => getSession(id).askApproval(request),
-          classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
-          conversationId: id,
-          nonInteractive: () => config().get<boolean>('commands.nonInteractive') !== false,
-        })(pending),
-      conversationId: id,
-      projectId: () => projects.linked()?.id ?? null,
-      onPersist: () => persistConversation(id),
-      emit: (message) => {
-        // A task is one user message's run: it starts when that message runs
-        // (not when it queues) and ends with the turn. "Apply all in this
-        // task" lasts until then; its checkpoints stay for Revert Last Task.
-        if (message.type === 'message' && message.message.role === 'user' && !message.message.pending) {
-          tasks.start(id)
-          attention.runStarted(id)
-        } else if (message.type === 'turn/completed' || message.type === 'turn/failed') {
-          tasks.end(id)
-          const took = attention.runEnded(id)
-          if (took !== null && took > LONG_RUN_MS) surfaces.notifyUnwatched(id, `finished after ${Math.round(took / 60_000)} min`)
-        } else if (message.type === 'conversationState') {
-          const news = attention.update(id, message.state)
-          statusBar?.setWaiting(attention.count)
-          if (news) surfaces.notifyUnwatched(id, `is waiting for ${news}`)
-        }
-        // Only the views showing this chat; the others are on their own.
-        chatView?.postToConversation(id, message)
-        // The tab strip's busy dots and an editor tab's title follow the run.
-        if (
-          (message.type === 'message' && message.message.role === 'user' && !message.message.pending) ||
-          message.type === 'turn/completed' ||
-          message.type === 'turn/failed'
-        ) {
-          surfaces.pushConversations()
-        }
-        if (message.type === 'turn/completed' && message.stats?.tokensPerSecond) {
-          statusBar?.setModel(getSession(message.conversationId).currentModel ?? null, message.stats.tokensPerSecond)
-        }
-        logToolActivity(message)
-      },
-    })
-    sessions.set(id, session)
-
-    // Lazy-load the transcript from the store so background tabs fully restore
-    // when clicked. The host already seeded the active tab on init; this covers
-    // every other tab the user opens later.
-    const conv = conversations.get(id)
-    if (conv && (conv.messages.length > 0 || conv.plan)) {
-      session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
-    } else {
-      // A fresh conversation carries on the workspace's plan while steps are
-      // open (.yellowscript/PLAN.md, kept by onPlanChanged).
-      const carried = tasks.readPlan()
-      if (carried) {
-        session.load([], carried)
-        output?.info(`plan: carried ${carried.length} step(s) from ${PLAN_DIR}/${PLAN_FILE} into a new conversation`)
+    }),
+    approveChange: (pending) => {
+      const roots = workspaceRoots()
+      if (roots.length === 0) {
+        output?.warn('No workspace folder is open, so writes cannot be reviewed or applied.')
+        return Promise.resolve(false)
       }
-    }
-  }
-  return session
-}
-
-/**
- * Send to the conversation on a surface (opening one if it has none), and
- * title a new chat from its first prompt, or from the workflow it ran.
- */
-function sendTo(surface: Surface, text: string, workflow?: { name: string; title: string }, attachments?: AttachmentView[]): void {
-  if (!surface.conversationId) surfaces.showIn(surface, surfaces.create().id)
-  const conversationId = surface.conversationId!
-  // Sent, so no longer a draft. Cleared here rather than trusting the
-  // webview's follow-up, which could land after a save below.
-  conversations.setDraft(conversationId, '')
-  // Title a still-untitled chat now, from what was sent. Waiting for the run
-  // to finish left a long run as one more "New chat" tab for its whole length,
-  // indistinguishable from the empty ones around it.
-  const conv = conversations.get(conversationId)
-  if (conv && conv.title === 'New chat') {
-    const label = workflow ? workflow.title : text.trim() || (attachments?.[0] ? attachmentLabel(attachments[0]) : '')
-    if (label) {
-      conv.title = titleFor(label)
-      conversations.save(conv)
-    }
-  }
-  const finished = getSession(conversationId).send(text, workflow, attachments)
-  surfaces.pushConversations()
-  surfaces.pushSession()
-  void finished.then(() => {
-    surfaces.pushConversations()
-    surfaces.pushSession()
+      const gate = makeApprovalGate({
+        ask: (request) => session.askApproval(request),
+        checkpoints: checkpointForWorkspace(roots[0]!),
+        root: roots[0]!,
+        store: approvalStore(),
+        recordCheckpoint: (checkpoint, files) => tasks.recordCheckpoint(id, roots[0]!, checkpoint, files),
+        task: {
+          trusted: () => tasks.trusted(id),
+          trust: () => tasks.trust(id),
+        },
+      })
+      return gate(pending)
+    },
+    approveCommand: (pending) =>
+      makeCommandGate({
+        channel: tooling.commandChannel,
+        processes: tooling.processes,
+        ask: (request) => session.askApproval(request),
+        classify: (command) => classifyCommand(command.command, commandContextFor(id, command)),
+        conversationId: id,
+        nonInteractive: () => config().get<boolean>('commands.nonInteractive') !== false,
+      })(pending),
+    conversationId: id,
+    projectId: () => projects.linked()?.id ?? null,
+    onPersist: hooks.onPersist,
+    emit: hooks.emit,
   })
-}
-
-/** Persist a conversation's transcript from its session to the store. */
-function persistConversation(id: string): void {
-  const session = sessions.get(id)
-  const conv = conversations.get(id)
-  if (!session || !conv) return
-  conv.messages = session.snapshot()
-  const plan = session.planSnapshot()
-  if (plan) conv.plan = plan
-  else delete conv.plan
-  const inFlight = session.inFlightSnapshot()
-  if (inFlight) conv.inFlight = inFlight
-  else delete conv.inFlight
-  conversations.save(conv)
-}
-
-// ---------------------------------------------------------------------------
-// Session snapshot — the projection the webview renders around the transcript
-// ---------------------------------------------------------------------------
-
-/** Snapshot for one conversation: `connected` gates sending; `busy` and
- *  `queued` describe that conversation's own turn, not a global one. */
-function snapshot(id: string | null): SessionSnapshot {
-  const state = manager?.state ?? { status: 'disconnected' as const }
-  const connected = state.status === 'connected'
-  const session = id ? sessions.get(id) : undefined
-  const busy = session?.busy === true
-  const queued = session?.queued ?? 0
-
-  const base: SessionSnapshot = {
-    connection: state.status,
-    detail: describeState(state),
-    // Sending only needs a connection — a queued turn is allowed while busy.
-    canSend: connected,
-    busy,
-    queued,
-  }
-  if ('url' in state && state.url) base.serverUrl = state.url
-  const model = session?.currentModel
-  if (model) base.model = model
-  const project = connected ? projects.linked() : null
-  if (project) base.project = { id: project.id, name: project.name }
-  const tracker = connected ? contextFor(manager?.activeClient ?? null) : null
-  if (tracker) base.vision = tracker.vision
-  const configured = config().get<string>('serverUrl', '').trim()
-  if (configured) base.configuredUrl = configured
-  return base
-}
-
-function titleFor(text: string): string {
-  const cleaned = text.trim().replace(/\s+/g, ' ')
-  return cleaned.length <= 40 ? cleaned : cleaned.slice(0, 37).trimEnd() + '…'
+  return session
 }
 
 async function openSettingsCommand(): Promise<void> {
@@ -601,9 +416,6 @@ async function openSettingsCommand(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Which conversations wait on the person, and how long runs take. */
-const attention = new AttentionTracker()
 
 /** What the command classifier needs to know about this workspace and run. */
 function commandContextFor(conversationId: string, pending: PendingCommand): CommandContext {

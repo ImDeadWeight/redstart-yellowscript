@@ -10,19 +10,20 @@
   import AttachmentChips from './AttachmentChips.svelte'
   import AttachButton from './AttachButton.svelte'
   import ContextMeter from './ContextMeter.svelte'
+  import ComposerMenu from './ComposerMenu.svelte'
 
   let { session, viewState }: { session: SessionSnapshot; viewState: ViewState } = $props()
 
   let text = $state('')
   let box: HTMLTextAreaElement | undefined = $state()
-  let highlighted = $state(0)
-  let dismissed = $state(false)
+  /** The `/` and `@` menus, which take the keys they use. */
+  type Menu = { keydown(event: KeyboardEvent): boolean; reopen(): void }
+  let workflowMenu: Menu | undefined = $state()
+  let fileMenu: Menu | undefined = $state()
   /** Images, @files and selections going with the next message. */
   let attachments = $state<AttachmentView[]>([])
   /** Where the caret is, for the @ picker. */
   let caret = $state(0)
-  let fileHighlighted = $state(0)
-  let fileDismissed = $state(false)
 
   const placeholder = $derived(composerPlaceholder(viewState))
 
@@ -59,17 +60,9 @@
   const query = $derived(slashQuery(text))
   const workflows = $derived(viewState.workflows.items)
   const matches = $derived(query !== null && workflows ? matchWorkflows(workflows, query) : [])
-  const menuOpen = $derived(query !== null && !dismissed)
 
   $effect(() => {
     if (query !== null && workflows === null) post({ type: 'loadPage', page: 'workflows' })
-  })
-  $effect(() => {
-    void query
-    highlighted = 0
-  })
-  $effect(() => {
-    if (query === null) dismissed = false
   })
 
   // Chips the host sent (the editor's "Add to Yellowscript").
@@ -83,16 +76,8 @@
   // `@` then part of a path: workspace files to attach.
   const fileQuery = $derived(query === null ? atQuery(text.slice(0, caret)) : null)
   const fileMatches = $derived(fileQuery !== null && viewState.fileMatches?.query === fileQuery ? viewState.fileMatches.paths : null)
-  const fileMenuOpen = $derived(fileQuery !== null && !fileDismissed)
   $effect(() => {
     if (fileQuery !== null) post({ type: 'searchFiles', query: fileQuery })
-  })
-  $effect(() => {
-    void fileQuery
-    fileHighlighted = 0
-  })
-  $effect(() => {
-    if (fileQuery === null) fileDismissed = false
   })
 
   function chooseFile(path: string) {
@@ -140,7 +125,7 @@
     const insert = before && !/\s$/.test(before) ? ' @' : '@'
     text = before + insert + text.slice(at)
     caret = before.length + insert.length
-    fileDismissed = false
+    fileMenu?.reopen()
     void Promise.resolve().then(() => {
       resize()
       box?.focus()
@@ -173,47 +158,8 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (fileMenuOpen && fileMatches && fileMatches.length > 0) {
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault()
-        fileHighlighted = (fileHighlighted + (event.key === 'ArrowDown' ? 1 : -1) + fileMatches.length) % fileMatches.length
-        return
-      }
-      if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
-        event.preventDefault()
-        const pick = fileMatches[fileHighlighted]
-        if (pick) chooseFile(pick)
-        return
-      }
-    }
-    if (fileMenuOpen && event.key === 'Escape') {
-      event.preventDefault()
-      fileDismissed = true
-      return
-    }
-    if (menuOpen && matches.length > 0) {
-      if (event.key === 'ArrowDown') {
-        event.preventDefault()
-        highlighted = (highlighted + 1) % matches.length
-        return
-      }
-      if (event.key === 'ArrowUp') {
-        event.preventDefault()
-        highlighted = (highlighted - 1 + matches.length) % matches.length
-        return
-      }
-      if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
-        event.preventDefault()
-        const pick = matches[highlighted]
-        if (pick) choose(pick)
-        return
-      }
-    }
-    if (menuOpen && event.key === 'Escape') {
-      event.preventDefault()
-      dismissed = true
-      return
-    }
+    // An open menu takes the arrows, Enter, Tab and Escape.
+    if (fileMenu?.keydown(event) || workflowMenu?.keydown(event)) return
     // Enter sends; Shift+Enter is a newline, like every chat the person knows.
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
@@ -236,54 +182,36 @@
 </script>
 
 <div class="composer" role="group" aria-label="Compose a message" ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
-  {#if fileMenuOpen}
-    <div class="menu" role="listbox" aria-label="Files">
-      {#if fileMatches === null}
-        <div class="menu-note"><Icon name="spinner" size={12} /> Finding files…</div>
-      {:else if fileMatches.length === 0}
-        <div class="menu-note">No file matches.</div>
-      {:else}
-        {#each fileMatches as path, i (path)}
-          <button
-            type="button"
-            class="option"
-            class:active={i === fileHighlighted}
-            role="option"
-            aria-selected={i === fileHighlighted}
-            onmouseenter={() => (fileHighlighted = i)}
-            onclick={() => chooseFile(path)}
-          >
-            <span class="slash">@{path}</span>
-          </button>
-        {/each}
-      {/if}
-    </div>
-  {:else if menuOpen}
-    <div class="menu" role="listbox" aria-label="Workflows">
-      {#if workflows === null}
-        <div class="menu-note"><Icon name="spinner" size={12} /> Loading workflows…</div>
-      {:else if matches.length === 0}
-        <div class="menu-note">
-          {workflows.length === 0 ? 'No workflows yet. Create them in the chat app.' : 'No workflow matches.'}
-        </div>
-      {:else}
-        {#each matches as workflow, i (workflow.name)}
-          <button
-            type="button"
-            class="option"
-            class:active={i === highlighted}
-            role="option"
-            aria-selected={i === highlighted}
-            onmouseenter={() => (highlighted = i)}
-            onclick={() => choose(workflow)}
-          >
-            <span class="slash">/{workflow.name}</span>
-            <span class="title">{workflow.title}{workflow.arguments.length ? '…' : ''}</span>
-          </button>
-        {/each}
-      {/if}
-    </div>
-  {/if}
+  <!-- At most one is open: the @ menu only looks for a query when there is no / one. -->
+  <ComposerMenu
+    bind:this={fileMenu}
+    query={fileQuery}
+    items={fileMatches}
+    label="Files"
+    loadingNote="Finding files…"
+    emptyNote="No file matches."
+    key={(path) => path}
+    onChoose={chooseFile}
+  >
+    {#snippet option(path)}
+      <span class="slash">@{path}</span>
+    {/snippet}
+  </ComposerMenu>
+  <ComposerMenu
+    bind:this={workflowMenu}
+    {query}
+    items={workflows === null ? null : matches}
+    label="Workflows"
+    loadingNote="Loading workflows…"
+    emptyNote={workflows?.length === 0 ? 'No workflows yet. Create them in the chat app.' : 'No workflow matches.'}
+    key={(workflow) => workflow.name}
+    onChoose={choose}
+  >
+    {#snippet option(workflow)}
+      <span class="slash">/{workflow.name}</span>
+      <span class="title">{workflow.title}{workflow.arguments.length ? '…' : ''}</span>
+    {/snippet}
+  </ComposerMenu>
   <AttachmentChips {attachments} {imagesBlocked} onRemove={removeAttachment} />
   <textarea
     bind:this={box}
@@ -380,39 +308,6 @@
     font-size: 0.8em;
     opacity: 0.5;
   }
-  .menu {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: calc(100% + 4px);
-    max-height: 220px;
-    overflow-y: auto;
-    padding: 4px;
-    z-index: 5;
-    border-radius: 6px;
-    border: 1px solid var(--vscode-widget-border, var(--ys-card-border));
-    background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
-    box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
-  }
-  .option {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    width: 100%;
-    padding: 5px 8px;
-    font: inherit;
-    color: inherit;
-    text-align: left;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .option.active {
-    background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
-    color: var(--vscode-list-activeSelectionForeground, inherit);
-  }
   .slash { font-family: var(--vscode-editor-font-family); font-size: 0.9em; }
   .title { opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .menu-note { display: flex; align-items: center; gap: 6px; padding: 6px 8px; opacity: 0.7; }
 </style>

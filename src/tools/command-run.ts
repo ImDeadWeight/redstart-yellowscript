@@ -129,7 +129,33 @@ export function formatCommandRun(run: CommandRun): string {
   if (/Invalid switch - /i.test(`${stdout}\n${stderr}`)) {
     parts.push('[cmd.exe reads a "/" in a path as a switch ("dir a/b" is "dir a /b"): write paths with backslashes.]')
   }
+  const hashImport = unresolvedHashImport(`${stdout}\n${stderr}`)
+  if (hashImport) parts.push(hashImportHint(hashImport))
   return parts.join('\n')
+}
+
+/**
+ * The first `#name/...` import with no extension that a checker could not
+ * resolve. SvelteKit 3 scaffolds `#lib` through package.json "imports"
+ * instead of the `$lib` alias, and an imports pattern is plain text
+ * substitution: `#lib/quote` is `./src/lib/quote`, which TypeScript does not
+ * find although Vite does. The model hunted for missing generated types for
+ * a whole turn (Crestline, 2026-11-24).
+ */
+export function unresolvedHashImport(output: string): string | null {
+  const m = /(?:Cannot find module|Failed to resolve import|Could not resolve|Package import specifier)\s+["'`](#[\w@$-]*\/[^"'`\s]+)["'`]/i.exec(output)
+  if (!m) return null
+  const specifier = m[1]!
+  return /\.[cm]?[jt]sx?$|\.svelte$|\.json$/i.test(specifier.split('/').at(-1) ?? '') ? null : specifier
+}
+
+function hashImportHint(specifier: string): string {
+  const prefix = specifier.split('/')[0]
+  return (
+    `[${prefix} comes from the "imports" field of package.json, which maps it by plain text substitution: ` +
+    `"${specifier}" points at a file with no extension. Write the extension, as in "${specifier}.js" ` +
+    "(TypeScript maps .js to the .ts file) or the file's own extension. Nothing generated is missing.]"
+  )
 }
 
 /** A run failed when it did not start, timed out, or exited non-zero. */

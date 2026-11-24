@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { classifyCommand, endsProcesses, pidsIn, redactUrlCredentials, splitWords, type CommandContext } from './safe-commands.ts'
+import { classifyCommand, endsProcesses, pidsIn, redactUrlCredentials, splitWords, withoutStderrRedirects, type CommandContext } from './safe-commands.ts'
 
 const root = path.join(os.tmpdir(), 'ys-safe-ws')
 const sibling = path.join(os.tmpdir(), 'ys-safe-sibling')
@@ -261,4 +261,24 @@ test("tasklist lists this machine's processes unasked; another machine's asks", 
   assert.equal(tier('tasklist /FO CSV /NH', { platform: 'win32' }), 'A')
   assert.equal(tier('tasklist /FI "IMAGENAME eq node.exe" /FO TABLE', { platform: 'win32' }), 'A')
   assert.equal(tier('tasklist /S server01', { platform: 'win32' }), 'C')
+})
+
+describe('stderr redirects change nothing about a line (2026-11-24)', () => {
+  test('2>&1, 2>nul, 2>/dev/null and 2>$null are dropped outside quotes', () => {
+    assert.equal(withoutStderrRedirects('npx vitest run 2>&1'), 'npx vitest run')
+    assert.equal(withoutStderrRedirects('dir src 2>nul'), 'dir src')
+    assert.equal(withoutStderrRedirects('ls src 2> /dev/null'), 'ls src')
+    assert.equal(withoutStderrRedirects('git status 2>$null && npm test 2>&1'), 'git status && npm test')
+    assert.equal(withoutStderrRedirects('grep "a 2>&1 b" src'), 'grep "a 2>&1 b" src')
+  })
+  test('a redirect into a file, or of stdout, stays', () => {
+    assert.equal(withoutStderrRedirects('npm test 2>err.txt'), 'npm test 2>err.txt')
+    assert.equal(withoutStderrRedirects('npm test >nul 2>&1'), 'npm test >nul')
+  })
+  test('a safe line is still safe with them', () => {
+    assert.equal(tier('npx vitest run 2>&1'), 'B')
+    assert.equal(tier('npm test 2>&1'), 'B')
+    assert.equal(tier('dir src 2>nul', { platform: 'win32' }), 'A')
+    assert.equal(tier('npm test 2>out.txt'), 'C')
+  })
 })

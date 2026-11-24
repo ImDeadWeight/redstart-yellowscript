@@ -500,8 +500,27 @@ export function pidsIn(line: string): number[] {
 
 // --- The classifier --------------------------------------------------------------
 
+/**
+ * `line` without redirects that only move or drop stderr: `2>&1`, `2>nul`,
+ * `2>/dev/null`, `2>$null`, outside quotes. The run captures stdout and stderr
+ * apart and shows both, so these change nothing a command does, and models add
+ * one to nearly every line (`npx svelte-kit sync 2>&1`), which made a line
+ * the person had allowed ask every time (2026-11-24). A redirect into a file
+ * is real writing and stays.
+ */
+export function withoutStderrRedirects(line: string): string {
+  return line
+    .split(/("[^"]*"|'[^']*')/)
+    .map((piece, i) =>
+      i % 2 === 1 ? piece : piece.replace(/(^|\s)2>\s*(?:&1|nul|\/dev\/null|\$null)(?=\s|&&|$)/gi, '$1').replace(/[ \t]{2,}/g, ' '),
+    )
+    .join('')
+    .trim()
+}
+
 /** The tier of one command line. */
-export function classifyCommand(line: string, ctx: CommandContext): CommandTier {
+export function classifyCommand(rawLine: string, ctx: CommandContext): CommandTier {
+  const line = withoutStderrRedirects(rawLine)
   if (SHELL_COMPOSITION.test(line)) {
     // `a && b`, and nothing else: each part on its own.
     const chain = andChain(line, ctx.platform)

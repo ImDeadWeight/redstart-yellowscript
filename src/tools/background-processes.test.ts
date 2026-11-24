@@ -18,7 +18,7 @@ import {
   formatProcessList,
   startInBackground,
 } from './background-processes.ts'
-import { LABEL_CHAT, LABEL_RUN, formatCommandRun, looksLikePrompt, runCommandLine, runFailed } from './command-run.ts'
+import { LABEL_CHAT, LABEL_RUN, formatCommandRun, looksLikePrompt, runCommandLine, runFailed, unresolvedHashImport, type CommandRun } from './command-run.ts'
 import { createProcessTool, legacyProcessCall } from './process-tools.ts'
 import { allowPrefixFor, isCommandAllowed } from './approval.ts'
 
@@ -270,5 +270,19 @@ describe('processes Yellowscript can name', () => {
     const missing = await tool.execute({ action: 'stop', id: 'c9' }, { workspaceRoots: [cwd], readRoots: [] } as never)
     assert.equal(missing.isError, true)
     assert.match(missing.content, /no process "c9" started by Yellowscript/)
+  })
+})
+
+describe('an unresolved #-import gets a hint (Crestline, 2026-11-24)', () => {
+  const run = (stdout: string): CommandRun => ({ exitCode: 1, signal: null, stdout, stderr: '', durationMs: 10, timedOut: false })
+  it('says an imports pattern needs the extension', () => {
+    const text = formatCommandRun(run(`Error: Cannot find module '#lib/quote' or its corresponding type declarations.`))
+    assert.match(text, /"imports" field of package\.json/)
+    assert.match(text, /"#lib\/quote\.js"/)
+  })
+  it('stays quiet when the import has an extension, or is not a # import', () => {
+    assert.equal(unresolvedHashImport(`Cannot find module '#lib/quote.js'`), null)
+    assert.equal(unresolvedHashImport(`Cannot find module '$lib/quote'`), null)
+    assert.equal(unresolvedHashImport(`Failed to resolve import "#lib/quote" from "src/routes/+page.svelte"`), '#lib/quote')
   })
 })

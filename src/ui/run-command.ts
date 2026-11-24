@@ -21,7 +21,7 @@ import * as vscode from 'vscode'
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
 import { describeKillTargets, startInBackground, type BackgroundProcesses } from '../tools/background-processes.ts'
 import { formatCommandRun, runFailed } from '../tools/command-run.ts'
-import { endsProcesses } from '../tools/safe-commands.ts'
+import { endsProcesses, withoutStderrRedirects } from '../tools/safe-commands.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
 import type { AskApproval } from '../chat/approvals.ts'
@@ -69,7 +69,9 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
     const neverAlways = tier?.tier === 'C' ? tier.neverAlways : undefined
     // In a chain whose other parts are safe (`cd app && npm install`), the
     // one part that asks is what "Always allow" is offered for and matched on.
-    const asked = tier?.tier === 'C' && tier.asks ? tier.asks : pending.command
+    // Matched without `2>&1` / `2>nul`: "npx svelte-kit" allowed is that line
+    // with them too.
+    const asked = withoutStderrRedirects(tier?.tier === 'C' && tier.asks ? tier.asks : pending.command)
     const allowedAlready = !safe && !neverAlways && isCommandAllowed(asked, allowedCommands())
     if (!safe && !allowedAlready) {
       const prefix = neverAlways ? null : allowPrefixFor(asked)

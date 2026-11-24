@@ -81,3 +81,49 @@ describe('ys_run_command refuses commands that do nothing (2026-11-19)', () => {
     }
   })
 })
+
+describe('a package manager that would leave the workspace (2026-11-24)', () => {
+  // outer/ has a package.json; the workspace outer/ws has none at its root,
+  // and one project folder, outer/ws/app.
+  let outer: string
+  let ws: string
+  let wsCtx: { workspaceRoots: string[] }
+  before(() => {
+    outer = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'yellowscript-escape-')))
+    fs.writeFileSync(path.join(outer, 'package.json'), '{"scripts":{"build":"esbuild"}}')
+    ws = path.join(outer, 'ws')
+    fs.mkdirSync(path.join(ws, 'app'), { recursive: true })
+    fs.mkdirSync(path.join(ws, 'empty'))
+    fs.writeFileSync(path.join(ws, 'app', 'package.json'), '{}')
+    wsCtx = { workspaceRoots: [ws] }
+  })
+  after(() => fs.rmSync(outer, { recursive: true, force: true }))
+
+  it('refuses npm run build where the nearest package.json is outside, and names the project', async () => {
+    const result = await runCommandTool.execute({ command: 'npm run build 2>&1' }, wsCtx)
+    assert.equal(result.isError, true)
+    assert.equal(result.pendingCommand, undefined)
+    assert.match(result.content, /outside the workspace/)
+    assert.match(result.content, /"app"/)
+  })
+
+  it('refuses npm install in a folder with no package.json of its own', async () => {
+    const result = await runCommandTool.execute({ command: 'npm install', cwd: 'empty' }, wsCtx)
+    assert.equal(result.isError, true)
+  })
+
+  it('plans it in the project folder, by cwd or by a leading cd', async () => {
+    for (const args of [{ command: 'npm run build', cwd: 'app' }, { command: 'cd app && npm test' }]) {
+      const result = await runCommandTool.execute(args, wsCtx)
+      assert.equal(result.isError, false, JSON.stringify(args))
+      assert.ok(result.pendingCommand)
+    }
+  })
+
+  it('leaves npx, create and init alone: a new folder has no package.json yet', async () => {
+    for (const command of ['npx sv create . --template minimal', 'npm create vite@latest app', 'npm init -y', 'npm --version', 'git status']) {
+      const result = await runCommandTool.execute({ command, cwd: 'empty' }, wsCtx)
+      assert.equal(result.isError, false, command)
+    }
+  })
+})

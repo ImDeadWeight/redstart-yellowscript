@@ -75,6 +75,7 @@ import {
 } from './agent-core.ts'
 import type { ToolPayloadEntry } from '../tools/registry.ts'
 import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
+import { createKeepNudge } from './keep-nudge.ts'
 
 /**
  * How many model round trips one user message may cost before the person is
@@ -240,6 +241,9 @@ export interface AgentLoopOptions {
   /** Stagnation thresholds (agent-core STAGNATION_LIMITS). STAGNATION_OFF
    *  leaves only the exact-repeat guard. */
   stagnation?: Partial<StagnationLimits> | undefined
+  /** Remind the model to ys_note what a recovery taught it (keep-nudge.ts).
+   *  Default: on when ys_note is offered. */
+  keepNudges?: boolean | undefined
 }
 
 /**
@@ -320,6 +324,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   let resultImages: string[] = []
   const monitor = createStagnationMonitor(options.stagnation)
   const workingState = createWorkingState()
+  /** Asks the model to ys_note what a recovery taught it (keep-nudge.ts). */
+  const keep = createKeepNudge(options.keepNudges ?? options.tools.names.includes('ys_note'))
   /** Old results have been trimmed in this run: the working state rides along. */
   let trimmed = false
   /** The note owed to the next request (a stagnation recovery). */
@@ -382,7 +388,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           monitor.startResponse()
           workingState.setPlan(options.plan?.get())
           const note = pendingNote
-          const tail = [note, trimmed && !workingState.empty ? workingState.render() : null]
+          // A stuck run's note is the one to read: no reminder beside it.
+          const tail = [note ?? keep.take(options.plan?.get()), trimmed && !workingState.empty ? workingState.render() : null]
           pendingNote = null
           return options.client
             .streamChatCompletion(
@@ -508,6 +515,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         }
         monitor.record(info, outcome)
         workingState.observe(info, outcome)
+        keep.observe(info, outcome)
         handlers.onToolResult?.(toolCall, resultForModel)
         toolRuns.push({ call: toolCall, result: resultForModel, recovered })
         resultImages = resultForModel.images ?? []

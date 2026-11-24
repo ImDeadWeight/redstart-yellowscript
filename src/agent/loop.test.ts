@@ -962,3 +962,25 @@ describe('runAgentLoop — Stop reaches a running command', () => {
     assert.equal(seen, controller.signal)
   })
 })
+
+describe('runAgentLoop — keeping what a recovery taught (keep-nudge.ts)', () => {
+  const run = (command: string) => streamResult({ toolCalls: [callDelta('ys_run_command', JSON.stringify({ command }))] })
+  test('a command that works after failing puts a ys_note reminder in the next request only', async () => {
+    let n = 0
+    const gate = async () => (++n === 1 ? { text: 'error: unknown option --yes', isError: true, exitCode: 1 } : { text: 'Exit code 0', isError: false, exitCode: 0 })
+    const client = scriptedStreamer([run('npx sv create . --yes'), run('npx sv create .'), streamResult({ content: 'Done.' })])
+    await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: gate })
+    const tail = String(client.requests[2]!.messages.at(-1)!.content)
+    assert.ok(tail.includes(`${HARNESS_NOTE_HEADER}
+\`npx sv create\` worked after one failed try`), tail)
+    assert.match(tail, /ys_note/)
+    assert.ok(!String(client.requests[1]!.messages.at(-1)!.content).includes('ys_note'))
+  })
+  test('keepNudges: false leaves it out', async () => {
+    let n = 0
+    const gate = async () => (++n === 1 ? { text: 'error: unknown option --yes', isError: true, exitCode: 1 } : { text: 'Exit code 0', isError: false, exitCode: 0 })
+    const client = scriptedStreamer([run('npx sv create . --yes'), run('npx sv create .'), streamResult({ content: 'Done.' })])
+    await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: gate, keepNudges: false })
+    assert.ok(!client.requests.some((r) => r.messages.some((m) => String(m.content).includes('worked after'))))
+  })
+})

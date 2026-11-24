@@ -131,7 +131,10 @@ export function keepingGuide(options: KeepingOptions = {}): string | null {
   if (has('ys_note')) {
     lines.push(
       `- What you learn about this workspace (how to build and check it, where things live, decisions and why, ` +
-        `known problems): ys_note. It keeps ${KEEP_DIR}/NOTES.md, which comes with every request; do not edit that file directly.`,
+        `known problems): ys_note. It keeps ${KEEP_DIR}/NOTES.md, which comes with every request; do not edit that file directly. ` +
+        'Write one when you find it out, not at the end: a command that needed a flag or a cwd you did not expect, ' +
+        'a tool or library that works differently from what you knew.' +
+        (has('update_plan') ? ' Not the task itself; that is the plan.' : ''),
     )
   }
   if (has('ys_write_file')) {

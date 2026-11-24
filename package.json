@@ -23,42 +23,7 @@
     "onWebviewPanel:redstartYellowscript.chatPanel"
   ],
   "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "redstartYellowscript",
-          "title": "Yellowscript",
-          "icon": "media/yellowscript-mono.svg"
-        }
-      ]
-    },
-    "views": {
-      "redstartYellowscript": [
-        {
-          "type": "webview",
-          "id": "redstartYellowscript.chat",
-          "name": "Chat"
-        }
-      ]
-    },
     "menus": {
-      "view/title": [
-        {
-          "command": "redstartYellowscript.moveToEditor",
-          "when": "view == redstartYellowscript.chat",
-          "group": "navigation"
-        },
-        {
-          "command": "redstartYellowscript.openHistory",
-          "when": "view == redstartYellowscript.chat",
-          "group": "navigation"
-        },
-        {
-          "command": "redstartYellowscript.openSettings",
-          "when": "view == redstartYellowscript.chat",
-          "group": "navigation"
-        }
-      ],
       "editor/context": [
         {
           "command": "redstartYellowscript.addSelection",
@@ -81,22 +46,15 @@
         "icon": "$(add)"
       },
       {
+        "command": "redstartYellowscript.openChat",
+        "title": "Open Chat",
+        "category": "Yellowscript"
+      },
+      {
         "command": "redstartYellowscript.openInEditor",
         "title": "New Chat in Editor Tab",
         "category": "Yellowscript",
         "icon": "media/yellowscript.svg"
-      },
-      {
-        "command": "redstartYellowscript.moveToSidebar",
-        "title": "Move Chat to Sidebar",
-        "category": "Yellowscript",
-        "icon": "$(layout-sidebar-left)"
-      },
-      {
-        "command": "redstartYellowscript.moveToEditor",
-        "title": "Move Chat to Editor Tab",
-        "category": "Yellowscript",
-        "icon": "$(link-external)"
       },
       {
         "command": "redstartYellowscript.openSettings",

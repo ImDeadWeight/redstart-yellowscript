@@ -46,10 +46,9 @@ test('setServerUrl carries the typed address, empty included', () => {
   assert.equal(parseWebviewMessage({ type: 'setServerUrl', url: 42 }), null)
 })
 
-test('moving a chat between the sidebar and an editor tab', () => {
-  assert.deepEqual(parseWebviewMessage({ type: 'moveToSidebar' }), { type: 'moveToSidebar' })
-  assert.deepEqual(parseWebviewMessage({ type: 'moveToEditor', id: 'conv_1' }), { type: 'moveToEditor', id: 'conv_1' })
-  assert.equal(parseWebviewMessage({ type: 'moveToEditor' }), null)
+test('there is no sidebar to move a chat to or from', () => {
+  assert.equal(parseWebviewMessage({ type: 'moveToSidebar' }), null)
+  assert.equal(parseWebviewMessage({ type: 'moveToEditor', id: 'conv_1' }), null)
 })
 
 test('a tab label is at most 25 characters, the ellipsis included', () => {

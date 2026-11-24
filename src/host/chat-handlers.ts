@@ -30,7 +30,6 @@ export interface ChatHandlersDeps {
     | 'newIn'
     | 'switchTo'
     | 'close'
-    | 'moveEditorToSidebar'
     | 'openInEditor'
     | 'ready'
     | 'openHistory'
@@ -75,8 +74,6 @@ export function chatViewHandlers(deps: ChatHandlersDeps): ChatViewHandlers {
       deps.conversations.setDraft(id, text)
     },
     onRunCommand: (command) => deps.runCommand(command),
-    onMoveToSidebar: (from) => surfaces.moveEditorToSidebar(from),
-    onMoveToEditor: (id) => surfaces.openInEditor(id),
     onSetServerUrl: (url) => {
       void deps.connection.applyServerUrl(url)
     },

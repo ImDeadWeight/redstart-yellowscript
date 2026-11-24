@@ -286,3 +286,11 @@ describe('an unresolved #-import gets a hint (Crestline, 2026-11-24)', () => {
     assert.equal(unresolvedHashImport(`Failed to resolve import "#lib/quote" from "src/routes/+page.svelte"`), '#lib/quote')
   })
 })
+
+describe('terminal colours (2026-11-24)', () => {
+  it('are taken out of what the model and the card read', () => {
+    const text = formatCommandRun({ exitCode: 1, signal: null, stdout: '\u001b[31mError\u001b[39m: \u001b[35mpreset\u001b[36m.label', stderr: '', durationMs: 5, timedOut: false })
+    assert.ok(!text.includes('\u001b'), text)
+    assert.match(text, /Error: preset\.label/)
+  })
+})

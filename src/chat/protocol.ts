@@ -45,7 +45,7 @@ export type { TurnPart } from './turn-parts.ts'
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -306,14 +306,11 @@ export interface SessionSnapshot {
  *  in the store, and shows in history and on hover. */
 export const TAB_LABEL_MAX = 25
 
-/** A chat's title cut to fit a tab: the sidebar strip and editor tabs alike. */
+/** A chat's title cut to fit its editor tab. */
 export function tabLabel(title: string): string {
   const t = title.trim() || 'New chat'
   return t.length <= TAB_LABEL_MAX ? t : `${t.slice(0, TAB_LABEL_MAX - 1).trimEnd()}…`
 }
-
-/** The sidebar view, or a chat opened as an editor tab. */
-export type SurfaceKind = 'sidebar' | 'editor'
 
 // ---------------------------------------------------------------------------
 // webview → host
@@ -339,10 +336,6 @@ export type WebviewMessage =
   | { type: 'runCommand'; command: 'connect' | 'signIn' | 'showStatus' }
   /** Save the Nest's address and connect to it. Empty: back to discovery. */
   | { type: 'setServerUrl'; url: string }
-  /** From an editor tab: put this chat back in the sidebar's strip. */
-  | { type: 'moveToSidebar' }
-  /** From the sidebar's strip: open this chat in an editor tab of its own. */
-  | { type: 'moveToEditor'; id: string }
   /** Webview-side sign-in form submission. Carries credentials directly so the
    *  host can call the manager without native dialogs. */
   | { type: 'signIn'; method: 'password'; username: string; password: string }
@@ -395,9 +388,6 @@ export type HostMessage =
       messages: ChatMessageView[]
       conversationId: string | null
       state: ConversationState
-      /** Where this view lives. The sidebar keeps a tab strip of chats; an editor
-       *  tab is one chat, and VSCode's own tabs do the rest. */
-      surface: SurfaceKind
     }
   | { type: 'session'; session: SessionSnapshot }
    /** Replace the whole transcript (switch / restore). Now carries which tab it
@@ -544,10 +534,6 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return msg.command === 'connect' || msg.command === 'signIn' || msg.command === 'showStatus'
         ? { type: 'runCommand', command: msg.command }
         : null
-    case 'moveToSidebar':
-      return { type: 'moveToSidebar' }
-    case 'moveToEditor':
-      return typeof msg.id === 'string' ? { type: 'moveToEditor', id: msg.id } : null
     case 'setServerUrl':
       return typeof msg.url === 'string' && msg.url.length <= 2_000 ? { type: 'setServerUrl', url: msg.url } : null
     case 'signIn':

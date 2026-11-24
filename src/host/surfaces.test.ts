@@ -27,15 +27,14 @@ function fakeView() {
   let focused: Surface | undefined
   const revealed: Array<Surface | undefined> = []
   let next = 1
-  const view: ChatView & { add(kind: 'sidebar' | 'editor', conversationId?: string | null): Surface } = {
-    add(kind, conversationId = null) {
-      const surface: Surface = { id: `v${next++}`, kind, conversationId }
+  const view: ChatView & { add(conversationId?: string | null): Surface } = {
+    add(conversationId = null) {
+      const surface: Surface = { id: `v${next++}`, conversationId }
       list.push(surface)
       return surface
     },
     surfaces: () => [...list],
-    sidebar: () => list.find((s) => s.kind === 'sidebar'),
-    editorFor: (id) => list.find((s) => s.kind === 'editor' && s.conversationId === id),
+    editorFor: (id) => list.find((s) => s.conversationId === id),
     focused: () => focused,
     postTo: (surface, message) => {
       const box = sent.get(surface.id) ?? []
@@ -43,12 +42,11 @@ function fakeView() {
       sent.set(surface.id, box)
     },
     setTitle: () => {},
-    openEditor: (conversationId) => view.add('editor', conversationId),
+    openEditor: (conversationId) => view.add(conversationId),
     closeEditor: (surface) => {
       list.splice(list.indexOf(surface), 1)
     },
     reveal: async (surface) => void revealed.push(surface),
-    revealSidebar: async () => {},
     sendInit: (surface, session, messages) => view.postTo(surface, { type: 'init', session, messages } as unknown as HostMessage),
   }
   return { view, sent, revealed, focus: (s: Surface | undefined) => (focused = s) }
@@ -86,85 +84,91 @@ function setup(options: { account?: string | null; focused?: boolean } = {}) {
   return { surfaces, view, conversations, busy, dropped, notices, revealed, focus, typesSent }
 }
 
-describe('a view announcing itself', () => {
-  test('the sidebar opens on the chat it showed before a reload', () => {
+describe('a tab announcing itself', () => {
+  test('a tab opens on the chat it showed before a reload', () => {
     const { surfaces, view, conversations, typesSent } = setup()
     const a = conversations.create('A', [], 'pat')
-    conversations.create('B', [], 'pat')
-    const sidebar = view.add('sidebar')
-    surfaces.ready(sidebar, a.id)
-    assert.equal(sidebar.conversationId, a.id)
-    assert.deepEqual(typesSent(sidebar), ['init', 'conversationList'])
+    const editor = view.add(null)
+    surfaces.ready(editor, a.id)
+    assert.equal(editor.conversationId, a.id)
+    assert.deepEqual(typesSent(editor), ['init', 'conversationList'])
   })
 
-  test("the sidebar does not open on another account's chat", () => {
+  test('a tab whose chat is gone opens a fresh one', () => {
     const { surfaces, view, conversations } = setup()
-    const theirs = conversations.create('Theirs', [], 'sam')
-    const mine = conversations.create('Mine', [], 'pat')
-    const sidebar = view.add('sidebar')
-    surfaces.ready(sidebar, theirs.id)
-    assert.equal(sidebar.conversationId, mine.id)
-  })
-
-  test('an editor tab whose chat is gone opens a fresh one', () => {
-    const { surfaces, view, conversations } = setup()
-    const editor = view.add('editor', 'deleted-meanwhile')
+    const editor = view.add('deleted-meanwhile')
     surfaces.ready(editor, undefined)
     assert.notEqual(editor.conversationId, 'deleted-meanwhile')
     assert.equal(conversations.get(editor.conversationId!)?.title, 'New chat')
   })
 
-  test('an editor tab restored on the chat the sidebar shows takes it; the sidebar moves on', () => {
+  test('a tab restored on an archived chat brings it back', () => {
     const { surfaces, view, conversations } = setup()
-    const a = conversations.create('A', [], 'pat')
-    const b = conversations.create('B', [], 'pat')
-    const sidebar = view.add('sidebar', a.id)
-    const editor = view.add('editor', a.id)
-    surfaces.ready(editor, undefined)
-    assert.equal(editor.conversationId, a.id)
-    assert.equal(sidebar.conversationId, b.id)
+    const a = conversations.create('A', [{ id: 'm1', role: 'user', content: 'hi' }] as never, 'pat')
+    conversations.archive(a.id)
+    surfaces.ready(view.add(a.id), undefined)
+    assert.equal(conversations.get(a.id)?.archived, false)
   })
 })
 
-describe('a chat lives in one place', () => {
-  test('opening the sidebar chat in an editor tab moves the sidebar to another', () => {
-    const { surfaces, view, conversations } = setup()
-    const a = conversations.create('A', [], 'pat')
-    const b = conversations.create('B', [], 'pat')
-    const sidebar = view.add('sidebar', a.id)
-    surfaces.openInEditor(a.id)
-    assert.equal(view.editorFor(a.id)?.conversationId, a.id)
-    assert.equal(sidebar.conversationId, b.id)
-  })
-
-  test('switching to a chat that has an editor tab brings up that tab', () => {
+describe('a chat is in one tab', () => {
+  test('opening a chat that has a tab brings up that tab', () => {
     const { surfaces, view, conversations, revealed } = setup()
     const a = conversations.create('A', [], 'pat')
-    const sidebar = view.add('sidebar', null)
-    const editor = view.add('editor', a.id)
-    surfaces.switchTo(sidebar, a.id)
-    assert.equal(sidebar.conversationId, null)
+    const editor = view.add(a.id)
+    assert.equal(surfaces.openInEditor(a.id), editor)
     assert.deepEqual(revealed, [editor])
+    assert.equal(view.surfaces().length, 1)
+  })
+
+  test('switching to a chat with no tab opens one; to one with a tab, reveals it', () => {
+    const { surfaces, view, conversations, revealed } = setup()
+    const a = conversations.create('A', [], 'pat')
+    const b = conversations.create('B', [], 'pat')
+    const here = view.add(a.id)
+    surfaces.switchTo(here, b.id)
+    assert.equal(here.conversationId, a.id, 'the tab keeps its own chat')
+    const bTab = view.editorFor(b.id)
+    assert.ok(bTab)
+    surfaces.switchTo(here, b.id)
+    assert.deepEqual(revealed, [bTab])
+  })
+
+  test('New Chat opens a tab on a new chat', () => {
+    const { surfaces, view } = setup()
+    surfaces.newChat()
+    surfaces.newIn(view.surfaces()[0]!)
+    assert.equal(view.surfaces().length, 2)
+    assert.notEqual(view.surfaces()[0]!.conversationId, view.surfaces()[1]!.conversationId)
   })
 })
 
 describe('where a command lands', () => {
-  test('the chat used last, else the sidebar', async () => {
+  test('the chat used last, else a new tab', async () => {
     const { surfaces, view, focus } = setup()
-    const sidebar = view.add('sidebar', null)
-    const editor = view.add('editor', 'x')
-    assert.equal(await surfaces.revealTarget(), sidebar)
+    const opened = await surfaces.revealTarget()
+    assert.ok(opened)
+    assert.equal(view.surfaces().length, 1)
+    const editor = view.add('x')
     focus(editor)
     assert.equal(await surfaces.revealTarget(), editor)
+    assert.equal(view.surfaces().length, 2)
+  })
+
+  test('showing a conversation opens its tab', async () => {
+    const { surfaces, view, conversations } = setup()
+    const a = conversations.create('A', [], 'pat')
+    await surfaces.showConversation(a.id)
+    assert.equal(view.editorFor(a.id)?.conversationId, a.id)
   })
 })
 
 describe('closing', () => {
-  test('a tab closed on a running chat keeps it in the strip', () => {
+  test('a tab closed on a running chat keeps it open, for History', () => {
     const { surfaces, view, conversations, busy } = setup()
     const a = conversations.create('A', [{ id: 'm1', role: 'user', content: 'hi' }] as never, 'pat')
     busy.add(a.id)
-    surfaces.closed(view.add('editor', a.id))
+    surfaces.closed(view.add(a.id))
     assert.equal(conversations.get(a.id)?.archived, false)
   })
 
@@ -172,30 +176,19 @@ describe('closing', () => {
     const { surfaces, view, conversations } = setup()
     const kept = conversations.create('A', [{ id: 'm1', role: 'user', content: 'hi' }] as never, 'pat')
     const blank = conversations.create('New chat', [], 'pat')
-    surfaces.closed(view.add('editor', kept.id))
-    surfaces.closed(view.add('editor', blank.id))
+    surfaces.closed(view.add(kept.id))
+    surfaces.closed(view.add(blank.id))
     assert.equal(conversations.get(kept.id)?.archived, true)
     assert.equal(conversations.get(blank.id), undefined)
   })
 
-  test('the strip close stops the run and takes the chat off every view', () => {
+  test('closing a chat stops the run and closes its tab', () => {
     const { surfaces, view, conversations, dropped } = setup()
     const a = conversations.create('A', [{ id: 'm1', role: 'user', content: 'hi' }] as never, 'pat')
-    const editor = view.add('editor', a.id)
+    const editor = view.add(a.id)
     surfaces.close(a.id)
     assert.deepEqual(dropped, [a.id])
     assert.equal(view.surfaces().includes(editor), false)
-  })
-})
-
-describe('signing in as another account', () => {
-  test("the sidebar leaves the other account's chat", () => {
-    const { surfaces, view, conversations } = setup()
-    const theirs = conversations.create('Theirs', [], 'sam')
-    const mine = conversations.create('Mine', [], 'pat')
-    const sidebar = view.add('sidebar', theirs.id)
-    surfaces.followAccount()
-    assert.equal(sidebar.conversationId, mine.id)
   })
 })
 

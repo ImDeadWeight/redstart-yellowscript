@@ -11,7 +11,7 @@ import type { NestProject } from '../nest/client.ts'
 import type { Surface } from '../ui/chat-view.ts'
 import { PROJECT_LINK_KEY, createProjects, type LinkStore, type ProjectsDeps } from './projects.ts'
 
-const surface: Surface = { id: 's1', kind: 'sidebar', conversationId: 'c1' }
+const surface: Surface = { id: 's1', conversationId: 'c1' }
 
 function memoryStore(): LinkStore & { data: Map<string, unknown> } {
   const data = new Map<string, unknown>()

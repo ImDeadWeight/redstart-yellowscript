@@ -6,11 +6,11 @@
 
 A VSCode coding-agent extension that connects to a **local Redstart Nest** —
 the private, on-premises AI server — instead of a cloud API. Zero-config
-network discovery, Redstart account authentication, streaming chat in the
-sidebar, and workspace-aware tools the model can drive.
+network discovery, Redstart account authentication, streaming chat in editor
+tabs, and workspace-aware tools the model can drive.
 
 > **Status:** connect and sign in (password swapped for an app key, or an API
-> key), streaming chat in the sidebar or an editor tab, workspace tools with
+> key), streaming chat in editor tabs, workspace tools with
 > diff review and checkpoints, Nest's tools with their approvals, the shared
 > agent-core loop with questions and plans, and Nest projects and workflows.
 
@@ -50,12 +50,11 @@ Nest running on your network, that is all the configuration there is.
 
 | Command | What it does |
 |---|---|
-| `Yellowscript: New Chat` | Create a new conversation tab and focus the panel |
+| `Yellowscript: Open Chat` | Bring up the chat used last, or a new one (also a click on the status bar when connected) |
+| `Yellowscript: New Chat` | A new chat in an editor tab of its own |
 | `Yellowscript: Connect to Nest` | Discover (or use the configured URL) and connect |
 | `Yellowscript: Disconnect` | Drop the connection and stop auto-reconnecting |
 | `Yellowscript: New Chat in Editor Tab` | A new chat in its own editor tab (also the bird button in the editor title bar). Each tab is its own chat: drag it to another group, split it, or move it to a new window. It reopens on its chat after a reload |
-| `Yellowscript: Move Chat to Editor Tab` | Move the sidebar's chat into an editor tab (the button in the sidebar's title bar). Closing the tab puts the chat in history; one still running carries on in the sidebar's strip |
-| `Yellowscript: Move Chat to Sidebar` | Put an editor tab's chat back in the sidebar's strip (the sidebar button in the chat's own toolbar). A run carries on. Double-clicking a chat in the strip does the reverse |
 | `Yellowscript: Choose Project` | Link this workspace to a Nest project |
 | `Yellowscript: Run Workflow` | Pick one of your Nest workflows |
 | `Yellowscript: Sign In to Nest` | Username and password (swapped at once for a key Nest issues to this app), or paste an `rst_` API key |
@@ -68,7 +67,7 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Revert Last Task` | Undo every write of the last task, newest first; files it created are removed |
 | `Yellowscript: Open Settings` | Open Yellowscript's Settings page in the chat panel |
 
-The **gear icon** in the chat's toolbar (and in the sidebar's title bar) opens
+The **gear icon** in the chat's toolbar opens
 the same page. It writes the settings below: allow lists and the Nest address
 to this workspace, the rest to your user settings unless this workspace
 already sets them.
@@ -115,12 +114,14 @@ disconnected state.
 
 ## Chat & conversations
 
-The sidebar webview holds a **multi-tab** conversation interface. Each tab has
-its own transcript, AbortController, and prompt queue. Switching tabs is a
-pure view change — streaming continues in background tabs.
+Each chat is an **editor tab**, with its own transcript, AbortController, and
+prompt queue. VSCode's tab row is the list of open chats; streaming carries on
+in a tab you have switched away from. Closing a tab puts its chat in History
+(a blank one is deleted); a run still going carries on, and History lists it
+as running.
 
-- **Tab strip** at the top shows all conversations, busy indicators, and queued
-  prompt counts.
+- **Title bar** above each chat shows its title and a busy dot, with New chat,
+  Workflows, History and Settings.
 - **Streaming** uses two channels: `content` (visible answer) and `reasoning`
   (thinking, starts collapsed).
 - **Prompt queuing**: while a turn runs, new prompts queue behind it and drain

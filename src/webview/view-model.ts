@@ -22,7 +22,6 @@ import {
   type PageName,
   type ProjectView,
   type SessionSnapshot,
-  type SurfaceKind,
   type WorkflowView,
 } from '../chat/protocol.ts'
 import type { SettingView } from '../chat/settings.ts'
@@ -48,8 +47,6 @@ export interface Notice {
 }
 
 export interface ViewState {
-  /** The sidebar (a strip of chats) or an editor tab (one chat). */
-  surface: SurfaceKind
   session: SessionSnapshot
   /** The conversation on screen. Messages for any other are dropped: the host
    *  keeps every transcript and repaints on switch. */
@@ -81,7 +78,6 @@ export interface ViewState {
 
 export function initialViewState(): ViewState {
   return {
-    surface: 'sidebar',
     session: { connection: 'disconnected', detail: 'Starting…', canSend: false, busy: false, queued: 0 },
     conversationId: null,
     messages: [],
@@ -126,7 +122,6 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
       return {
         ...state,
         stale: false,
-        surface: message.surface ?? state.surface,
         session: message.session,
         conversationId: message.conversationId ?? state.conversationId,
         messages: message.messages,

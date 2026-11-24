@@ -20,6 +20,7 @@ import { approvalInfo, callWithApproval } from '../nest/approval.ts'
 import type { NestClient } from '../nest/client.ts'
 import { McpHost, withProjectMeta, type McpTool } from '../nest/mcp-host.ts'
 import { BackgroundProcesses } from '../tools/background-processes.ts'
+import { stripAnsi } from '../tools/command-run.ts'
 import { createToolRegistry, mergeNestTools, type NestToolRef, type ToolRegistry } from '../tools/registry.ts'
 import { makeNestApprovalDeps, promptInChat } from '../ui/nest-approval.ts'
 import { diagnosticsProvider, editorStateProvider, resolveRipgrep, symbolProvider } from '../ui/tool-providers.ts'
@@ -63,7 +64,7 @@ export interface Tooling {
 export function createTooling(deps: ToolingDeps): Tooling {
   const { log } = deps
   const commandChannel = vscode.window.createOutputChannel('Yellowscript Commands')
-  const processes = new BackgroundProcesses((id, chunk) => commandChannel.append(`[${id}] ${chunk}`))
+  const processes = new BackgroundProcesses((id, chunk) => commandChannel.append(`[${id}] ${stripAnsi(chunk)}`))
   /** Resolved once — the binary does not move while the window is open, and
    *  probing the filesystem on every search would be wasteful. */
   const ripgrepPath = resolveRipgrep()

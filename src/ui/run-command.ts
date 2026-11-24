@@ -20,7 +20,7 @@ import * as vscode from 'vscode'
 
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
 import { describeKillTargets, startInBackground, type BackgroundProcesses } from '../tools/background-processes.ts'
-import { formatCommandRun, runFailed } from '../tools/command-run.ts'
+import { formatCommandRun, runFailed, stripAnsi } from '../tools/command-run.ts'
 import { endsProcesses, withoutStderrRedirects } from '../tools/safe-commands.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
@@ -119,7 +119,7 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
       nonInteractive: deps.nonInteractive?.() !== false,
       // Stop ends the command, and everything it started.
       ...(signal ? { signal } : {}),
-      onOutput: (chunk) => channel.append(chunk),
+      onOutput: (chunk) => channel.append(stripAnsi(chunk)),
     })
     const text = formatCommandRun(run)
     channel.appendLine(`[${text.split('\n')[0]}]`)

@@ -19,7 +19,7 @@ import type { SessionHooks } from '../agent/compose.ts'
 import { ContextTracker } from '../agent/context-budget.ts'
 import { AttentionTracker, LONG_RUN_MS } from '../chat/attention.ts'
 import { attachmentLabel } from '../chat/attachments.ts'
-import { PLAN_DIR, PLAN_FILE } from '../chat/plan-file.ts'
+import { PLAN_DIR, PLAN_FILE, hasOpenSteps } from '../chat/plan-file.ts'
 import type { AttachmentView, HostMessage, SessionSnapshot } from '../chat/protocol.ts'
 import type { ChatSession } from '../chat/session.ts'
 import type { NestClient } from '../nest/client.ts'
@@ -203,8 +203,12 @@ export function createSessions(deps: SessionsDeps): Sessions {
         session.load(conv.messages, conv.plan ?? null, conv.inFlight ?? null)
       } else {
         // A fresh conversation carries on the workspace's plan while steps are
-        // open (.yellowscript/PLAN.md, kept by onPlanChanged).
-        const carried = deps.tasks.readPlan()
+        // open (.yellowscript/PLAN.md, kept by onPlanChanged), when the chat
+        // that keeps it is closed. While that chat is still open the plan is
+        // its own: a blank chat beside a running one showed the running one's
+        // plan as if it were working on it (2026-11-24).
+        const owned = deps.conversations.list().some((c) => c.id !== id && hasOpenSteps(c.plan ?? null))
+        const carried = owned ? null : deps.tasks.readPlan()
         if (carried) {
           session.load([], carried)
           deps.log.info(`plan: carried ${carried.length} step(s) from ${PLAN_DIR}/${PLAN_FILE} into a new conversation`)

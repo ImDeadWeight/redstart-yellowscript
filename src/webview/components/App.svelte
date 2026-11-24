@@ -27,7 +27,7 @@
   <LoginScreen session={s.session} />
 {:else}
   <div class="shell">
-    <TabStrip tabs={s.tabs} activeId={s.conversationId} surface={s.surface} />
+    <TabStrip tabs={s.tabs} />
     {#if s.history.open}
       <HistoryPanel items={s.history.items} />
     {/if}

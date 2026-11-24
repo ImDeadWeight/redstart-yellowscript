@@ -84,7 +84,10 @@ export interface CommandRun {
 }
 
 /** Keep the first and last part of a long text, saying how much was cut. */
-export function capHeadTail(text: string, cap = STREAM_CAP_CHARS): string {
+export function capHeadTail(raw: string, cap = STREAM_CAP_CHARS): string {
+  // Terminal colours are noise to the model and show as "esc[31m" on the
+  // tool card (2026-11-24); the cap counts what is left.
+  const text = stripAnsi(raw)
   if (text.length <= cap) return text
   const half = Math.floor(cap / 2)
   const cut = text.length - half * 2
@@ -216,6 +219,11 @@ export function spawnShell(command: string, cwd: string, env?: Record<string, st
 }
 
 export const ANSI_ALL = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007|\u001b[()][A-Z0-9]/g
+
+/** `text` without terminal colour and cursor codes. */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ALL, '')
+}
 
 /**
  * The question, when the end of a command's output is a prompt waiting for an

@@ -34,16 +34,10 @@ const init = (over: Partial<Extract<HostMessage, { type: 'init' }>> = {}): HostM
   messages: [],
   conversationId: 'c1',
   state: EMPTY_CONVERSATION_STATE,
-  surface: 'sidebar',
   ...over,
 })
 
 describe('applyHostMessage', () => {
-  test('init says whether this view is the sidebar or an editor tab', () => {
-    assert.equal(run(init()).surface, 'sidebar')
-    assert.equal(run(init({ surface: 'editor' })).surface, 'editor')
-  })
-
   test('init replaces everything; a different protocol marks the panel stale', () => {
     const s = run(init({ messages: [{ id: 'm1', role: 'user', content: 'hi' }] }))
     assert.equal(s.messages.length, 1)

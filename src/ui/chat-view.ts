@@ -1,5 +1,5 @@
 // =============================================================================
-// The chat views: the sidebar, and chats opened as editor tabs.
+// The chat views: chats opened as editor tabs.
 // =============================================================================
 // Owns the webviews' HTML shell and the message pump in both directions. Each
 // webview is a Surface with its own conversation on screen, so two of them
@@ -24,19 +24,16 @@ import {
   type HostMessage,
   type PageName,
   type SessionSnapshot,
-  type SurfaceKind,
   type WebviewMessage,
 } from '../chat/protocol.ts'
 
 /**
- * One place the chat is drawn: the sidebar view, or a chat opened as an editor
- * tab. An editor tab is a real VSCode editor: it can be dragged to another
+ * One place the chat is drawn: a chat opened as an editor tab. It is a real VSCode editor: it can be dragged to another
  * group, split, or moved to its own window, and it reopens on its chat after a
  * reload.
  */
 export interface Surface {
   readonly id: string
-  readonly kind: SurfaceKind
   /** The conversation on screen here. */
   conversationId: string | null
 }
@@ -53,9 +50,6 @@ export interface ChatViewHandlers {
   onSaveDraft: (id: string, text: string) => void
   onRunCommand: (command: 'connect' | 'signIn' | 'showStatus') => void
   onSetServerUrl: (url: string) => void
-  /** An editor tab's chat goes back to the sidebar's strip. */
-  onMoveToSidebar: (from: Surface) => void
-  onMoveToEditor: (id: string) => void
   onSignIn: (message: { method: 'password'; username: string; password: string } | { method: 'apiKey'; key: string } | { method: 'clientKey' }) => void
   /** Called when a webview announces itself, so the host can reply with a full
    *  snapshot. Fires again every time VSCode rebuilds a view it destroyed while
@@ -90,16 +84,19 @@ interface Live {
   panel?: vscode.WebviewPanel
   /** Last time it was focused or used, to pick where a command lands. */
   touchedAt: number
+  /** Its page has said `ready`. Until then what is posted waits in `queue`:
+   *  a webview drops messages sent before its script listens, and a command
+   *  (Open Settings, Add Selection) can open a tab and post to it at once. */
+  loaded: boolean
+  queue: HostMessage[]
 }
 
-export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.WebviewPanelSerializer {
-  static readonly viewType = 'redstartYellowscript.chat'
+export class ChatViewProvider implements vscode.WebviewPanelSerializer {
   /** A chat opened as an editor tab. */
   static readonly panelType = 'redstartYellowscript.chatPanel'
 
   private readonly extensionUri: vscode.Uri
   private readonly handlers: ChatViewHandlers
-  private sidebarView: vscode.WebviewView | undefined
   private readonly live = new Map<string, Live>()
   private nextId = 0
 
@@ -114,15 +111,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
     return [...this.live.values()].map((l) => l.surface)
   }
 
-  sidebar(): Surface | undefined {
-    for (const l of this.live.values()) if (l.surface.kind === 'sidebar') return l.surface
-    return undefined
-  }
-
   /** The editor tab showing this conversation, if one is. */
   editorFor(conversationId: string): Surface | undefined {
     for (const l of this.live.values()) {
-      if (l.surface.kind === 'editor' && l.surface.conversationId === conversationId) return l.surface
+      if (l.surface.conversationId === conversationId) return l.surface
     }
     return undefined
   }
@@ -146,36 +138,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
     return best?.surface
   }
 
-  resolveWebviewView(view: vscode.WebviewView): void {
-    // A rebuilt sidebar view (VSCode destroys one that was moved or hidden)
-    // keeps the conversation the old one showed.
-    const previous = this.sidebar()
-    if (previous) this.live.delete(previous.id)
-    this.sidebarView = view
-    // Held here, not read back in onDidDispose: `view.webview` throws
-    // "Webview is disposed" once the view is gone.
-    const webview = view.webview
-    const surface: Surface = { id: `sidebar-${++this.nextId}`, kind: 'sidebar', conversationId: previous?.conversationId ?? null }
-    const entry: Live = { surface, webview, touchedAt: view.visible ? Date.now() : 0 }
-    this.attach(entry)
-    view.onDidChangeVisibility(() => {
-      if (view.visible) entry.touchedAt = Date.now()
-    })
-    view.onDidDispose(() => {
-      // Kept in `live` until a new view replaces it would leak a dead webview;
-      // the conversation it showed is remembered by the webview's own state.
-      if (this.live.get(surface.id) === entry) this.live.delete(surface.id)
-      if (this.sidebarView === view) this.sidebarView = undefined
-    })
-  }
-
   /** Open a conversation in a new editor tab. */
   openEditor(conversationId: string, title: string): Surface {
     const panel = vscode.window.createWebviewPanel(
       ChatViewProvider.panelType,
       title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
-      // Kept alive while hidden, like the sidebar view: a streaming turn keeps
+      // Kept alive while hidden: a streaming turn keeps
       // painting in a tab the person has switched away from.
       { retainContextWhenHidden: true },
     )
@@ -194,8 +163,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
     // Held here, not read back in onDidDispose: `panel.webview` throws
     // "Webview is disposed" once the panel is closed.
     const webview = panel.webview
-    const surface: Surface = { id: `editor-${++this.nextId}`, kind: 'editor', conversationId }
-    const entry: Live = { surface, webview, panel, touchedAt: Date.now() }
+    const surface: Surface = { id: `editor-${++this.nextId}`, conversationId }
+    const entry: Live = { surface, webview, panel, touchedAt: Date.now(), loaded: false, queue: [] }
     this.attach(entry)
     panel.onDidChangeViewState(() => {
       if (panel.active) entry.touchedAt = Date.now()
@@ -210,7 +179,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
   }
 
   /** Close an editor tab without the close counting as the person's (its chat
-   *  was deleted, or moved to the sidebar). */
+   *  was deleted). */
   closeEditor(surface: Surface): void {
     const entry = this.live.get(surface.id)
     if (!entry?.panel) return
@@ -244,6 +213,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       if (!message) return
       // Anything the person did here makes this the chat in use.
       if (message.type !== 'ready' && message.type !== 'saveDraft') entry.touchedAt = Date.now()
+      if (message.type === 'ready') {
+        // init goes first (onReady sends it), then what waited for the page.
+        entry.loaded = true
+        this.dispatch(entry.surface, message)
+        const waiting = entry.queue
+        entry.queue = []
+        for (const queued of waiting) this.send(entry, queued)
+        return
+      }
       this.dispatch(entry.surface, message)
     })
     webview.html = this.buildHtml(webview)
@@ -283,12 +261,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
         break
       case 'runCommand':
         h.onRunCommand(message.command)
-        break
-      case 'moveToSidebar':
-        h.onMoveToSidebar(from)
-        break
-      case 'moveToEditor':
-        h.onMoveToEditor(message.id)
         break
       case 'setServerUrl':
         h.onSetServerUrl(message.url)
@@ -375,6 +347,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
   }
 
   private send(entry: Live, message: HostMessage): void {
+    if (!entry.loaded) {
+      entry.queue.push(message)
+      return
+    }
     // A webview disposed between its close and our onDidDispose handler
     // rejects (or throws). Its dispose handler tidies up; nothing to surface.
     try {
@@ -384,28 +360,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
     }
   }
 
-  /** Bring a surface into view; with none given, the chat used last, else the sidebar. */
+  /** Bring a surface into view; with none given, the chat used last. */
   async reveal(surface?: Surface): Promise<void> {
     const target = surface ?? this.focused()
     const panel = target ? this.live.get(target.id)?.panel : undefined
-    if (panel) {
-      try {
-        panel.reveal(undefined, false)
-        return
-      } catch {
-        // Disposed without our handler hearing about it: fall back to the sidebar.
-      }
+    try {
+      panel?.reveal(undefined, false)
+    } catch {
+      // Disposed without our handler hearing about it.
     }
-    await this.revealSidebar()
-  }
-
-  /** Bring the sidebar view into view (VSCode creates it if it has not yet). */
-  async revealSidebar(): Promise<void> {
-    if (this.sidebarView) {
-      this.sidebarView.show(true)
-      return
-    }
-    await vscode.commands.executeCommand(`${ChatViewProvider.viewType}.focus`)
   }
 
   sendInit(surface: Surface, session: SessionSnapshot, messages: ChatMessageView[], state: ConversationState): void {
@@ -416,7 +379,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Webv
       messages,
       conversationId: surface.conversationId,
       state,
-      surface: surface.kind,
     })
   }
 

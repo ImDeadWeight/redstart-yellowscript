@@ -25,6 +25,7 @@ import {
   type SurfaceKind,
   type WorkflowView,
 } from '../chat/protocol.ts'
+import { appendPart } from '../chat/turn-parts.ts'
 
 export interface HistoryItem {
   id: string
@@ -167,8 +168,12 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
       if (elsewhere(state, message.conversationId)) return state
       return patch(state, message.id, (m) =>
         message.channel === 'content'
-          ? { ...m, content: m.content + message.text }
-          : { ...m, reasoning: (m.reasoning ?? '') + message.text },
+          ? { ...m, content: m.content + message.text, parts: appendPart(m.parts, { kind: 'text', text: message.text }) }
+          : {
+              ...m,
+              reasoning: (m.reasoning ?? '') + message.text,
+              parts: appendPart(m.parts, { kind: 'reasoning', text: message.text }),
+            },
       )
 
     case 'turn/completed':
@@ -201,6 +206,7 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
               status: 'running',
             },
           ],
+          parts: appendPart(m.parts, { kind: 'tool', callId: message.callId }),
         }
       })
 
@@ -210,7 +216,13 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
         ...m,
         tools: (m.tools ?? []).map((t) =>
           t.callId === message.callId
-            ? { ...t, status: message.isError ? 'error' : 'done', summary: message.summary, truncated: message.truncated }
+            ? {
+                ...t,
+                status: message.isError ? 'error' : 'done',
+                summary: message.summary,
+                truncated: message.truncated,
+                ...(message.output ? { output: message.output } : {}),
+              }
             : t,
         ),
         ...(message.effect ? { run: [...(m.run ?? []), message.effect] } : {}),
@@ -357,4 +369,93 @@ export function atQuery(beforeCaret: string): string | null {
 export function fitWithin(width: number, height: number, max = 1_280): { width: number; height: number } {
   const scale = Math.min(1, max / Math.max(width, height))
   return { width: Math.round(width * scale), height: Math.round(height * scale) }
+}
+
+/** "12.3k" for the context meter. */
+export function compactTokens(n: number): string {
+  if (n < 1_000) return String(n)
+  const k = n / 1_000
+  return `${k < 10 ? k.toFixed(1) : Math.round(k)}k`
+}
+
+/** The context meter: how full, as a fraction, and what to say. */
+export function contextMeter(usage: { used: number; size: number | null; trimmed?: number } | null | undefined): {
+  fraction: number | null
+  label: string
+  title: string
+  level: 'ok' | 'high' | 'full'
+} | null {
+  if (!usage) return null
+  const fraction = usage.size ? Math.min(1, usage.used / usage.size) : null
+  const label = usage.size ? `${Math.round((fraction ?? 0) * 100)}%` : compactTokens(usage.used)
+  const level = fraction === null ? 'ok' : fraction >= 0.85 ? 'full' : fraction >= 0.6 ? 'high' : 'ok'
+  const lines = [
+    usage.size
+      ? `Context: ${compactTokens(usage.used)} of ${compactTokens(usage.size)} tokens in the last request`
+      : `Context: ${compactTokens(usage.used)} tokens in the last request (window size unknown)`,
+  ]
+  if (usage.trimmed) lines.push(`Older tool results were trimmed to fit ${usage.trimmed} time${usage.trimmed === 1 ? '' : 's'} in the latest run.`)
+  else if (level === 'full') lines.push('Near the limit: older tool results will be trimmed to fit.')
+  return { fraction, label, title: lines.join('\n'), level }
+}
+
+/** What a streaming turn is waiting on, for the line under it; null while
+ *  tokens are arriving. `idleMs` is the time since anything last arrived. */
+export function waitingNote(idleMs: number, afterTool: boolean): string | null {
+  if (idleMs < 3_000) return null
+  const seconds = Math.floor(idleMs / 1_000)
+  const what = afterTool ? 'Waiting for the model to read the result' : 'Waiting for the model'
+  // llama-server queues a request while its slots are busy: nothing arrives,
+  // with no error, until another chat's reply finishes.
+  return seconds >= 15
+    ? `${what} · ${seconds}s. The Nest may be busy with another request; this one starts when it is free.`
+    : `${what} · ${seconds}s`
+}
+
+/** A command tool's card, read for the terminal-style view. */
+export interface CommandCardView {
+  /** The line that ran (or would have), or the process it read. */
+  command: string
+  cwd?: string
+  /** Started in the background (ys_process start). */
+  background: boolean
+  /** Reading a background process's output (ys_process output). */
+  read: boolean
+  /** How it ended: "Exit code 0 · 1.2s", "Timed out…", "p1 (…) is running.". */
+  status?: string
+  /** What it printed, without the head line and the stdout marker. */
+  output: string
+}
+
+/** The terminal view of a command card, or null for any other tool. */
+export function commandView(card: { name: string; arguments: string; output?: string }): CommandCardView | null {
+  if (card.name !== 'ys_run_command' && card.name !== 'ys_process') return null
+  let args: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = JSON.parse(card.arguments || '{}')
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>
+  } catch {
+    // Malformed: the card still shows what there is.
+  }
+  const str = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : undefined)
+  const action = card.name === 'ys_process' ? str('action') : undefined
+  if (card.name === 'ys_process' && action !== 'start' && action !== 'output') return null
+  const read = action === 'output'
+  const command = read ? `output of ${str('id') ?? 'a process'}` : (str('command') ?? '')
+  const cwd = str('cwd')
+  const lines = (card.output ?? '').split('\n')
+  const status = card.output ? lines.shift()?.trim() : undefined
+  const output = lines
+    .filter((l) => l !== '--- stdout ---' && l !== '--- output ---')
+    .join('\n')
+    .replace(/^\(no (new )?output\)$/, '')
+    .trim()
+  return {
+    command,
+    ...(cwd ? { cwd } : {}),
+    background: action === 'start',
+    read,
+    ...(status ? { status } : {}),
+    output,
+  }
 }

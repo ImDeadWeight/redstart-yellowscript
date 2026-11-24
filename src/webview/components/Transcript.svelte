@@ -7,7 +7,7 @@
   import Icon from './Icon.svelte'
   import { latestTaskId } from '../view-model.ts'
 
-  let { messages, notices, generation }: { messages: ChatMessageView[]; notices: Notice[]; generation: number } = $props()
+  let { messages, notices, generation, paused = false }: { messages: ChatMessageView[]; notices: Notice[]; generation: number; /** Waiting on the person (approval, question, turn limit), not the model. */ paused?: boolean } = $props()
 
   const latest = $derived(latestTaskId(messages))
 
@@ -131,7 +131,7 @@
     </div>
   {/if}
   {#each messages as message (message.id)}
-    <Message {message} latestTask={message.id === latest} />
+    <Message {message} latestTask={message.id === latest} {paused} />
   {/each}
   {#each notices as notice (notice.id)}
     <div class="notice {notice.level}" role={notice.level === 'error' ? 'alert' : 'status'}>

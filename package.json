@@ -75,6 +75,16 @@
           "command": "redstartYellowscript.openInEditor",
           "group": "navigation@100",
           "when": "config.redstartYellowscript.editorButton"
+        },
+        {
+          "command": "redstartYellowscript.openHistory",
+          "group": "navigation@102",
+          "when": "activeWebviewPanelId == 'redstartYellowscript.chatPanel'"
+        },
+        {
+          "command": "redstartYellowscript.openSettings",
+          "group": "navigation@103",
+          "when": "activeWebviewPanelId == 'redstartYellowscript.chatPanel'"
         }
       ]
     },

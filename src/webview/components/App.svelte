@@ -35,7 +35,12 @@
     {:else if s.page === 'workflows'}
       <WorkflowsPage items={s.workflows.items} error={s.workflows.error} focus={view.workflowFocus} />
     {:else}
-    <Transcript messages={s.messages} notices={s.notices} generation={s.generation} />
+    <Transcript
+      messages={s.messages}
+      notices={s.notices}
+      generation={s.generation}
+      paused={!!(s.conversation.approval || s.conversation.question || s.conversation.atTurnLimit)}
+    />
     <div class="dock">
       {#if s.conversation.plan && s.conversation.plan.length > 0}
         <PlanBar steps={s.conversation.plan} />

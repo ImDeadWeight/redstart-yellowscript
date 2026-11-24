@@ -1,22 +1,23 @@
 <script lang="ts">
-  import type { ChatMessageView } from '../../chat/protocol.ts'
+  import type { ChatMessageView, ToolCardView } from '../../chat/protocol.ts'
   import { renderMarkdown } from '../markdown.ts'
   import ToolCard from './ToolCard.svelte'
   import TaskSummary from './TaskSummary.svelte'
+  import Thought from './Thought.svelte'
+  import Markdown from './Markdown.svelte'
   import { taskSummary } from '../../chat/run-log.ts'
   import { attachmentLabel } from '../../chat/attachments.ts'
+  import { splitAnswer, turnBlocks, type TurnBlock } from '../../chat/turn-parts.ts'
+  import { waitingNote } from '../view-model.ts'
   import Icon from './Icon.svelte'
 
-  let { message, latestTask = false }: { message: ChatMessageView; latestTask?: boolean } = $props()
+  let { message, latestTask = false, paused = false }: { message: ChatMessageView; latestTask?: boolean; paused?: boolean } = $props()
 
-  // renderMarkdown escapes the whole input before emitting any tag of its own
-  // (see markdown.ts): the only safe way to put model text into {@html}.
-  // Rendered again only when the text changed: a reasoning or tool update
-  // replaces the message too, and re-rendering a long answer on each of those
-  // was most of what kept a streaming turn's page busy.
+  // --- Turns saved before `parts` existed: drawn from the flat fields. ---
   let renderedFrom: string | null = null
   let rendered = ''
   const html = $derived.by(() => {
+    if (message.parts) return ''
     const content = message.role === 'assistant' ? message.content : ''
     if (content !== renderedFrom) {
       renderedFrom = content
@@ -24,43 +25,57 @@
     }
     return rendered
   })
-
-  // The reasoning, in paragraphs: as it streams only the last one changes, so
-  // the rest is not laid out again on every token. Built only while open.
-  let thinkingOpen = $state(false)
-  const paragraphs = $derived(thinkingOpen && message.reasoning ? message.reasoning.split(/\n{2,}/) : [])
-
-  /** The open reasoning box scrolls on its own: it keeps to its end while
-   *  you are there, and stays put once you scroll up inside it. */
-  function followOwnEnd(node: HTMLElement) {
-    let stick = true
-    const onScroll = () => {
-      stick = node.scrollHeight - node.scrollTop - node.clientHeight < 16
-    }
-    node.addEventListener('scroll', onScroll, { passive: true })
-    const observer = new MutationObserver(() => {
-      if (stick) node.scrollTop = node.scrollHeight
-    })
-    observer.observe(node, { childList: true, subtree: true, characterData: true })
-    node.scrollTop = node.scrollHeight
-    return {
-      destroy() {
-        node.removeEventListener('scroll', onScroll)
-        observer.disconnect()
-      },
-    }
-  }
-  const stats = $derived(message.stats)
-  const working = $derived(message.streaming === true && !message.content && !(message.tools?.length))
-
-  // A finished turn with many calls folds them into one row: on an agentic
-  // turn the answer is what the person came for, not the twelve reads before it.
   const GROUP_AT = 4
   const tools = $derived(message.tools ?? [])
   const grouped = $derived(tools.length >= GROUP_AT && !message.streaming)
-  const failed = $derived(tools.filter((t) => t.status === 'error').length)
   let showTools = $state(false)
+
+  // --- The timeline: the turn in the order it happened. ---
+  const cards = $derived(new Map<string, ToolCardView>(tools.map((t) => [t.callId, t])))
+  const blocks = $derived(message.parts ? turnBlocks(message.parts) : [])
+  const failed = $derived(tools.filter((t) => t.status === 'error').length)
+
+  /** A finished turn: the work folds into one row, the answer stays open. */
+  const split = $derived(message.streaming ? null : splitAnswer(blocks))
+  const folded = $derived(split !== null && split.work.some((b) => b.kind === 'tools'))
+  let showWork = $state(false)
+  const steps = $derived(split ? split.work.filter((b) => b.kind === 'tools').length : 0)
+
+  /** A live turn: the latest few blocks, the earlier ones behind a row. */
+  const LIVE_SHOWN = 4
+  let showEarlier = $state(false)
+  const hiddenLive = $derived(message.streaming && !showEarlier ? Math.max(0, blocks.length - LIVE_SHOWN) : 0)
+  const liveBlocks = $derived(hiddenLive ? blocks.slice(hiddenLive) : blocks)
+  const lastKey = $derived(blocks[blocks.length - 1]?.key)
+
+  const stats = $derived(message.stats)
   const summary = $derived(message.streaming ? null : taskSummary(message.run))
+
+  // --- What a quiet stream is waiting on. ---
+  // Activity is anything arriving: text, a thought, a call, a result.
+  const activity = $derived(
+    `${message.content.length}:${message.reasoning?.length ?? 0}:${tools.length}:${tools.filter((t) => t.status !== 'running').length}`,
+  )
+  let lastActivity = $state(Date.now())
+  let now = $state(Date.now())
+  // A pause (an approval, a question, the turn limit) ending counts too:
+  // the clock is for the model, not for the person.
+  $effect(() => {
+    void activity
+    void paused
+    lastActivity = Date.now()
+  })
+  $effect(() => {
+    if (!message.streaming) return
+    const timer = setInterval(() => (now = Date.now()), 1_000)
+    return () => clearInterval(timer)
+  })
+  const lastPart = $derived(message.parts?.[message.parts.length - 1])
+  const toolRunning = $derived(tools.some((t) => t.status === 'running'))
+  const waiting = $derived(
+    message.streaming && !paused && !toolRunning ? waitingNote(now - lastActivity, lastPart?.kind === 'tool') : null,
+  )
+  const empty = $derived(message.streaming === true && blocks.length === 0 && !message.content && !tools.length)
 </script>
 
 <article class="message {message.role}" class:pending={message.pending} class:streaming={message.streaming}>
@@ -87,16 +102,54 @@
       </div>
     {/if}
     {#if message.pending}<span class="note">Queued</span>{/if}
-  {:else}
-    {#if message.reasoning}
-      <details class="reasoning" bind:open={thinkingOpen}>
-        <summary>Thinking</summary>
-        {#if thinkingOpen}
-          <div class="reasoning-body" use:followOwnEnd>
-            {#each paragraphs as paragraph, i (i)}<p>{paragraph}</p>{/each}
+  {:else if message.parts}
+    {#snippet block(b: TurnBlock, inAnswer: boolean)}
+      {#if b.kind === 'reasoning'}
+        <Thought text={b.text} live={message.streaming === true && b.key === lastKey} />
+      {:else if b.kind === 'text'}
+        <Markdown text={b.text} narration={!inAnswer} cursor={message.streaming === true && b.key === lastKey} />
+      {:else}
+        <div class="tools">
+          {#each b.callIds as id (id)}
+            {@const card = cards.get(id)}
+            {#if card}<ToolCard {card} />{/if}
+          {/each}
+        </div>
+      {/if}
+    {/snippet}
+    {#if split}
+      {#if folded}
+        <button type="button" class="group" aria-expanded={showWork} onclick={() => (showWork = !showWork)}>
+          <Icon name={showWork ? 'chevron-down' : 'chevron-right'} size={12} />
+          Worked through {steps} step{steps === 1 ? '' : 's'} · {tools.length} tool{tools.length === 1 ? '' : 's'}{failed ? `, ${failed} failed` : ''}
+        </button>
+        {#if showWork}
+          <div class="work">
+            {#each split.work as b (b.key)}{@render block(b, false)}{/each}
           </div>
         {/if}
-      </details>
+      {:else}
+        {#each split.work as b (b.key)}{@render block(b, false)}{/each}
+      {/if}
+      {#each split.answer as b (b.key)}{@render block(b, true)}{/each}
+    {:else}
+      {#if hiddenLive}
+        <button type="button" class="group" onclick={() => (showEarlier = true)}>
+          <Icon name="chevron-right" size={12} />
+          {hiddenLive} earlier step{hiddenLive === 1 ? '' : 's'}
+        </button>
+      {/if}
+      {#each liveBlocks as b (b.key)}{@render block(b, true)}{/each}
+    {/if}
+    {#if empty}
+      <div class="working" aria-label="Working"><span></span><span></span><span></span></div>
+    {/if}
+    {#if waiting}
+      <div class="waiting" role="status"><Icon name="spinner" size={11} />{waiting}</div>
+    {/if}
+  {:else}
+    {#if message.reasoning}
+      <Thought text={message.reasoning} live={message.streaming === true && !message.content} />
     {/if}
     {#if tools.length}
       <div class="tools">
@@ -115,9 +168,11 @@
     {/if}
     {#if message.content}
       <div class="body">{@html html}</div>
-    {:else if working}
+    {:else if empty}
       <div class="working" aria-label="Working"><span></span><span></span><span></span></div>
     {/if}
+  {/if}
+  {#if message.role === 'assistant'}
     {#if message.error}
       <div class="error" role="alert">{message.error}</div>
     {/if}
@@ -190,24 +245,14 @@
     opacity: 0.7;
   }
   .group:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
-  .reasoning {
-    font-size: 0.9em;
-    border-left: 2px solid var(--vscode-panel-border, var(--vscode-widget-border));
+  .work {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     padding-left: 8px;
+    border-left: 2px solid var(--vscode-panel-border, var(--vscode-widget-border));
   }
-  .reasoning summary { cursor: pointer; opacity: 0.65; user-select: none; }
-  .reasoning-body {
-    margin-top: 4px;
-    white-space: pre-wrap;
-    opacity: 0.75;
-    max-height: 240px;
-    overflow-y: auto;
-    /* Its own scroll: reaching its end does not carry on into the transcript. */
-    overscroll-behavior: contain;
-    contain: content;
-  }
-  .reasoning-body p { margin: 0 0 0.6em; }
-  .reasoning-body p:last-child { margin-bottom: 0; }
+  .waiting { display: flex; align-items: center; gap: 6px; font-size: 0.85em; opacity: 0.6; }
   .streaming .body > :global(:last-child)::after {
     content: '▍';
     animation: blink 1s steps(2, start) infinite;

@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 
 import { EMPTY_CONVERSATION_STATE, PROTOCOL_VERSION, type HostMessage } from '../chat/protocol.ts'
 import {
+  commandView,
+  contextMeter,
+  waitingNote,
   applyHostMessage,
   atQuery,
   fitWithin,
@@ -223,5 +226,59 @@ describe('connection details', () => {
     assert.equal(serverUrlProblem('https://nest.example.com'), null)
     assert.equal(serverUrlProblem('http://'), 'That is not a valid URL.')
     assert.equal(serverUrlProblem('not a url'), 'That is not a valid URL.')
+  })
+})
+
+describe('context meter and waiting note', () => {
+  test('meter: a fraction of the window, levelled; unknown window shows tokens', () => {
+    assert.deepEqual(
+      { ...contextMeter({ used: 16_000, size: 32_000 })!, title: undefined },
+      { fraction: 0.5, label: '50%', level: 'ok', title: undefined },
+    )
+    assert.equal(contextMeter({ used: 20_000, size: 32_000 })!.level, 'high')
+    assert.equal(contextMeter({ used: 30_000, size: 32_000 })!.level, 'full')
+    assert.equal(contextMeter({ used: 12_345, size: null })!.label, '12k')
+    assert.match(contextMeter({ used: 1, size: 10, trimmed: 2 })!.title, /trimmed to fit 2 times/)
+    assert.equal(contextMeter(null), null)
+  })
+
+  test('waiting: quiet for under 3s says nothing; long waits name the likely cause', () => {
+    assert.equal(waitingNote(2_999, false), null)
+    assert.equal(waitingNote(5_000, false), 'Waiting for the model · 5s')
+    assert.match(waitingNote(4_000, true)!, /read the result/)
+    assert.match(waitingNote(20_000, false)!, /busy with another request/)
+  })
+})
+
+describe('commandView', () => {
+  test('a run: command in, status and output out', () => {
+    const v = commandView({
+      name: 'ys_run_command',
+      arguments: '{"command":"npm test","cwd":"pkg"}',
+      output: 'Exit code 1 · 2.0s\n--- stdout ---\nfail: 1\n--- stderr ---\nboom',
+    })!
+    assert.deepEqual(v, {
+      command: 'npm test',
+      cwd: 'pkg',
+      background: false,
+      read: false,
+      status: 'Exit code 1 · 2.0s',
+      output: 'fail: 1\n--- stderr ---\nboom',
+    })
+  })
+
+  test('still running: no status, no output', () => {
+    const v = commandView({ name: 'ys_run_command', arguments: '{"command":"npm test"}' })!
+    assert.equal(v.status, undefined)
+    assert.equal(v.output, '')
+  })
+
+  test('process start and output reads are commands; list and stop are not', () => {
+    assert.equal(commandView({ name: 'ys_process', arguments: '{"action":"start","command":"npm run dev"}' })!.background, true)
+    const read = commandView({ name: 'ys_process', arguments: '{"action":"output","id":"p1"}', output: 'p1 (npm run dev) is running.\n(no new output)' })!
+    assert.equal(read.command, 'output of p1')
+    assert.equal(read.output, '')
+    assert.equal(commandView({ name: 'ys_process', arguments: '{"action":"list"}' }), null)
+    assert.equal(commandView({ name: 'ys_read_file', arguments: '{}' }), null)
   })
 })

@@ -298,3 +298,15 @@ describe('commandView', () => {
     assert.equal(commandView({ name: 'ys_read_file', arguments: '{}' }), null)
   })
 })
+
+describe('text handed back to the composer', () => {
+  test("queued messages Stop did not send are kept for the composer, and another tab's are not", () => {
+    const s = run(
+      init(),
+      { type: 'composerText', conversationId: 'c1', text: 'two' },
+      { type: 'composerText', conversationId: 'c1', text: 'three' },
+      { type: 'composerText', conversationId: 'other', text: 'NO' },
+    )
+    assert.equal(s.composerText, 'two\n\nthree')
+  })
+})

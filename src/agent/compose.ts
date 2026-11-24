@@ -80,6 +80,8 @@ export interface SessionHooks {
   onAgentResult?: (result: AgentResult) => void
   /** Old messages were trimmed to fit the window (besides the log line). */
   onContextTrimmed?: (report: FitReport) => void
+  /** A turn started or ended: the views' busy state (the Stop button) changed. */
+  onBusyChanged?: () => void
 }
 
 /** One conversation's ChatSession, with everything its agent runs against. */
@@ -146,10 +148,11 @@ export function composeSession(setup: AgentSetup, conversationId: string, hooks:
       }
       return setup.gates.change({ conversationId, root, ask })(pending)
     },
-    approveCommand: (pending) => setup.gates.command({ conversationId, ask })(pending),
+    approveCommand: (pending, signal) => setup.gates.command({ conversationId, ask })(pending, signal),
     conversationId,
     projectId: () => setup.project()?.id ?? null,
     onPersist: hooks.onPersist,
+    ...(hooks.onBusyChanged ? { onBusyChanged: hooks.onBusyChanged } : {}),
     emit: hooks.emit,
   })
   return session

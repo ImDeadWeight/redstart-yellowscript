@@ -422,6 +422,8 @@ export type HostMessage =
   | { type: 'turn/delta'; conversationId: string; id: string; channel: StreamChannel; text: string }
   | { type: 'turn/completed'; conversationId: string; id: string; stats?: TurnStats; aborted?: boolean }
   | { type: 'turn/failed'; conversationId: string; id: string; message: string }
+  /** Text for the composer: queued messages that Stop did not send. */
+  | { type: 'composerText'; conversationId: string; text: string }
   /** A line about the run itself in the turn's timeline (a stagnation recovery). */
   | { type: 'turn/notice'; conversationId: string; id: string; text: string }
   // Tool activity gets its own message types rather than a third text channel.

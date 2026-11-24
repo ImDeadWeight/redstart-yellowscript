@@ -46,6 +46,13 @@ class ViewStore {
     return taken
   }
 
+  /** Hand the composer the text the host gave back, once. */
+  takeComposerText(): string | null {
+    const taken = this.current.composerText
+    if (taken !== null) this.current = { ...this.current, composerText: null }
+    return taken
+  }
+
   dismissNotice(id: number): void {
     this.current = { ...this.current, notices: this.current.notices.filter((n) => n.id !== id) }
   }

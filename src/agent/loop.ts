@@ -192,7 +192,7 @@ export interface WriteOutcome {
  * user rejected it. Kept as an injected port for testability — the real one lives
  * in the host alongside `vscode`.
  */
-export type CommandApprovalGate = (pending: PendingCommand) => Promise<CommandOutcome | string | null>
+export type CommandApprovalGate = (pending: PendingCommand, signal?: AbortSignal) => Promise<CommandOutcome | string | null>
 
 /** What an approved command produced: the model's text, and whether it failed
  *  (non-zero exit, timeout, could not start), so the card shows it. */
@@ -784,7 +784,8 @@ async function review(toolResult: ToolResult, options: AgentLoopOptions): Promis
     // Always-ask: show verbatim → run on approval → capture output. The gate
     // returns the captured output, or null if rejected.
     const pending = toolResult.pendingCommand
-    const output = await options.approveCommand(pending)
+    // The run's signal: Stop ends a command that is still running.
+    const output = await options.approveCommand(pending, options.signal)
     return { ...withCommandNote(toolResult, output), effect: commandEffect(pending, output) }
   }
   return toolResult

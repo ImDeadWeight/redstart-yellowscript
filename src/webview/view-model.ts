@@ -75,6 +75,8 @@ export interface ViewState {
   fileMatches: { query: string; paths: string[] } | null
   /** Chips the host asked the composer to add (Add to Yellowscript), not yet taken. */
   inbox: AttachmentView[]
+  /** Text the host handed back to the composer (queued messages Stop did not send), not yet taken. */
+  composerText: string | null
 }
 
 export function initialViewState(): ViewState {
@@ -95,6 +97,7 @@ export function initialViewState(): ViewState {
     generation: 0,
     fileMatches: null,
     inbox: [],
+    composerText: null,
   }
 }
 
@@ -179,6 +182,10 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
               parts: appendPart(m.parts, { kind: 'reasoning', text: message.text }),
             },
       )
+
+    case 'composerText':
+      if (elsewhere(state, message.conversationId)) return state
+      return { ...state, composerText: state.composerText ? `${state.composerText}\n\n${message.text}` : message.text }
 
     case 'turn/notice':
       if (elsewhere(state, message.conversationId)) return state

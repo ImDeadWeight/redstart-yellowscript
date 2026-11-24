@@ -350,6 +350,73 @@ describe('ChatSession — concurrency and abort', () => {
     assert.equal(h.requests.length, 2, 'queued turn runs after the first finishes')
   })
 
+  test('Stop with a message queued: the queue is not sent, its text goes back to the composer, and busy is reported throughout', async () => {
+    // Seen 2026-11-24: Stop ended the turn, the queued message started at once
+    // with no Stop button (busy was never reported for it), and only stopping
+    // Nest ended it.
+    const emitted: HostMessage[] = []
+    const busyChanges: boolean[] = []
+    let counter = 0
+    const requests: ChatCompletionRequest[] = []
+    const session: ChatSession = new ChatSession({
+      getClient: () =>
+        fakeClient(async (req, handlers, signal) => {
+          requests.push(req)
+          handlers.onContent?.('working')
+          // Runs until stopped.
+          await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }))
+          return emptyResult({ content: 'working', aborted: true })
+        }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: (message) => emitted.push(message),
+      newId: () => `id${++counter}`,
+      onBusyChanged: () => busyChanges.push(session.busy),
+    })
+
+    const first = session.send('one')
+    await session.send('two')
+    await session.send('three')
+    assert.equal(session.queued, 2)
+    assert.deepEqual(busyChanges, [true], 'the turn starting is reported')
+
+    session.abort()
+    // Busy until the turn has unwound, so the Stop button does not vanish early.
+    assert.equal(session.busy, true)
+    await first
+    assert.equal(session.busy, false)
+    assert.deepEqual(busyChanges, [true, false], 'and its end; no queued turn started')
+    assert.equal(requests.length, 1, 'the queued messages were not sent')
+    assert.equal(session.queued, 0)
+    // The greyed bubbles are gone from the transcript, and their text is back in the box.
+    const replaced = emitted.filter((m) => m.type === 'conversation').at(-1) as Extract<HostMessage, { type: 'conversation' }>
+    assert.ok(replaced && !replaced.messages.some((m) => m.pending), 'pending bubbles removed')
+    const back = emitted.filter((m) => m.type === 'composerText') as Extract<HostMessage, { type: 'composerText' }>[]
+    assert.deepEqual(back.map((m) => m.text), ['two\n\nthree'])
+  })
+
+  test('a queued turn that starts on its own is reported busy, so its Stop button shows', async () => {
+    const busyChanges: boolean[] = []
+    let release: (() => void) | undefined
+    let n = 0
+    const session: ChatSession = new ChatSession({
+      getClient: () =>
+        fakeClient(async () => {
+          if (n++ === 0) await new Promise<void>((resolve) => (release = resolve))
+          return emptyResult({ content: 'done' })
+        }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: () => {},
+      onBusyChanged: () => busyChanges.push(session.busy),
+    })
+    const first = session.send('one')
+    await session.send('two')
+    release?.()
+    await first
+    assert.deepEqual(busyChanges, [true, false, true, false], 'each turn, the queued one included')
+  })
+
   test('abort passes a signal the client can observe', async () => {
     const h = new Harness()
     let observed: AbortSignal | undefined

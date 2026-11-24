@@ -946,3 +946,19 @@ describe('callKind', () => {
     assert.equal(callKind('read_document', '{}'), 'read')
   })
 })
+
+describe('runAgentLoop — Stop reaches a running command', () => {
+  test("the command gate is given the run's signal, so Stop can end the command", async () => {
+    const controller = new AbortController()
+    let seen: AbortSignal | undefined
+    const client = scriptedStreamer([streamResult({ toolCalls: [callDelta('ys_run_command', '{"command":"npm install"}')] }), streamResult({ content: 'done' })])
+    await runAgentLoop({
+      client, request: baseRequest, tools: registry(), toolContext, signal: controller.signal,
+      approveCommand: async (_pending, signal) => {
+        seen = signal
+        return { text: 'Exit code 0', isError: false }
+      },
+    })
+    assert.equal(seen, controller.signal)
+  })
+})

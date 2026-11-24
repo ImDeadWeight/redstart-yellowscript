@@ -186,6 +186,12 @@ export function createSessions(deps: SessionsDeps): Sessions {
         emit: (message) => onEmit(id, message),
         onPersist: () => persist(id),
         context: () => contextFor(deps.connection.activeClient),
+        // Every turn's start and end, queued ones included: the Stop button
+        // and the tab's busy dot follow it.
+        onBusyChanged: () => {
+          views.sessionsChanged()
+          views.conversationsChanged()
+        },
       })
       sessions.set(id, session)
 

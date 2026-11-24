@@ -61,6 +61,10 @@ export const RESUME_PROMPT = 'Continue the task from where it stopped.'
 const INCLUDE_REASONING_IN_CONTEXT = false
 
 export interface SessionDeps {
+  /** A turn started or ended (queued ones too): the Stop button and the tab's
+   *  busy dot read it. Until 2026-11-24 only the first send and the end of the
+   *  whole queue were reported, so a queued turn ran with no Stop button. */
+  onBusyChanged?: () => void
   /** Resolves the currently connected client, or null when not connected. */
   getClient: () => NestClient | null
   /** Called when a request comes back 401 so the connection can re-prompt. */
@@ -334,13 +338,30 @@ export class ChatSession {
 
   /** Stop the running turn. Whatever streamed so far stays on screen — the user
    *  asked it to stop, not to throw the answer away. */
+  /**
+   * Stop: the running turn, and the queue behind it. Queued messages are not
+   * sent; their text goes back to the composer, so nothing typed is lost. Stop
+   * that only ended the current turn let the next queued one start at once,
+   * and it read as Stop not working.
+   *
+   * The session stays busy until the turn has actually unwound (runTurn's
+   * finally clears the controller and reports it), so the Stop button does
+   * not disappear while a command is still being ended.
+   */
   abort(): void {
     this.controller?.abort()
-    this.controller = null
     // A flow waiting on the person ends with the abort: nobody will answer.
     if (this.question) this.answer(this.question.view.id, null)
     this.approvals.denyAll()
     this.continueAtLimit(false)
+    if (this.pending.length > 0) {
+      const text = this.pending.map((p) => p.prompt).filter(Boolean).join('\n\n')
+      this.pending = []
+      // The greyed bubbles go: the transcript is what was actually sent.
+      this.emit({ type: 'conversation', messages: this.snapshot(), state: this.state() })
+      if (text) this.emit({ type: 'composerText', text })
+      this.deps.onPersist?.()
+    }
   }
 
   /**
@@ -435,6 +456,7 @@ export class ChatSession {
 
     const controller = new AbortController()
     this.controller = controller
+    this.deps.onBusyChanged?.()
     // What the run changes, kept as it happens: a turn that fails after three
     // writes still made those writes, and the next message must know.
     const effects: ToolEffect[] = []
@@ -617,7 +639,10 @@ export class ChatSession {
         await this.deps.onUnauthorized()
       }
     } finally {
-      if (this.controller === controller) this.controller = null
+      if (this.controller === controller) {
+        this.controller = null
+        this.deps.onBusyChanged?.()
+      }
       this.inFlight = null
       this.deps.onPersist?.()
     }

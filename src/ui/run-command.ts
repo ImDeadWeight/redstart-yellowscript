@@ -61,7 +61,7 @@ export interface CommandGateDeps {
  * null when the person declined to run it.
  */
 export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand) => Promise<CommandOutcome | null> {
-  return async (pending: PendingCommand): Promise<CommandOutcome | null> => {
+  return async (pending: PendingCommand, signal?: AbortSignal): Promise<CommandOutcome | null> => {
     const tier = deps.classify?.(pending) ?? null
     // Tier A and B run without asking; the person's own prefixes come after,
     // except for a line that discards work, which asks every time.
@@ -115,6 +115,8 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
       ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}),
       ...(deps.conversationId ? { chat: deps.conversationId } : {}),
       nonInteractive: deps.nonInteractive?.() !== false,
+      // Stop ends the command, and everything it started.
+      ...(signal ? { signal } : {}),
       onOutput: (chunk) => channel.append(chunk),
     })
     const text = formatCommandRun(run)

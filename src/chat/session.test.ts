@@ -6,7 +6,7 @@ import * as path from 'node:path'
 
 import { ChatSession, RESUME_PROMPT, outputTail, type SessionDeps } from './session.ts'
 import { applyHostMessage, initialViewState } from '../webview/view-model.ts'
-import { BackgroundProcesses } from '../tools/process-runner.ts'
+import { BackgroundProcesses } from '../tools/background-processes.ts'
 import type { HostMessage } from './protocol.ts'
 import type { ChatCompletionRequest, NestClient, StreamHandlers, StreamResult } from '../nest/client.ts'
 import { NestHttpError } from '../nest/types.ts'

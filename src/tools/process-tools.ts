@@ -17,7 +17,8 @@
 
 import { assertWorkspaceToolName, stringArg, toolError, toolOk, type PendingCommand, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
-import { capHeadTail, formatProcessList, type BackgroundProcesses } from './process-runner.ts'
+import { formatProcessList, type BackgroundProcesses } from './background-processes.ts'
+import { capHeadTail } from './command-run.ts'
 import { redactUrlCredentials } from './safe-commands.ts'
 
 /** What an "output" read shows of new output at most. */

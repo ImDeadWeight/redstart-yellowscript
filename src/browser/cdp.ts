@@ -1,0 +1,145 @@
+// =============================================================================
+// Finding a local Chrome, Edge or Chromium, starting it headless, and talking
+// to it over the Chrome DevTools Protocol.
+// =============================================================================
+// It speaks CDP over Node's built-in WebSocket, so it needs no npm dependency
+// and no browser download. It knows nothing about pages being checked or about
+// the Yellowscript tool interface: browser/page-check.ts drives it.
+//
+// No `vscode` import.
+// =============================================================================
+
+import { spawn, type ChildProcess } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+
+import { killTree } from '../tools/command-run.ts'
+
+/** How long the browser may take to print its DevTools address. */
+const LAUNCH_TIMEOUT_MS = 15_000
+
+/** Where browsers usually live; the first that exists is used. */
+export function browserCandidates(platform = process.platform, env = process.env): string[] {
+  const fromEnv = env.YELLOWSCRIPT_BROWSER ? [env.YELLOWSCRIPT_BROWSER] : []
+  if (platform === 'win32') {
+    const roots = [env['PROGRAMFILES(X86)'], env.PROGRAMFILES, env.LOCALAPPDATA].filter((r): r is string => !!r)
+    return [
+      ...fromEnv,
+      ...roots.map((r) => path.join(r, 'Microsoft', 'Edge', 'Application', 'msedge.exe')),
+      ...roots.map((r) => path.join(r, 'Google', 'Chrome', 'Application', 'chrome.exe')),
+    ]
+  }
+  if (platform === 'darwin') {
+    return [
+      ...fromEnv,
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ]
+  }
+  return [...fromEnv, '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge', '/snap/bin/chromium']
+}
+
+export function findBrowser(candidates = browserCandidates()): string | null {
+  return candidates.find((p) => fs.existsSync(p)) ?? null
+}
+
+/** A minimal CDP client over one browser WebSocket, flat sessions. */
+export class Cdp {
+  private nextId = 1
+  private readonly pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>()
+  private readonly listeners: Array<(method: string, params: any, sessionId?: string) => void> = []
+  private readonly ws: WebSocket
+
+  constructor(ws: WebSocket) {
+    this.ws = ws
+    ws.addEventListener('message', (event) => {
+      const msg = JSON.parse(String(event.data))
+      if (typeof msg.id === 'number') {
+        const p = this.pending.get(msg.id)
+        if (!p) return
+        this.pending.delete(msg.id)
+        if (msg.error) p.reject(new Error(msg.error.message ?? 'CDP error'))
+        else p.resolve(msg.result)
+      } else if (msg.method) {
+        for (const l of this.listeners) l(msg.method, msg.params, msg.sessionId)
+      }
+    })
+  }
+
+  static connect(url: string): Promise<Cdp> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url)
+      ws.addEventListener('open', () => resolve(new Cdp(ws)), { once: true })
+      ws.addEventListener('error', () => reject(new Error('could not connect to the browser')), { once: true })
+    })
+  }
+
+  send(method: string, params: object = {}, sessionId?: string): Promise<any> {
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject })
+      this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
+    })
+  }
+
+  on(listener: (method: string, params: any, sessionId?: string) => void): void {
+    this.listeners.push(listener)
+  }
+
+  close(): void {
+    try {
+      this.ws.close()
+    } catch {
+      // closing anyway
+    }
+  }
+}
+
+/** Start the browser and resolve with its DevTools WebSocket URL. */
+export function launch(browser: string, profile: string): Promise<{ child: ChildProcess; wsUrl: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      browser,
+      [
+        '--headless=new',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-extensions',
+        '--mute-audio',
+        '--window-size=1280,800',
+        '--remote-debugging-port=0',
+        `--user-data-dir=${profile}`,
+        'about:blank',
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
+    )
+    let stderr = ''
+    const timer = setTimeout(() => {
+      killTree(child)
+      reject(new Error('the browser did not start within 15s'))
+    }, LAUNCH_TIMEOUT_MS)
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk
+      const m = /DevTools listening on (ws:\/\/\S+)/.exec(stderr)
+      if (m) {
+        clearTimeout(timer)
+        // Nothing more is read from stderr; a held pipe would keep Node alive.
+        child.stderr?.removeAllListeners('data')
+        child.stderr?.destroy()
+        child.unref()
+        resolve({ child, wsUrl: m[1]! })
+      }
+    })
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`the browser exited (code ${code}) before it was ready`))
+    })
+  })
+}

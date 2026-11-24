@@ -5,7 +5,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { createToolRegistry, parseToolArguments } from './registry.ts'
-import { BackgroundProcesses } from './process-runner.ts'
+import { BackgroundProcesses } from './background-processes.ts'
 import type { ToolContext } from './types.ts'
 import type { EditorState } from './editor-context.ts'
 

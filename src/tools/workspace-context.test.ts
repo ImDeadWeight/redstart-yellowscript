@@ -6,8 +6,15 @@ import assert from 'node:assert/strict'
 import * as path from 'node:path'
 import { describe, test } from 'node:test'
 
-import { MAX_INSTRUCTION_CHARS, buildWorkspaceContext, keepingGuide, keptFiles, workspaceTree, type ContextFs } from './workspace-context.ts'
-import { shellNote } from './process-runner.ts'
+import {
+  MAX_INSTRUCTION_CHARS,
+  buildWorkspaceContext,
+  keepingGuide,
+  keptFiles,
+  shellNote,
+  workspaceTree,
+  type ContextFs,
+} from './workspace-context.ts'
 
 const root = path.resolve('/game')
 

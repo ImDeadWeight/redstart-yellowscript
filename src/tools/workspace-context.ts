@@ -21,7 +21,6 @@ import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
 
 import { SKIPPED_DIRECTORIES } from './fallback-search.ts'
-import { shellNote } from './process-runner.ts'
 import { NOTES_FILE, notesForContext } from './notes.ts'
 
 /** Instruction files, first found wins. */
@@ -189,3 +188,31 @@ export function buildWorkspaceContext(root: string, fs: ContextFs = nodeContextF
   if (tree.length > 0) parts.push(`Files (top two levels):\n${tree.join('\n')}`)
   return parts.join('\n\n')
 }
+
+/**
+ * Which shell runs the approved lines, said the way a model needs it. Node's
+ * `shell: true` is %ComSpec% (cmd.exe) on Windows and /bin/sh elsewhere, and
+ * a model that assumes bash on Windows wastes turns on `ls`, `pwd`, `true`.
+ */
+export function shellNote(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string {
+  if (platform === 'win32') {
+    const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
+    return (
+      `Commands (ys_run_command, ys_process) run in Windows ${shell}, not bash: use dir, type, ` +
+      'findstr, cd (no ls, cat, rm, pwd, grep, true). Node, npm and npx work as usual. ' +
+      FILES_NOTE
+    )
+  }
+  return `Commands (ys_run_command, ys_process) run in /bin/sh (POSIX shell). ${FILES_NOTE}`
+}
+
+/** Said with the shell: read-only and check commands run without asking;
+ *  changing files belongs to the ys_ tools, which checkpoint; and where the
+ *  processes it started are. */
+const FILES_NOTE =
+  'Read-only commands and the project\'s test, build and lint scripts run without asking; a chained or piped ' +
+  'line asks. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir. ' +
+  'Commands cannot answer prompts: pass the non-interactive flag (--yes, -y, …); one that waits for input is stopped. ' +
+  'Every process you start gets an id (c1 for a command, p1 for a background one) and its pid in the result, and ' +
+  'ys_process {"action":"list"} shows them all; do not look for your processes with tasklist, Get-Process or ps, ' +
+  'and never end a process that is not on that list.'

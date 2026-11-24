@@ -29,7 +29,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { killTree } from './process-runner.ts'
+import { killTree } from './command-run.ts'
 import { assertWorkspaceToolName, stringArg, toolError, toolOk, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { PathScopeError, resolveWithinWorkspace } from './workspace-path.ts'
 import { EVAL_TIMEOUT_MS, MAX_EVAL_CHARS, describeStep, keyEvent, parseSteps, parseViewport, type PageStep } from './page-steps.ts'

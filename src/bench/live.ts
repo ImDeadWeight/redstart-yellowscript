@@ -32,7 +32,7 @@ import { NestHttpError } from '../nest/types.ts'
 import { runAgentLoop } from '../agent/loop.ts'
 import { ContextTracker } from '../agent/context-budget.ts'
 import { createToolRegistry } from '../tools/registry.ts'
-import { BackgroundProcesses } from '../tools/process-runner.ts'
+import { BackgroundProcesses } from '../tools/background-processes.ts'
 import { createCheckPageTool, findBrowser } from '../tools/browser-check.ts'
 
 const baseUrl = process.env.YELLOWSCRIPT_TEST_LIVE_NEST

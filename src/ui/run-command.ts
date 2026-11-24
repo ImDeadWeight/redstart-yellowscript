@@ -7,7 +7,7 @@
 // workspace (`redstartYellowscript.allowedCommands`, see isCommandAllowed:
 // a line that chains, pipes or redirects never matches).
 //
-// It runs through child_process (tools/process-runner.ts), with the user's
+// It runs through child_process (tools/command-run.ts), with the user's
 // shell and environment, so the model gets an exit code, both streams and a
 // timeout. Output streams live into the "Yellowscript Commands" output
 // channel, which is where the person watches it.
@@ -19,7 +19,8 @@
 import * as vscode from 'vscode'
 
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
-import { describeKillTargets, formatCommandRun, runFailed, startInBackground, type BackgroundProcesses } from '../tools/process-runner.ts'
+import { describeKillTargets, startInBackground, type BackgroundProcesses } from '../tools/background-processes.ts'
+import { formatCommandRun, runFailed } from '../tools/command-run.ts'
 import { endsProcesses } from '../tools/safe-commands.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'

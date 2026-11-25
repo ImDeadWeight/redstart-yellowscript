@@ -206,7 +206,7 @@
           "type": "array",
           "default": [],
           "items": { "type": "string" },
-          "markdownDescription": "Command prefixes that run without asking in this workspace, e.g. `npm test` or `npx tsc`. A line that chains, pipes or redirects (`&&`, `|`, `;`, `>`) always asks. Added by the **Always allow** button on a command prompt."
+          "markdownDescription": "Command prefixes that run without asking in this workspace, e.g. `npm test` or `npx tsc`. An `&&` chain runs without asking when each part would; a pipe, `;`, `||` or redirect (`|`, `;`, `>`) always asks. Added by the **Always allow** button on a command prompt."
         },
         "redstartYellowscript.approvedWriteTools": {
           "type": "array",

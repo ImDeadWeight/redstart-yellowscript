@@ -7,6 +7,10 @@
   "publisher": "redstart",
   "license": "UNLICENSED",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ImDeadWeight/redstart-yellowscript"
+  },
   "type": "module",
   "engines": {
     "vscode": "^1.90.0",
@@ -242,7 +246,7 @@
     "icons": "node scripts/make-icons.mjs",
     "check": "node scripts/sync-agent-core.mjs --check && npm run typecheck && npm run test",
     "sync:agent-core": "node scripts/sync-agent-core.mjs",
-    "package": "npm run check && npm run build && vsce package --no-dependencies"
+    "package": "npm run check && npm run build && vsce package --no-dependencies --skip-license"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

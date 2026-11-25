@@ -20,6 +20,7 @@
 import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
 
+import { lookupGuidance } from '../agent/agent-core.ts'
 import { SKIPPED_DIRECTORIES } from './fallback-search.ts'
 import { NOTES_FILE, notesForContext } from './notes.ts'
 
@@ -170,6 +171,11 @@ export function buildWorkspaceContext(root: string, fs: ContextFs = nodeContextF
   const parts: string[] = [
     `The workspace is ${nodePath.basename(root)} (${root}). Paths you pass to the ys_ tools are relative to it. ${shellNote()}`,
   ]
+
+  // When to look something up instead of reasoning from memory: only with a
+  // web tool in this run (agent-core lookup.mjs; Crestline on SvelteKit 3).
+  const lookup = lookupGuidance(keeping.tools ?? [])
+  if (lookup) parts.push(lookup)
 
   for (const name of INSTRUCTION_FILES) {
     const text = fs.readFile(nodePath.join(root, name))

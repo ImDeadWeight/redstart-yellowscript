@@ -23,6 +23,7 @@ import * as approval from '../vendor/agent-core/approval.mjs'
 import * as teaching from '../vendor/agent-core/teaching.mjs'
 import * as stagnation from '../vendor/agent-core/stagnation.mjs'
 import * as workingState from '../vendor/agent-core/working-state.mjs'
+import * as lookup from '../vendor/agent-core/lookup.mjs'
 
 import type {
   AgentLoopParams,
@@ -187,12 +188,24 @@ export const DEBUGGING_PROCEDURE: string = stagnation.DEBUGGING_PROCEDURE
 // overrides are any numbers.
 export const createStagnationMonitor = stagnation.createStagnationMonitor as unknown as (
   overrides?: Partial<StagnationLimits>,
+  /** lookupTools: the web tools the model has; the notes name the first,
+   *  and a lookup is never paused. */
+  options?: { lookupTools?: readonly string[] },
 ) => StagnationMonitor
 export const repeatedCallResult: (name: string, times: number) => string = stagnation.repeatedCallResult
 /** The line of a failure worth quoting, without terminal codes and frames; empty when there is none. */
 export const failureLine: (text: string) => string = stagnation.failureLine
 export const errorSignature: (text: string) => string = stagnation.errorSignature
 export const actionFamily: (name: string, args: string, kind: CallKind) => string = stagnation.actionFamily
+
+// --- lookup: when a library is newer than the model ------------------------------
+
+/** The web tools, in the order a note names them. */
+export const LOOKUP_TOOLS: readonly string[] = lookup.LOOKUP_TOOLS
+/** The system prompt line on when to look things up; '' without a web tool. */
+export const lookupGuidance: (tools: readonly string[]) => string = lookup.lookupGuidance
+/** The note for a package.json's text: dependencies newer than the model knows; '' for none. */
+export const manifestNote: (text: string, tools: readonly string[]) => string = lookup.manifestNote
 
 // --- working state: what a run learned, kept past trimming --------------------------
 

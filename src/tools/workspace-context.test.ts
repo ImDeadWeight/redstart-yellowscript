@@ -59,6 +59,15 @@ describe('buildWorkspaceContext', () => {
     assert.match(text, /The workspace is game/)
     assert.match(text, /Files \(top two levels\):\nsrc\/\n {2}game\.ts\npackage\.json/)
   })
+
+  test('says when to look things up only when the run has a web tool', () => {
+    const fs = tree({ 'package.json': '' })
+    const web = buildWorkspaceContext(root, fs, { tools: ['ys_read_file', 'web_search', 'web_fetch'] })!
+    assert.match(web, /may use newer\s+versions/)
+    assert.match(web, /with web_search and read the page with web_fetch/)
+    assert.doesNotMatch(buildWorkspaceContext(root, fs, { tools: ['ys_read_file'] })!, /web_search/)
+    assert.doesNotMatch(buildWorkspaceContext(root, fs)!, /web_search/, 'tools unknown: the ys_ tools only')
+  })
 })
 
 describe('workspaceTree', () => {

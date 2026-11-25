@@ -57,6 +57,7 @@ import {
   createStagnationMonitor,
   createWorkingState,
   failureLine,
+  LOOKUP_TOOLS,
   repeatedCallResult as coreRepeatedCallResult,
   STAGNATION_LIMITS,
   type CallInfo,
@@ -76,6 +77,7 @@ import {
 import type { ToolPayloadEntry } from '../tools/registry.ts'
 import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
 import { createKeepNudge } from './keep-nudge.ts'
+import { createVersionNotes } from './version-note.ts'
 
 /**
  * How many model round trips one user message may cost before the person is
@@ -322,7 +324,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   let iterations = 0
   /** Images of the result being stored, handed to extraParts right after. */
   let resultImages: string[] = []
-  const monitor = createStagnationMonitor(options.stagnation)
+  // The web tools this run has: the monitor's notes say to look a failure
+  // up, and never pause a lookup (agent-core lookup.mjs).
+  const lookupTools = LOOKUP_TOOLS.filter((t) => options.tools.names.includes(t))
+  const monitor = createStagnationMonitor(options.stagnation, { lookupTools })
+  /** A package.json newer than the model knows, said once per manifest. */
+  const versionNote = createVersionNotes(options.tools.names, options.toolContext.workspaceRoots)
   const workingState = createWorkingState()
   /** Asks the model to ys_note what a recovery taught it (keep-nudge.ts). */
   const keep = createKeepNudge(options.keepNudges ?? options.tools.names.includes('ys_note'))
@@ -511,6 +518,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         } else {
           const planned = await options.tools.execute(call.function.name, call.function.arguments, options.toolContext)
           resultForModel = await review(planned, options)
+          const note = versionNote(call.function.name, call.function.arguments, !resultForModel.isError)
+          if (note) resultForModel = { ...resultForModel, content: `${resultForModel.content}\n\n${note}` }
           outcome = callOutcome(info, planned, resultForModel)
         }
         monitor.record(info, outcome)

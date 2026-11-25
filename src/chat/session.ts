@@ -35,6 +35,8 @@ import { ApprovalQueue, type ApprovalRequest } from './approvals.ts'
 import { runAgentLoop, type AgentResult, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
 import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep, Recovery, StagnationLimits } from '../agent/agent-core.ts'
+import { parseArtifactLines } from '../agent/agent-core.ts'
+import { artifactCardsFrom, mergeCards } from './artifact-cards.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext, ToolEffect } from '../tools/types.ts'
 import { FULL_LOGS_KEPT, RUN_LOG_NOTE, collapsedRunLog, formatRunLog } from './run-log.ts'
@@ -326,6 +328,11 @@ export class ChatSession {
 
   /** A snapshot of the transcript, safe to hand across the webview boundary. */
   /** What the run of assistant turn `turnId` did (for its task summary). */
+  /** The Nest link an artifact card on this turn opens, or null. */
+  artifactUrlOf(turnId: string, id: string): string | null {
+    return this.messages.find((m) => m.id === turnId && m.role === 'assistant')?.artifacts?.find((a) => a.id === id)?.url ?? null
+  }
+
   runOf(turnId: string): ToolEffect[] | null {
     return this.messages.find((m) => m.id === turnId && m.role === 'assistant')?.run ?? null
   }
@@ -461,6 +468,8 @@ export class ChatSession {
     // What the run changes, kept as it happens: a turn that fails after three
     // writes still made those writes, and the next message must know.
     const effects: ToolEffect[] = []
+    // Artifacts whose draft this turn wrote; sealed when it ends.
+    const touchedArtifacts = new Set<string>()
 
     try {
       const handlers = {
@@ -565,6 +574,13 @@ export class ChatSession {
                 })
               },
               onToolResult: (call, toolResult) => {
+                // Artifacts (artifacts plan §11): a card for each one the call
+                // named, and its draft sealed when the turn ends.
+                const cards = artifactCardsFrom(toolResult.content)
+                if (cards.length) {
+                  turn.artifacts = mergeCards(turn.artifacts ?? [], cards)
+                  for (const ref of parseArtifactLines(toolResult.content)) if (ref.revision === 'draft') touchedArtifacts.add(ref.id)
+                }
                 const effect = toolResult.effect
                 const showsOutput = (effect?.kind === 'command' && effect.ran) || (!toolResult.isError && readsProcessOutput(call.function.name, call.function.arguments))
                 const output = showsOutput ? outputTail(toolResult.content) : undefined
@@ -648,6 +664,14 @@ export class ChatSession {
         await this.deps.onUnauthorized()
       }
     } finally {
+      // The turn ended: seal the drafts it wrote into revisions (artifacts plan
+      // D7). This client has no Nest conversation, so its drafts are held
+      // under none. Never blocks: Nest seals an idle draft itself.
+      if (touchedArtifacts.size) {
+        const sealing = this.deps.getClient()
+        await Promise.all([...touchedArtifacts].map((id) =>
+          sealing?.request(`/artifacts/${id}/seal`, { method: 'POST', body: JSON.stringify({ conversationId: null }) }).catch(() => null)))
+      }
       if (this.controller === controller) {
         this.controller = null
         this.deps.onBusyChanged?.()

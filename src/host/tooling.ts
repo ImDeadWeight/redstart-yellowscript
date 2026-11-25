@@ -13,6 +13,7 @@ import * as vscode from 'vscode'
 import * as nodePath from 'node:path'
 
 import { findBrowser } from '../browser/cdp.ts'
+import { ARTIFACT_CHECK_TOOL, runArtifactCheck } from '../tools/artifact-check.ts'
 import type { AskApproval } from '../chat/approvals.ts'
 import { PLAN_DIR } from '../chat/plan-file.ts'
 import type { HostMessage } from '../chat/protocol.ts'
@@ -168,6 +169,19 @@ export function createTooling(deps: ToolingDeps): Tooling {
                 },
               }
               if (t.meta) ref.meta = t.meta
+              // Nest defines artifact_check; this window answers it with its own
+              // page check, on the view URL Nest issues (artifacts plan D11).
+              if (t.name === ARTIFACT_CHECK_TOOL) {
+                ref.executeLocal = (args) => runArtifactCheck(args, {
+                  view: (id) => client.request(`/artifacts/${id}/view`, { method: 'POST', body: JSON.stringify({}) }),
+                  title: async (id) => (await client.request<{ title: string }>(`/artifacts/${id}`)).title,
+                  browser: () => findBrowser(),
+                  screenshotDir: () => {
+                    const root = deps.roots()[0]
+                    return root ? nodePath.join(root, PLAN_DIR, 'screenshots') : null
+                  },
+                })
+              }
               return ref
             })
           try {

@@ -231,3 +231,31 @@ export const TRIGGER_RATIO: number = compaction.TRIGGER_RATIO
 export const KEEP_RATIO: number = compaction.KEEP_RATIO
 export const MAX_SINGLE_MESSAGE_TOKENS_RATIO: number = compaction.MAX_SINGLE_MESSAGE_TOKENS_RATIO
 export const PER_MESSAGE_OVERHEAD_TOKENS: number = compaction.PER_MESSAGE_OVERHEAD_TOKENS
+
+// --- the old/new-string matcher, shared with Nest's artifact_edit (artifacts plan D3) ---
+
+import * as replaceMatch from '../vendor/agent-core/replace-match.mjs'
+import * as artifactLines from '../vendor/agent-core/artifact-lines.mjs'
+
+export interface ClosestText {
+  startLine: number
+  endLine: number
+  matched: number
+  total: number
+  firstDiff: { wantedLine: number; wanted: string; fileLine: number; actual: string } | null
+  text: string
+}
+
+export const looseReplace: (file: string, oldString: string, newString: string) => { after: string; line: number } | null =
+  replaceMatch.looseReplace
+export const closestText: (file: string, oldString: string) => ClosestText | null = replaceMatch.closestText
+export const showLine: (line: string) => string = replaceMatch.showLine
+
+// --- the [artifact: <id> r<n>|draft] line an artifacts tool result ends with ---
+
+export interface ArtifactRef {
+  id: string
+  revision: number | 'draft'
+}
+export const parseArtifactLines: (text: string) => ArtifactRef[] = artifactLines.parseArtifactLines
+export const stripArtifactLines: (text: string) => string = artifactLines.stripArtifactLines

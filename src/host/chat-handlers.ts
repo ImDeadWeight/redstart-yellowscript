@@ -9,7 +9,9 @@
 // No `vscode` import.
 // =============================================================================
 
+import * as vscode from 'vscode'
 import type { HostMessage } from '../chat/protocol.ts'
+import { safeUrl } from '../chat/artifact-cards.ts'
 import type { ChatViewHandlers, Surface } from '../ui/chat-view.ts'
 import type { ConversationStore } from '../ui/conversation-store.ts'
 import type { ConnectionCommands } from './connection-commands.ts'
@@ -129,6 +131,13 @@ export function chatViewHandlers(deps: ChatHandlersDeps): ChatViewHandlers {
     onOpenTaskDiff: (from, turnId, file) => {
       const session = sessionOn(from)
       if (session) void tasks.openDiff(session.runOf(turnId) ?? [], file)
+    },
+    // Open in Redstart (artifacts plan §11): the chat app's page for the
+    // artifact, the link Nest itself put in the tool result for that id. The
+    // webview names only the turn and the id, so it cannot open anything else.
+    onOpenArtifact: (from, turnId, id) => {
+      const url = sessionOn(from)?.artifactUrlOf(turnId, id)
+      if (url && safeUrl(url)) void vscode.env.openExternal(vscode.Uri.parse(url))
     },
     onRevertTask: (from, turnId) => {
       const session = sessionOn(from)

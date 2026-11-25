@@ -90,6 +90,18 @@ export interface ChatMessageView {
    *  checks), in order. Sent to the model after the turn's text on later
    *  requests (chat/run-log.ts), and drawn as the task summary. */
   run?: ToolEffect[]
+  /** Artifacts this turn's Nest tools made or changed (artifacts plan §11),
+   *  from each result's [artifact: …] line, drawn as cards. */
+  artifacts?: ArtifactCardView[]
+}
+
+/** An artifact a tool made or changed: its id, where it stands, and the
+ *  link Nest put in the result (Open: <url>), opened by Open in Redstart. */
+export interface ArtifactCardView {
+  id: string
+  revision: number | 'draft'
+  title?: string
+  url?: string
 }
 
 /** Something attached to a user message. A file's content is read by the
@@ -377,6 +389,7 @@ export type WebviewMessage =
   | { type: 'openTaskDiff'; turnId: string; path: string }
   /** The task summary: undo every write of the run `turnId`. */
   | { type: 'revertTask'; turnId: string }
+  | { type: 'openArtifact'; turnId: string; id: string }
 
 // ---------------------------------------------------------------------------
 // host → webview
@@ -591,6 +604,8 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return typeof msg.turnId === 'string' && typeof msg.path === 'string' ? { type: 'openTaskDiff', turnId: msg.turnId, path: msg.path } : null
     case 'revertTask':
       return typeof msg.turnId === 'string' ? { type: 'revertTask', turnId: msg.turnId } : null
+    case 'openArtifact':
+      return typeof msg.turnId === 'string' && typeof msg.id === 'string' ? { type: 'openArtifact', turnId: msg.turnId, id: msg.id } : null
     case 'loadPage':
       return PAGE_NAMES.includes(msg.page as PageName) ? { type: 'loadPage', page: msg.page as PageName } : null
     case 'updateSetting':

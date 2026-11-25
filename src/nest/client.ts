@@ -39,6 +39,16 @@ const DEFAULT_TIMEOUT_MS = 10_000
 /** Injected so tests don't need a live server. */
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
+/**
+ * fetch for the Nest's API: never follows a redirect. A Nest in LAN-HTTPS
+ * mode answers http://<ip>:80 with a 308 to its https name, and following it
+ * crosses origins, which drops the Authorization header: every request then
+ * came back 401 and read as a sign-out (2026-11-24). Sign-in was worse: a
+ * 308 keeps the body, so the password went wherever port 80 pointed. A
+ * redirect is reported instead (httpError), naming where it leads.
+ */
+export const nestFetch: FetchLike = (input, init) => fetch(input, { ...init, redirect: 'manual' })
+
 export interface NestClientOptions {
   fetch?: FetchLike
   timeoutMs?: number
@@ -65,7 +75,7 @@ export class NestClient {
 
   constructor(baseUrl: string, options: NestClientOptions = {}) {
     this.baseUrl = normalizeBaseUrl(baseUrl)
-    this.doFetch = options.fetch ?? ((input, init) => fetch(input, init))
+    this.doFetch = options.fetch ?? nestFetch
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
@@ -436,8 +446,28 @@ async function describeError(response: Response): Promise<{ message: string; con
   return { message: response.statusText || `HTTP ${response.status}` }
 }
 
+/** What a redirect from the Nest is reported as. */
+export function redirectMessage(url: string, location: string | null): string {
+  let from = url
+  let to = location ?? ''
+  try {
+    from = new URL(url).origin
+    if (location) to = new URL(location, url).origin
+  } catch {
+    // Keep the raw strings.
+  }
+  return to
+    ? `The Nest at ${from} redirects to ${to}. Connect to ${to} instead (Yellowscript does not follow redirects, so your sign-in is never sent elsewhere).`
+    : `The Nest at ${from} answered with a redirect. Connect to its https address instead.`
+}
+
 /** An HTTP error from a failed response, with its context-exceeded numbers. */
 async function httpError(response: Response, url: string): Promise<NestHttpError> {
+  // Not followed (nestFetch): say where it leads, so the fix is plain.
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel()
+    return new NestHttpError(response.status, redirectMessage(url, response.headers.get('location')), url)
+  }
   const { message, contextExceeded } = await describeError(response)
   return new NestHttpError(response.status, message, url, contextExceeded)
 }

@@ -39,7 +39,7 @@ import {
   type WorkflowView,
   tabLabel,
 } from './chat/protocol.ts'
-import { NestClient, normalizeBaseUrl, type NestProject } from './nest/client.ts'
+import { NestClient, nestFetch, normalizeBaseUrl, type NestProject } from './nest/client.ts'
 import { SecretCredentialStore, WorkspaceStateStore } from './storage.ts'
 import { StatusBar } from './ui/status-bar.ts'
 import { ChatViewProvider, type Surface } from './ui/chat-view.ts'
@@ -1840,7 +1840,7 @@ function connectMcpHost(): void {
     {
       baseUrl: client.baseUrl,
       listMcpServers: (signal) => client.listMcpServers(signal),
-      fetch: (input, init) => fetch(input, init),
+      fetch: nestFetch,
       getCredential: () => client.getCredential(),
     },
     {

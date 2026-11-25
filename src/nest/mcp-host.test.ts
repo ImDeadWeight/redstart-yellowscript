@@ -231,7 +231,7 @@ describe('McpHost', () => {
     const init = server.sent.find((s) => s.method === 'initialize')!
     const params = init.body.params as { protocolVersion: string; capabilities: { experimental?: Record<string, { names?: string[] }> } }
     assert.equal(params.protocolVersion, '2025-03-26')
-    assert.deepEqual(params.capabilities.experimental?.['redstart/hostTools']?.names, ['ask_user', 'update_plan'])
+    assert.deepEqual(params.capabilities.experimental?.['redstart/hostTools']?.names, ['ask_user', 'update_plan', 'artifact_check'])
     host.stop()
   })
 

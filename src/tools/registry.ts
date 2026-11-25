@@ -233,6 +233,9 @@ export interface NestToolRef {
   meta?: Record<string, unknown>
   /** The host calls this to execute the tool on the Nest via McpHost.callTool. */
   execute: (args: unknown, context: ToolContext) => Promise<string>
+  /** A tool Nest defines but this host answers itself (artifact_check):
+   *  run here instead of on Nest, with a full result (images included). */
+  executeLocal?: (args: unknown, context: ToolContext) => Promise<ToolResult>
 }
 
 /**
@@ -323,6 +326,7 @@ export function mergeNestTools(
     // Wire the real execution delegate: calls back into McpHost.callTool.
     const ref = nest
     wrapped.execute = (args: unknown, context: ToolContext) => {
+      if (ref.executeLocal) return ref.executeLocal(args, context)
       // Nest's catalog dispatcher can still reach a shadowed tool by name.
       const shadowed = ref.name === 'call_tool' ? shadowedTarget(args) : null
       if (shadowed) return Promise.resolve(toolError(shadowedToolText(shadowed)))

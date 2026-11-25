@@ -70,6 +70,8 @@ export interface ChatViewHandlers {
   onClearPlan: (from: Surface) => void
   onContinueAtLimit: (from: Surface, go: boolean) => void
   onOpenTaskDiff: (from: Surface, turnId: string, path: string) => void
+  /** Open in Redstart on an artifact card: the link Nest put in the result. */
+  onOpenArtifact: (from: Surface, turnId: string, id: string) => void
   onRevertTask: (from: Surface, turnId: string) => void
   onResumeTask: (from: Surface, restart: boolean) => void
   onDismissInterrupted: (from: Surface) => void
@@ -315,6 +317,9 @@ export class ChatViewProvider implements vscode.WebviewPanelSerializer {
         break
       case 'revertTask':
         h.onRevertTask(from, message.turnId)
+        break
+      case 'openArtifact':
+        h.onOpenArtifact(from, message.turnId, message.id)
         break
       case 'resumeTask':
         h.onResumeTask(from, message.restart)

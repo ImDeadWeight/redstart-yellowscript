@@ -3,6 +3,7 @@
   import { renderMarkdown } from '../markdown.ts'
   import ToolCard from './ToolCard.svelte'
   import TaskSummary from './TaskSummary.svelte'
+  import ArtifactCards from './ArtifactCards.svelte'
   import Thought from './Thought.svelte'
   import Markdown from './Markdown.svelte'
   import { taskSummary } from '../../chat/run-log.ts'
@@ -187,6 +188,9 @@
     {/if}
     {#if summary}
       <TaskSummary turnId={message.id} {summary} canRevert={latestTask} />
+    {/if}
+    {#if message.artifacts?.length}
+      <ArtifactCards turnId={message.id} artifacts={message.artifacts} />
     {/if}
     {#if message.aborted || stats?.tokensPerSecond}
       <footer>

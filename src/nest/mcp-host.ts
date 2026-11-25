@@ -37,8 +37,9 @@ import { approvalRequired, type NestCallResult } from './approval.ts'
 /** The MCP experimental capability a client declares to be offered the
  *  host-resolved tools (Nest interaction-tools.mjs HOST_TOOLS_CAPABILITY). */
 export const HOST_TOOLS_CAPABILITY = 'redstart/hostTools'
-/** The host-resolved tools Yellowscript answers. */
-export const HOST_RESOLVED_TOOLS = ['ask_user', 'update_plan'] as const
+/** The host-resolved tools Yellowscript answers. artifact_check: the CDP page
+ *  check on the view URL Nest issues (tools/artifact-check.ts). */
+export const HOST_RESOLVED_TOOLS = ['ask_user', 'update_plan', 'artifact_check'] as const
 
 /** A single JSON-RPC 2.0 request or response on the MCP wire. */
 export interface McpMessage {

@@ -30,7 +30,8 @@ import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from '.
 import { previewOf, summariseChanges, type WriteFs } from './write-file.ts'
 import type { FileChange } from './diff-apply.ts'
 import { noteSeen, seenState } from './read-ledger.ts'
-import { closestText, looseReplace, showLine } from './replace-match.ts'
+// The matcher is agent-core's, shared with Nest's artifact_edit (artifacts plan D3).
+import { closestText, looseReplace, showLine } from '../agent/agent-core.ts'
 
 /** Resolve a workspace path for a write tool, or a model-readable error. */
 function resolveTarget(
@@ -115,7 +116,7 @@ export function createReplaceTool(fs: WriteFs): Tool {
 
       const found = occurrences(before, oldString)
       if (found.length === 0) {
-        // Off only in indentation, and in one place: made there (replace-match.ts).
+        // Off only in indentation, and in one place: made there (agent-core replace-match).
         const loose = replaceAll ? null : looseReplace(before, oldRaw, newRaw)
         if (loose) {
           noteSeen(context, target.absolute, loose.after)

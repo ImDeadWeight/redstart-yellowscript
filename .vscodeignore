@@ -15,3 +15,4 @@ scripts/**
 tsconfig.webview.json
 assets/**
 bench/**
+.github/**

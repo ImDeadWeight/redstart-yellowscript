@@ -6,11 +6,11 @@
 
 A VSCode coding-agent extension that connects to a **local Redstart Nest** —
 the private, on-premises AI server — instead of a cloud API. Zero-config
-network discovery, Redstart account authentication, streaming chat in the
-sidebar, and workspace-aware tools the model can drive.
+network discovery, Redstart account authentication, streaming chat in editor
+tabs, and workspace-aware tools the model can drive.
 
 > **Status:** connect and sign in (password swapped for an app key, or an API
-> key), streaming chat in the sidebar or an editor tab, workspace tools with
+> key), streaming chat in editor tabs, workspace tools with
 > diff review and checkpoints, Nest's tools with their approvals, the shared
 > agent-core loop with questions and plans, and Nest projects and workflows.
 
@@ -50,12 +50,11 @@ Nest running on your network, that is all the configuration there is.
 
 | Command | What it does |
 |---|---|
-| `Yellowscript: New Chat` | Create a new conversation tab and focus the panel |
+| `Yellowscript: Open Chat` | Bring up the chat used last, or a new one (also a click on the status bar when connected) |
+| `Yellowscript: New Chat` | A new chat in an editor tab of its own |
 | `Yellowscript: Connect to Nest` | Discover (or use the configured URL) and connect |
 | `Yellowscript: Disconnect` | Drop the connection and stop auto-reconnecting |
 | `Yellowscript: New Chat in Editor Tab` | A new chat in its own editor tab (also the bird button in the editor title bar). Each tab is its own chat: drag it to another group, split it, or move it to a new window. It reopens on its chat after a reload |
-| `Yellowscript: Move Chat to Editor Tab` | Move the sidebar's chat into an editor tab (the button in the sidebar's title bar). Closing the tab puts the chat in history; one still running carries on in the sidebar's strip |
-| `Yellowscript: Move Chat to Sidebar` | Put an editor tab's chat back in the sidebar's strip (the sidebar button in the chat tab's title bar, or in its own toolbar). A run carries on. Double-clicking a chat in the strip does the reverse |
 | `Yellowscript: Choose Project` | Link this workspace to a Nest project |
 | `Yellowscript: Run Workflow` | Pick one of your Nest workflows |
 | `Yellowscript: Sign In to Nest` | Username and password (swapped at once for a key Nest issues to this app), or paste an `rst_` API key |
@@ -66,10 +65,12 @@ Nest running on your network, that is all the configuration there is.
 | `Yellowscript: Show the Chat Waiting for You` | Bring the chat that waits on an approval or a question to the front (also the status bar's bell) |
 | `Yellowscript: Add to Yellowscript` | The editor's selection (or the current line) as a chip in the composer; also in the editor's context menu |
 | `Yellowscript: Revert Last Task` | Undo every write of the last task, newest first; files it created are removed |
-| `Yellowscript: Open Settings` | Open the Redstart Yellowscript settings page |
+| `Yellowscript: Open Settings` | Open Yellowscript's Settings page in the chat panel |
 
-Use the **gear icon** in the view title (top-right of the Yellowscript panel)
-to open settings directly.
+The **gear icon** in the chat's toolbar opens
+the same page. It writes the settings below: allow lists and the Nest address
+to this workspace, the rest to your user settings unless this workspace
+already sets them.
 
 ## Settings
 
@@ -113,12 +114,14 @@ disconnected state.
 
 ## Chat & conversations
 
-The sidebar webview holds a **multi-tab** conversation interface. Each tab has
-its own transcript, AbortController, and prompt queue. Switching tabs is a
-pure view change — streaming continues in background tabs.
+Each chat is an **editor tab**, with its own transcript, AbortController, and
+prompt queue. VSCode's tab row is the list of open chats; streaming carries on
+in a tab you have switched away from. Closing a tab puts its chat in History
+(a blank one is deleted); a run still going carries on, and History lists it
+as running.
 
-- **Tab strip** at the top shows all conversations, busy indicators, and queued
-  prompt counts.
+- **Title bar** above each chat shows its title and a busy dot, with New chat,
+  Workflows, History and Settings.
 - **Streaming** uses two channels: `content` (visible answer) and `reasoning`
   (thinking, starts collapsed).
 - **Prompt queuing**: while a turn runs, new prompts queue behind it and drain
@@ -163,6 +166,17 @@ so the model is offered both (agent-core runs them; see below).
 - **The turn limit** (`agent.maxTurns`, 40 by default) asks before going on,
   instead of stopping silently. A tool call repeated with identical arguments
   a fourth time is not run; the model is told to change approach.
+- **A run that is going nowhere** is noticed before the turn limit: the same
+  error three times (even with other flags or at another line), a file
+  written back to how it was, six rounds that find nothing new, reasoning
+  that goes in a circle while it streams, or long theorising with nothing new
+  from a tool. The first time, the model is told what was seen and given a
+  short debugging procedure; the second time, the repeated action is paused
+  until it gathers new evidence; the third time, the run stops and says what
+  it tried. Each shows in the turn as a "Changed approach: …" line.
+- **What a long run learned** is kept when old results are trimmed to fit the
+  context window: files changed, open errors, what reads and searches found,
+  notes and the open plan steps ride at the end of each request.
 
 ### Images, files and selections
 
@@ -365,7 +379,8 @@ npm run package    # check + build + vsce package
 ### The agent loop is agent-core
 
 The loop (turns, the per-reply call limit, recovering calls a model wrote as
-text, `ask_user`, `update_plan` and its completion check) is the same code
+text, `ask_user`, `update_plan` and its completion check, noticing a stuck run,
+the working state) is the same code
 chat-ui, the agent bench and Nest's task runner run: redstart-project's
 `shared/agent-core/`. It is copied into `src/vendor/agent-core/`, pinned to a
 commit recorded in `VENDORED.json`, and never edited here. `src/agent/loop.ts`
@@ -429,13 +444,22 @@ npm run bench -- --label "qwen3.6-35b Q4_K_XL"   # the core tasks
 npm run bench -- --task long-context-reads       # one task
 npm run bench -- --tag milestone                 # the long ones
 npm run bench -- --list                          # no Nest needed
+npm run bench -- --catalog full,core,core+nest   # the tool catalog comparison
+npm run bench -- --no-stagnation                 # without the stuck-run checks
+npm run bench -- --no-diagnostics                # without diagnostics after writes
+npm run bench:cache                              # once: node_modules for Crestline
 ```
 
 Each task in `bench/tasks/<id>/` is a workspace, a prompt (`task.json`) and a
-`check.mjs` that scores the result. The run uses Yellowscript's own loop and
-tools against the real Nest, in a temp copy of the workspace, with a headless
-host: writes apply, commands run (on this machine, inside the copy), and
-`ask_user` gets the task's scripted answers. Results go to
+`check.mjs` that scores the result. The run is the product's own agent
+(`agent/compose.ts`: the same session, workspace message, run log, loop and
+tools) against the real Nest, in a temp copy of the workspace, with a
+headless host: writes apply, commands run (on this machine, inside the copy),
+`ask_user` gets the task's scripted answers, and diagnostics come from the
+TypeScript language service, or `svelte-check` in a Svelte project. A task
+that names `nodeModules` gets a copy of the packages `npm run bench:cache`
+installed from its lockfile, so it runs offline and the same way every time.
+Results go to
 `bench/results/<stamp>-<label>/` (`runs.jsonl`, and `summary.md`, ending with
 the row for [docs/bench-results.md](docs/bench-results.md)).
 

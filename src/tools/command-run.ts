@@ -84,7 +84,10 @@ export interface CommandRun {
 }
 
 /** Keep the first and last part of a long text, saying how much was cut. */
-export function capHeadTail(text: string, cap = STREAM_CAP_CHARS): string {
+export function capHeadTail(raw: string, cap = STREAM_CAP_CHARS): string {
+  // Terminal colours are noise to the model and show as "esc[31m" on the
+  // tool card (2026-11-24); the cap counts what is left.
+  const text = stripAnsi(raw)
   if (text.length <= cap) return text
   const half = Math.floor(cap / 2)
   const cut = text.length - half * 2
@@ -101,7 +104,8 @@ export function formatCommandRun(run: CommandRun): string {
       `Stopped after ${seconds}s: it was waiting for input, and a command run here cannot answer a prompt` +
       `${run.waitingForInput ? ` (it asked: "${run.waitingForInput}")` : ''}. It and everything it started have ended. ` +
       'Run it again non-interactively: give the answer as an option (often --yes, -y, --no-interactive or --force, ' +
-      "or the option for that specific question), as the tool's --help describes."
+      "or the option for that specific question), as the tool's --help describes. " +
+      'The person cannot answer it either: ask_user does not reach a running program.'
   else if (run.stopped) head = `Stopped after ${seconds}s, with everything it started.`
   else if (run.timedOut) head = `Timed out after ${seconds}s and was stopped (exit code ${run.exitCode ?? 'none'}). For a server or watcher, use ys_process (action "start").`
   else if (run.exitCode === null) head = `Ended by signal ${run.signal ?? 'unknown'} · ${seconds}s`
@@ -113,7 +117,8 @@ export function formatCommandRun(run: CommandRun): string {
     parts.push(
       `It ended on a prompt nobody could answer ("${run.endedAtPrompt}"), so it took the default and most likely did ` +
         'NOT do the work, whatever the exit code says. Check, then run it again with the answer as an option ' +
-        "(often --yes, -y or --force, or the option for that question, as the tool's --help describes).",
+        "(often --yes, -y or --force, or the option for that question, as the tool's --help describes). " +
+        'The person cannot answer it either: ask_user does not reach a running program.',
     )
   }
   // `git remote -v` and `npm view` can print a token inside a URL.
@@ -122,7 +127,38 @@ export function formatCommandRun(run: CommandRun): string {
   if (stdout) parts.push(`--- stdout ---\n${capHeadTail(stdout)}`)
   if (stderr) parts.push(`--- stderr ---\n${capHeadTail(stderr)}`)
   if (!stdout && !stderr && !run.spawnError) parts.push('(no output)')
+  // cmd.exe reads `dir .svelte-kit/generated` as the switch /generated; the
+  // bare error sent the model through three tries (Crestline, 2026-11-24).
+  if (/Invalid switch - /i.test(`${stdout}\n${stderr}`)) {
+    parts.push('[cmd.exe reads a "/" in a path as a switch ("dir a/b" is "dir a /b"): write paths with backslashes.]')
+  }
+  const hashImport = unresolvedHashImport(`${stdout}\n${stderr}`)
+  if (hashImport) parts.push(hashImportHint(hashImport))
   return parts.join('\n')
+}
+
+/**
+ * The first `#name/...` import with no extension that a checker could not
+ * resolve. SvelteKit 3 scaffolds `#lib` through package.json "imports"
+ * instead of the `$lib` alias, and an imports pattern is plain text
+ * substitution: `#lib/quote` is `./src/lib/quote`, which TypeScript does not
+ * find although Vite does. The model hunted for missing generated types for
+ * a whole turn (Crestline, 2026-11-24).
+ */
+export function unresolvedHashImport(output: string): string | null {
+  const m = /(?:Cannot find module|Failed to resolve import|Could not resolve|Package import specifier)\s+["'`](#[\w@$-]*\/[^"'`\s]+)["'`]/i.exec(output)
+  if (!m) return null
+  const specifier = m[1]!
+  return /\.[cm]?[jt]sx?$|\.svelte$|\.json$/i.test(specifier.split('/').at(-1) ?? '') ? null : specifier
+}
+
+function hashImportHint(specifier: string): string {
+  const prefix = specifier.split('/')[0]
+  return (
+    `[${prefix} comes from the "imports" field of package.json, which maps it by plain text substitution: ` +
+    `"${specifier}" points at a file with no extension. Write the extension, as in "${specifier}.js" ` +
+    "(TypeScript maps .js to the .ts file) or the file's own extension. Nothing generated is missing.]"
+  )
 }
 
 /** A run failed when it did not start, timed out, or exited non-zero. */
@@ -184,6 +220,11 @@ export function spawnShell(command: string, cwd: string, env?: Record<string, st
 
 export const ANSI_ALL = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007|\u001b[()][A-Z0-9]/g
 
+/** `text` without terminal colour and cursor codes. */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ALL, '')
+}
+
 /**
  * The question, when the end of a command's output is a prompt waiting for an
  * answer: `Continue? (y/N)`, clack's `◆  Which template?` with its options
@@ -199,6 +240,11 @@ export function looksLikePrompt(tail: string): string | null {
     .filter((l) => l.trim() !== '')
   if (lines.length === 0) return null
   const last = lines[lines.length - 1]!.trim()
+  // clack's outro (`└  You're all set!`) means the run finished. An open
+  // question's box closes with a bare └. Until 2026-11-24 the ◆ above a
+  // success ("◆  Successfully setup add-ons: vitest") read as a question,
+  // and the model was told a working `sv add` had done nothing.
+  if (/^└\s*\S/u.test(last)) return null
   const clean = (l: string) => l.replace(/^[\s│|◆◇●○◯❯>?✔✖•*-]+/u, '').trim()
   if (/\((y\/n|yes\/no)\)|\[(y\/n|yes\/no)\]/i.test(last)) return clean(last)
   if (/press (enter|return|any key)/i.test(last)) return clean(last)
@@ -209,6 +255,10 @@ export function looksLikePrompt(tail: string): string | null {
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 12); i--) {
     const line = lines[i]!.trim()
     if (/^[◆?]\s+\S/u.test(line)) {
+      // A question asks something, or offers choices under it (radios,
+      // checkboxes, the arrow-key hint); "◆  Successfully …" does neither.
+      const below = lines.slice(i + 1).join('\n')
+      if (!/\?/.test(line) && !/\?\s*$/m.test(below) && !/[○◯◻◼]|↑\/↓|›/u.test(below)) continue
       // The header, and the question under it when it is on its own line:
       // "Directory not empty: … Continue?".
       const question = lines

@@ -4,7 +4,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { ChatSession, RESUME_PROMPT, outputTail, type SessionDeps } from './session.ts'
+import { ChatSession, RESUME_PROMPT, outputTail, recoveryLine, type SessionDeps } from './session.ts'
+import { STAGNATION_OFF } from '../agent/loop.ts'
 import { applyHostMessage, initialViewState } from '../webview/view-model.ts'
 import { BackgroundProcesses } from '../tools/background-processes.ts'
 import type { HostMessage } from './protocol.ts'
@@ -347,6 +348,73 @@ describe('ChatSession — concurrency and abort', () => {
     await first
     // After first completes, the queued turn runs as a second request.
     assert.equal(h.requests.length, 2, 'queued turn runs after the first finishes')
+  })
+
+  test('Stop with a message queued: the queue is not sent, its text goes back to the composer, and busy is reported throughout', async () => {
+    // Seen 2026-11-24: Stop ended the turn, the queued message started at once
+    // with no Stop button (busy was never reported for it), and only stopping
+    // Nest ended it.
+    const emitted: HostMessage[] = []
+    const busyChanges: boolean[] = []
+    let counter = 0
+    const requests: ChatCompletionRequest[] = []
+    const session: ChatSession = new ChatSession({
+      getClient: () =>
+        fakeClient(async (req, handlers, signal) => {
+          requests.push(req)
+          handlers.onContent?.('working')
+          // Runs until stopped.
+          await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }))
+          return emptyResult({ content: 'working', aborted: true })
+        }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: (message) => emitted.push(message),
+      newId: () => `id${++counter}`,
+      onBusyChanged: () => busyChanges.push(session.busy),
+    })
+
+    const first = session.send('one')
+    await session.send('two')
+    await session.send('three')
+    assert.equal(session.queued, 2)
+    assert.deepEqual(busyChanges, [true], 'the turn starting is reported')
+
+    session.abort()
+    // Busy until the turn has unwound, so the Stop button does not vanish early.
+    assert.equal(session.busy, true)
+    await first
+    assert.equal(session.busy, false)
+    assert.deepEqual(busyChanges, [true, false], 'and its end; no queued turn started')
+    assert.equal(requests.length, 1, 'the queued messages were not sent')
+    assert.equal(session.queued, 0)
+    // The greyed bubbles are gone from the transcript, and their text is back in the box.
+    const replaced = emitted.filter((m) => m.type === 'conversation').at(-1) as Extract<HostMessage, { type: 'conversation' }>
+    assert.ok(replaced && !replaced.messages.some((m) => m.pending), 'pending bubbles removed')
+    const back = emitted.filter((m) => m.type === 'composerText') as Extract<HostMessage, { type: 'composerText' }>[]
+    assert.deepEqual(back.map((m) => m.text), ['two\n\nthree'])
+  })
+
+  test('a queued turn that starts on its own is reported busy, so its Stop button shows', async () => {
+    const busyChanges: boolean[] = []
+    let release: (() => void) | undefined
+    let n = 0
+    const session: ChatSession = new ChatSession({
+      getClient: () =>
+        fakeClient(async () => {
+          if (n++ === 0) await new Promise<void>((resolve) => (release = resolve))
+          return emptyResult({ content: 'done' })
+        }),
+      conversationId: 'test',
+      onUnauthorized: () => {},
+      emit: () => {},
+      onBusyChanged: () => busyChanges.push(session.busy),
+    })
+    const first = session.send('one')
+    await session.send('two')
+    release?.()
+    await first
+    assert.deepEqual(busyChanges, [true, false, true, false], 'each turn, the queued one included')
   })
 
   test('abort passes a signal the client can observe', async () => {
@@ -778,7 +846,8 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
 
   test('waits at the turn limit, and goes on when the person says so', async () => {
     const reads = Array.from({ length: 12 }, () => call('ys_read_file', { path: 'note.txt' }))
-    const h = scripted([...reads, { content: 'Finished.' }], { maxTurns: () => 10 })
+    // Without the stagnation checks, which would stop twelve reads of one file sooner.
+    const h = scripted([...reads, { content: 'Finished.' }], { maxTurns: () => 10, stagnation: () => STAGNATION_OFF })
     const done = h.session.send('read it a lot')
     await until(() => h.session.state().atTurnLimit)
     assert.equal(h.session.state().atTurnLimit, true)
@@ -787,6 +856,38 @@ describe('ChatSession — ask_user, update_plan and the turn limit', () => {
 
     assert.equal(h.session.state().atTurnLimit, false)
     assert.match(h.session.snapshot().at(-1)?.content ?? '', /Finished\./)
+  })
+})
+
+describe('ChatSession — a run that is going nowhere', () => {
+  test('each recovery is a line in the timeline and in the run log; the third stops the run', async () => {
+    const emitted: HostMessage[] = []
+    let n = 0
+    const session = new ChatSession({
+      getClient: () =>
+        fakeClient(async () => emptyResult({ toolCalls: [{ index: 0, id: `c${++n}`, function: { name: 'ys_read_file', arguments: '{"path":"note.txt"}' } }] })),
+      emit: (m) => emitted.push(m),
+      onUnauthorized: async () => {},
+      conversationId: 'c1',
+      tools: () => createToolRegistry({ ripgrepPath: null, diagnostics: () => [], editorState: () => ({ activeFile: null, languageId: null, isDirty: false, cursor: null, selection: null, openFiles: [] }) }),
+      toolContext: () => ({ workspaceRoots: [os.tmpdir()] }),
+    } as SessionDeps)
+    await session.send('read it a lot')
+    const notices = emitted.filter((m) => m.type === 'turn/notice')
+    assert.equal(notices.length, 3)
+    assert.match((notices[0] as { text: string }).text, /^Changed approach: /)
+    assert.match((notices[2] as { text: string }).text, /^Stopped: not making progress/)
+    const turn = session.snapshot().at(-1)!
+    assert.equal(turn.parts?.filter((p) => p.kind === 'notice').length, 3)
+    assert.equal(turn.run?.filter((e) => e.kind === 'recovery').length, 3)
+    assert.match(turn.content, /How would you like me to continue\?$/)
+  })
+
+  test('recoveryLine says what level 2 paused', () => {
+    assert.equal(recoveryLine({ level: 1, evidence: 'Same error.' }), 'Changed approach: Same error.')
+    assert.equal(recoveryLine({ level: 2, evidence: 'Same error.', action: 'ys_run_command:npm run check' }), 'Changed approach: Same error. Paused `npm run check` until there is new evidence.')
+    assert.equal(recoveryLine({ level: 2, evidence: 'Nothing new.', action: 'kind:search' }), 'Changed approach: Nothing new. Paused searches until there is new evidence.')
+    assert.equal(recoveryLine({ level: 3, evidence: 'Still.' }), 'Stopped: not making progress. Still.')
   })
 })
 

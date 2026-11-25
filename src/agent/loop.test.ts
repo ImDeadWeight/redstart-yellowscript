@@ -9,7 +9,12 @@ import {
   runAgentLoop,
   DEFAULT_MAX_ITERATIONS,
   callSignature,
+  callKind,
+  STAGNATION_OFF,
   withHostTools,
+  withTailNotes,
+  HARNESS_NOTE_HEADER,
+  REPLY_MAX_TOKENS,
   type CompletionStreamer,
 } from './loop.ts'
 import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
@@ -327,7 +332,8 @@ describe('runAgentLoop — termination', () => {
         return streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"a.txt"}')] })
       },
     }
-    const result = await runAgentLoop({ client: forever, request: baseRequest, tools: registry(), toolContext })
+    // Without the stagnation checks, which would stop this sooner as stuck.
+    const result = await runAgentLoop({ client: forever, request: baseRequest, tools: registry(), toolContext, stagnation: STAGNATION_OFF })
     assert.equal(result.iterations, DEFAULT_MAX_ITERATIONS)
   })
 
@@ -671,6 +677,12 @@ describe('runAgentLoop — long runs', () => {
     assert.equal(lastRequest.messages[0]!.content, 'read a.txt', 'the request is never trimmed')
     // The run's record keeps the full results.
     assert.ok(result.toolRuns.every((r) => !r.result.content.startsWith('[Earlier result')))
+    // What the stubbed reads showed rides at the tail as the working state.
+    const tail = String(lastRequest.messages.at(-1)!.content)
+    assert.match(tail, /--- From Yellowscript[^\n]*\n\[Working state of this run/)
+    assert.match(tail, /ys_read_file big\.txt: /)
+    // Not before anything was trimmed.
+    assert.ok(!client.requests[0]!.messages.some((m) => String(m.content).includes('[Working state')))
   })
 
   test('a context-exceeded refusal teaches n_ctx, trims, and retries once', async () => {
@@ -808,5 +820,222 @@ describe('runAgentLoop — a model that cannot stop (2026-11-19)', () => {
     const merged = withHostTools(nestHasIt, { ask: { user: async () => null } })
     assert.equal(merged.filter((t) => t.function.name === 'ask_user').length, 1)
     assert.equal(merged.find((t) => t.function.name === 'ask_user')!.function.description, 'nest')
+  })
+})
+
+// --- Stagnation and the working state (agent-runtime plan items 3, 4 and 6) ---
+
+describe('runAgentLoop — a run that is going nowhere', () => {
+  /** A command gate that always fails with the same error at another line. */
+  let line = 0
+  const failingCommands = async () => ({ text: `src/routes/+page.svelte:${++line}:3 Error: Cannot assign to constant`, isError: true, exitCode: 1 })
+  // Letters, not digits: digits alone would make them one call (callSignature).
+  const check = (n: number) => streamResult({ toolCalls: [callDelta('ys_run_command', `{"command":"npm run check -- --${'abcdefghijklmnop'[n]}"}`)] })
+
+  test('the same failure three times puts a note with the evidence at the tail of the next request', async () => {
+    const client = scriptedStreamer([check(1), check(2), check(3), streamResult({ content: 'Changing approach.' })])
+    const seen: string[] = []
+    const result = await runAgentLoop({
+      client, request: baseRequest, tools: registry(), toolContext, approveCommand: failingCommands,
+      handlers: { onRecovery: (r) => seen.push(`${r.detector}:${r.level}`) },
+    })
+    assert.deepEqual(seen, ['same-failure:1'])
+    // In the last tool result, under a line saying who wrote it: not a user message.
+    const tail = client.requests[3]!.messages.at(-1)!
+    assert.equal(tail.role, 'tool')
+    assert.match(String(tail.content), /Cannot assign to constant\n\n--- From Yellowscript, the editor running this task[^\n]*\n\[You seem to be stuck.*Quote the failing observation exactly/s)
+    // A note for one request only: the stored history does not carry it.
+    assert.ok(!client.requests[2]!.messages.some((m) => String(m.content).includes('You seem to be stuck')))
+    assert.ok(!result.toolRuns.some((r) => r.result.content.includes('You seem to be stuck')))
+    assert.equal(result.recoveries.length, 1)
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('the third firing stops the run, and the answer tells the person what was tried', async () => {
+    const client = scriptedStreamer(Array.from({ length: 12 }, (_, i) => check(i)))
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: failingCommands })
+    assert.equal(result.stopReason, 'stuck')
+    assert.deepEqual(result.recoveries.map((r) => r.level), [1, 2, 3])
+    assert.match(result.content, /I stopped because I was not making progress/)
+    assert.match(result.content, /How would you like me to continue\?$/)
+    // Level 2 refused the action until there was new evidence.
+    assert.ok(result.toolRuns.some((r) => r.result.summary === 'Not run: paused until there is new evidence'))
+    // The stop is an answer, not one more request.
+    assert.ok(client.requests.length < 12)
+  })
+
+  test('STAGNATION_OFF leaves only the exact-repeat guard (the bench\'s before)', async () => {
+    const client = scriptedStreamer([...Array.from({ length: 6 }, (_, i) => check(i)), streamResult({ content: 'done' })])
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: failingCommands, stagnation: STAGNATION_OFF })
+    assert.deepEqual(result.recoveries, [])
+    assert.equal(result.stopReason, 'complete')
+  })
+
+  test('a reasoning loop is caught while it streams: that response is dropped and asked for again with the note', async () => {
+    const cycle = 'The sample file fails the same way as mine does here. The JSON output failed because of the Windows paths. Let me try a different approach with the default reporter now. '
+    const requests: ChatCompletionRequest[] = []
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers, signal) {
+        requests.push(structuredClone(request))
+        if (requests.length === 1) {
+          // Loops until it is cut off.
+          let reasoning = ''
+          for (let i = 0; i < 200 && !signal?.aborted; i++) {
+            reasoning += cycle
+            handlers.onReasoning?.(cycle)
+          }
+          return streamResult({ reasoning, aborted: signal?.aborted === true })
+        }
+        handlers.onContent?.('Fixed.')
+        return streamResult({ content: 'Fixed.' })
+      },
+    }
+    const seen: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onRecovery: (r) => seen.push(r.detector) } })
+    assert.deepEqual(seen, ['reasoning-loop'])
+    assert.equal(requests.length, 2)
+    // No tool result yet: the note is a user message.
+    assert.equal(requests[1]!.messages.at(-1)!.role, 'user')
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /going in a circle/)
+    assert.equal(result.content, 'Fixed.')
+    assert.equal(result.stopReason, 'complete')
+    assert.equal(result.aborted, false)
+  })
+
+  test('a tool call whose arguments loop is caught while it streams, and what it wrote is shown as it goes', async () => {
+    // Crestline, 2026-11-24: 19,352 tokens into one call, seen as "waiting".
+    const requests: ChatCompletionRequest[] = []
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers, signal) {
+        requests.push(structuredClone(request))
+        if (requests.length === 1) {
+          handlers.onToolCalls?.([{ index: 0, id: 'c1', function: { name: 'ys_run_command', arguments: '{"command":"npx sv add vitest","answer":"' } }])
+          for (let i = 0; i < 2000 && !signal?.aborted; i++) handlers.onToolCalls?.([{ index: 0, function: { arguments: 'unit testing, ' } }])
+          return streamResult({ aborted: signal?.aborted === true })
+        }
+        handlers.onContent?.('Done.')
+        return streamResult({ content: 'Done.' })
+      },
+    }
+    const seen: string[] = []
+    const drafts: Array<[string, number]> = []
+    const result = await runAgentLoop({
+      client, request: baseRequest, tools: registry(), toolContext,
+      handlers: { onRecovery: (r) => seen.push(r.detector), onDrafting: (tool, chars) => drafts.push([tool, chars]) },
+    })
+    assert.deepEqual(seen, ['argument-loop'])
+    assert.equal(requests.length, 2)
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /tool call's arguments had reached \d+ characters/)
+    assert.ok(drafts.length > 3 && drafts.every(([tool]) => tool === 'ys_run_command'), JSON.stringify(drafts.slice(0, 3)))
+    assert.ok(drafts.at(-1)![1] < 5_000, 'caught within a few thousand characters, not ten minutes')
+    assert.equal(result.toolRuns.length, 0, 'the half-written call did not run')
+    assert.equal(result.content, 'Done.')
+  })
+
+  test('every request caps the reply; a reply cut off at the cap is asked for again once, then the run stops', async () => {
+    const requests: ChatCompletionRequest[] = []
+    const cut = (): ReturnType<typeof streamResult> => ({
+      ...streamResult({ toolCalls: [{ index: 0, id: 'c1', function: { name: 'ys_write_file', arguments: '{"path":"a.ts","content":"x' } }] }),
+      finishReason: 'length',
+    })
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers) {
+        requests.push(structuredClone(request))
+        handlers.onToolCalls?.([{ index: 0, id: 'c1', function: { name: 'ys_write_file', arguments: '{"path":"a.ts","content":"x' } }])
+        return cut()
+      },
+    }
+    const notices: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onNotice: (t) => notices.push(t) } })
+    assert.ok(requests.every((r) => r.max_tokens === REPLY_MAX_TOKENS), 'the cap rides on every request')
+    assert.equal(requests.length, 2)
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /reached the 16384-token limit for one reply without finishing, inside a ys_write_file call/)
+    assert.equal(result.toolRuns.length, 0, 'a half-written call never runs')
+    assert.match(notices[0]!, /^Dropped a reply/)
+    assert.match(notices[1]!, /^Stopped: a reply reached the 16384-token limit again inside a ys_write_file call/)
+    assert.match(result.content, /How would you like me to continue\?$/)
+  })
+})
+
+describe('withTailNotes', () => {
+  const tool = { role: 'tool', content: 'result' }
+  const planNote = '[Automatic note, not from the user] Current plan:\n[>] Write the tests'
+  test('after a tool result, the notes go into it, under a line that says who wrote them', () => {
+    const out = withTailNotes([tool], ['a', null, 'b'])
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.content, `result\n\n${HARNESS_NOTE_HEADER}\na\n\nb`)
+    const same = [tool]
+    assert.equal(withTailNotes(same, [null, '']), same, 'nothing to add: the same array')
+    // The stored message is not edited.
+    assert.equal(tool.content, 'result')
+  })
+  test("agent-core's plan note is folded into the tool result too, not left as a user message", () => {
+    const out = withTailNotes([tool, { role: 'user', content: planNote }], ['note'])
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.content, `result\n\n${HARNESS_NOTE_HEADER}\n${planNote}\n\nnote`)
+    // Alone, it moves as well.
+    assert.equal(withTailNotes([tool, { role: 'user', content: planNote }], []).length, 1)
+  })
+  test('a result with image parts gets a text part', () => {
+    const out = withTailNotes([{ role: 'tool', content: [{ type: 'text', text: 'shot' }, { type: 'image_url' }] }], ['n'])
+    assert.deepEqual((out[0]!.content as unknown[]).at(-1), { type: 'text', text: `${HARNESS_NOTE_HEADER}\nn` })
+  })
+  test("with no tool result (after an answer, or a person's message) the notes stay a user message", () => {
+    assert.deepEqual(withTailNotes([{ role: 'assistant', content: 'done' }], ['n']).at(-1), { role: 'user', content: 'n' })
+    // A person's own message is never edited, even when it starts like a note.
+    const person = [{ role: 'user', content: '[Automatic note, not from the user] mine' }]
+    assert.equal(withTailNotes(person, ['n']).length, 2)
+  })
+})
+
+describe('callKind', () => {
+  test('what each call gathers or changes', () => {
+    assert.equal(callKind('ys_read_file', '{}'), 'read')
+    assert.equal(callKind('ys_grep', '{}'), 'search')
+    assert.equal(callKind('ys_replace', '{}'), 'write')
+    assert.equal(callKind('ys_run_command', '{}'), 'command')
+    assert.equal(callKind('ys_process', '{"action":"start","command":"npm run dev"}'), 'command')
+    assert.equal(callKind('ys_process', '{"action":"output","id":"p1"}'), 'read')
+    assert.equal(callKind('ys_diagnostics', '{}'), 'diagnostics')
+    assert.equal(callKind('call_tool', '{"name":"search_files","arguments":{}}'), 'search')
+    assert.equal(callKind('read_document', '{}'), 'read')
+  })
+})
+
+describe('runAgentLoop — Stop reaches a running command', () => {
+  test("the command gate is given the run's signal, so Stop can end the command", async () => {
+    const controller = new AbortController()
+    let seen: AbortSignal | undefined
+    const client = scriptedStreamer([streamResult({ toolCalls: [callDelta('ys_run_command', '{"command":"npm install"}')] }), streamResult({ content: 'done' })])
+    await runAgentLoop({
+      client, request: baseRequest, tools: registry(), toolContext, signal: controller.signal,
+      approveCommand: async (_pending, signal) => {
+        seen = signal
+        return { text: 'Exit code 0', isError: false }
+      },
+    })
+    assert.equal(seen, controller.signal)
+  })
+})
+
+describe('runAgentLoop — keeping what a recovery taught (keep-nudge.ts)', () => {
+  const run = (command: string) => streamResult({ toolCalls: [callDelta('ys_run_command', JSON.stringify({ command }))] })
+  test('a command that works after failing puts a ys_note reminder in the next request only', async () => {
+    let n = 0
+    const gate = async () => (++n === 1 ? { text: 'error: unknown option --yes', isError: true, exitCode: 1 } : { text: 'Exit code 0', isError: false, exitCode: 0 })
+    const client = scriptedStreamer([run('npx sv create . --yes'), run('npx sv create .'), streamResult({ content: 'Done.' })])
+    await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: gate })
+    const tail = String(client.requests[2]!.messages.at(-1)!.content)
+    assert.ok(tail.includes(`${HARNESS_NOTE_HEADER}
+\`npx sv create\` worked after one failed try`), tail)
+    assert.match(tail, /ys_note/)
+    assert.ok(!String(client.requests[1]!.messages.at(-1)!.content).includes('ys_note'))
+  })
+  test('keepNudges: false leaves it out', async () => {
+    let n = 0
+    const gate = async () => (++n === 1 ? { text: 'error: unknown option --yes', isError: true, exitCode: 1 } : { text: 'Exit code 0', isError: false, exitCode: 0 })
+    const client = scriptedStreamer([run('npx sv create . --yes'), run('npx sv create .'), streamResult({ content: 'Done.' })])
+    await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, approveCommand: gate, keepNudges: false })
+    assert.ok(!client.requests.some((r) => r.messages.some((m) => String(m.content).includes('worked after'))))
   })
 })

@@ -108,5 +108,6 @@ export function nodeCommandContext(options: NodeCommandContextOptions): CommandC
       }
     },
     hasSecretsUnder: (dir) => secretsUnder(dir),
+    at: (cwd) => nodeCommandContext({ ...options, cwd }),
   }
 }

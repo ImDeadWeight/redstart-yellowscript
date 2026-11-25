@@ -8,7 +8,7 @@
   import { taskSummary } from '../../chat/run-log.ts'
   import { attachmentLabel } from '../../chat/attachments.ts'
   import { splitAnswer, turnBlocks, type TurnBlock } from '../../chat/turn-parts.ts'
-  import { waitingNote } from '../view-model.ts'
+  import { draftingNote, waitingNote } from '../view-model.ts'
   import Icon from './Icon.svelte'
 
   let { message, latestTask = false, paused = false }: { message: ChatMessageView; latestTask?: boolean; paused?: boolean } = $props()
@@ -52,9 +52,10 @@
   const summary = $derived(message.streaming ? null : taskSummary(message.run))
 
   // --- What a quiet stream is waiting on. ---
-  // Activity is anything arriving: text, a thought, a call, a result.
+  // Activity is anything arriving: text, a thought, a call being written or
+  // whole, a result.
   const activity = $derived(
-    `${message.content.length}:${message.reasoning?.length ?? 0}:${tools.length}:${tools.filter((t) => t.status !== 'running').length}`,
+    `${message.content.length}:${message.reasoning?.length ?? 0}:${message.drafting?.chars ?? 0}:${tools.length}:${tools.filter((t) => t.status !== 'running').length}`,
   )
   let lastActivity = $state(Date.now())
   let now = $state(Date.now())
@@ -72,8 +73,14 @@
   })
   const lastPart = $derived(message.parts?.[message.parts.length - 1])
   const toolRunning = $derived(tools.some((t) => t.status === 'running'))
+  // A call being written shows nothing else until it is whole: say so,
+  // rather than "waiting" (Crestline, 2026-11-24: ten minutes of it).
   const waiting = $derived(
-    message.streaming && !paused && !toolRunning ? waitingNote(now - lastActivity, lastPart?.kind === 'tool') : null,
+    !message.streaming || paused || toolRunning
+      ? null
+      : message.drafting
+        ? draftingNote(message.drafting)
+        : waitingNote(now - lastActivity, lastPart?.kind === 'tool'),
   )
   const empty = $derived(message.streaming === true && blocks.length === 0 && !message.content && !tools.length)
 </script>
@@ -108,6 +115,8 @@
         <Thought text={b.text} live={message.streaming === true && b.key === lastKey} />
       {:else if b.kind === 'text'}
         <Markdown text={b.text} narration={!inAnswer} cursor={message.streaming === true && b.key === lastKey} />
+      {:else if b.kind === 'notice'}
+        <p class="notice" role="status"><Icon name="refresh" size={12} /><span>{b.text}</span></p>
       {:else}
         <div class="tools">
           {#each b.callIds as id (id)}
@@ -282,4 +291,17 @@
   }
   footer { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 0.8em; opacity: 0.55; }
   .warn { color: var(--vscode-editorWarning-foreground); opacity: 1; }
+  /* A line about the run itself: a stagnation recovery. */
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 2px 0;
+    padding: 4px 8px;
+    font-size: 0.86em;
+    border-left: 2px solid var(--ys-accent);
+    border-radius: 0 4px 4px 0;
+    background: var(--ys-accent-faint);
+  }
+  .notice :global(.icon) { flex-shrink: 0; margin-top: 2px; color: var(--ys-accent-text); }
 </style>

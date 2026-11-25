@@ -173,7 +173,7 @@
   }
   .option:hover { background: var(--vscode-list-hoverBackground); }
   .option.on { border-color: var(--ys-accent); background: var(--ys-accent-faint); }
-  .option:has(:focus-visible) { outline: 1px solid var(--vscode-focusBorder); }
+  .option:has(:focus-visible) { outline: 1px solid var(--ys-accent); }
   .mark {
     display: flex;
     align-items: center;
@@ -186,7 +186,7 @@
   }
   .mark.square { border-radius: 3px; }
   .on .mark { border-color: var(--ys-accent); color: var(--ys-accent); }
-  .on .mark.square { background: var(--ys-accent); color: var(--vscode-button-foreground); }
+  .on .mark.square { background: var(--ys-accent); color: var(--ys-on-accent); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ys-accent); }
   .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .row { display: flex; gap: 6px; margin-top: 8px; }
@@ -200,5 +200,5 @@
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 4px;
   }
-  .free:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .free:focus { outline: 1px solid var(--ys-accent); outline-offset: -1px; }
 </style>

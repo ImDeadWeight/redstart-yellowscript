@@ -60,6 +60,7 @@ export function runLogLines(effects: readonly ToolEffect[]): string[] {
   const rejectedCommands: string[] = []
   const started: string[] = []
   const stopped: string[] = []
+  const recoveries: string[] = []
   let check: Extract<ToolEffect, { kind: 'check' }> | null = null
 
   const setFile = (path: string, state: FileState) => {
@@ -107,6 +108,9 @@ export function runLogLines(effects: readonly ToolEffect[]): string[] {
       case 'stop':
         stopped.push(effect.processId)
         break
+      case 'recovery':
+        recoveries.push(effect.level === 3 ? `stopped as stuck: ${effect.evidence}` : `changed approach: ${effect.evidence}`)
+        break
       case 'check':
         check = effect
         break
@@ -128,6 +132,8 @@ export function runLogLines(effects: readonly ToolEffect[]): string[] {
   }
   if (rejectedCommands.length) lines.push(`rejected, NOT run: ${listNames(rejectedCommands)}`)
   if (started.length) lines.push(`started ${started.join('; ')}`)
+  // The last one: the next message should not repeat what was abandoned.
+  if (recoveries.length) lines.push(recoveries[recoveries.length - 1]!)
   if (stopped.length) lines.push(`stopped ${stopped.join(', ')}`)
   if (check) {
     lines.push(

@@ -82,7 +82,9 @@ export interface ConversationStore {
   unarchive(id: string): void
   /** Store the composer's unsent text. Does not count as an access. */
   setDraft(id: string, text: string): void
-  /** Delete archived conversations with no messages and no draft. */
+  /** Delete conversations with no messages, no draft and no plan, open or
+   *  closed. Run at startup, before any tab is restored: a tab whose blank
+   *  chat is gone opens on a new one, which is the same thing. */
   pruneBlank(): number
   clear(): void
   /** Delete closed conversations untouched for this long. Open tabs are kept. */
@@ -202,7 +204,9 @@ export function conversationStore(memento: vscode.Memento): ConversationStore {
 
     pruneBlank() {
       const before = readAll()
-      const after = before.filter((c) => !(c.archived && isBlank(c)))
+      // Open ones too: the sidebar's strip made blank chats that no tab
+      // showed, and they piled up as "New chat" (2026-11-24).
+      const after = before.filter((c) => !(isBlank(c) && !c.plan?.length))
       if (after.length !== before.length) writeAll(after)
       return before.length - after.length
     },

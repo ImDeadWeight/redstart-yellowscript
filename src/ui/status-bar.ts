@@ -116,8 +116,8 @@ export class StatusBar {
           : 'Authentication is disabled on this Nest'
         return {
           text: `$(rocket) ${label}${rate}`,
-          tooltip: `Redstart Yellowscript\n${state.url}\n${identity}${this.model ? `\nModel: ${this.model}` : ''}`,
-          command: 'redstartYellowscript.showStatus',
+          tooltip: `Redstart Yellowscript\n${state.url}\n${identity}${this.model ? `\nModel: ${this.model}` : ''}\n\nClick to open a chat.`,
+          command: 'redstartYellowscript.openChat',
           warning: false,
         }
       }

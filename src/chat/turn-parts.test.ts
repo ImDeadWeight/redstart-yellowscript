@@ -62,3 +62,14 @@ test('split: reasoning after the answer text stays with the answer', () => {
   const blocks = turnBlocks(stream([call('1'), t('done'), r('afterthought')]))
   assert.deepEqual(splitAnswer(blocks).answer.map((b) => b.kind), ['text', 'reasoning'])
 })
+
+test('a notice is its own part and its own block, never joined to the one before', () => {
+  let parts: TurnPart[] = []
+  parts = appendPart(parts, { kind: 'reasoning', text: 'Let me look' })
+  parts = appendPart(parts, { kind: 'notice', text: 'Changed approach: a' })
+  parts = appendPart(parts, { kind: 'notice', text: 'Changed approach: b' })
+  parts = appendPart(parts, { kind: 'reasoning', text: 'Now' })
+  assert.deepEqual(parts.map((p) => p.kind), ['reasoning', 'notice', 'notice', 'reasoning'])
+  assert.deepEqual(turnBlocks(parts).map((b) => b.kind), ['reasoning', 'notice', 'notice', 'reasoning'])
+  assert.equal(appendPart(parts, { kind: 'notice', text: '' }).length, parts.length, 'an empty notice is nothing')
+})

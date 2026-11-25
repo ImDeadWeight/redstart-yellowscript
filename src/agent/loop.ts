@@ -29,6 +29,19 @@
 //   steering           never: Yellowscript queues a prompt typed mid-flow
 //                      behind the running turn instead.
 //
+// Around the core, two agent-core records of the run:
+//
+//   stagnation         stagnation.mjs watches every call and the streaming
+//                      reasoning. A firing is a note at the tail of the next
+//                      request, then a refusal of the repeated action, then a
+//                      stop with a summary for the person ('stuck'). A
+//                      reasoning loop is caught while it streams: that
+//                      response is dropped and asked for again with the note.
+//                      onRecovery shows each one in the turn's timeline.
+//   working state      working-state.mjs keeps what the run found, and rides
+//                      at the tail of every request once old results have
+//                      been trimmed (context-budget.ts stubs them).
+//
 // No `vscode` import: the whole loop is testable against a fake streamer.
 // =============================================================================
 
@@ -40,6 +53,18 @@ import { isProcessStart } from '../tools/process-tools.ts'
 import type { PendingCommand, PendingWrite, ToolContext, ToolEffect, ToolResult } from '../tools/types.ts'
 import {
   FALLBACK_ID_PREFIX,
+  callToolTarget,
+  createStagnationMonitor,
+  createWorkingState,
+  failureLine,
+  LOOKUP_TOOLS,
+  repeatedCallResult as coreRepeatedCallResult,
+  STAGNATION_LIMITS,
+  type CallInfo,
+  type CallKind,
+  type CallOutcome,
+  type Recovery,
+  type StagnationLimits,
   runAgentLoop as runCoreLoop,
   wireSafeToolCalls,
   type AgentMessage,
@@ -51,6 +76,8 @@ import {
 } from './agent-core.ts'
 import type { ToolPayloadEntry } from '../tools/registry.ts'
 import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
+import { createKeepNudge } from './keep-nudge.ts'
+import { createVersionNotes } from './version-note.ts'
 
 /**
  * How many model round trips one user message may cost before the person is
@@ -67,15 +94,20 @@ export const DEFAULT_MAX_ITERATIONS = 40
  * the result cannot change, so the call is not run again and the model is
  * told why. A write that failed and is retried unchanged is the usual case.
  */
-export const MAX_IDENTICAL_CALLS = 3
+export const MAX_IDENTICAL_CALLS = STAGNATION_LIMITS.identicalCalls
 
-/** What the model reads instead of a repeated call's result. */
-export function repeatedCallResult(name: string, times: number): string {
-  return (
-    `Not run: you have called ${name} with these exact arguments ${times} times in this task, ` +
-    'and the result will not change. Use what the earlier results said, try a different approach, ' +
-    'or tell the user what is blocking you.'
-  )
+/** What the model reads instead of a repeated call's result (agent-core stagnation.mjs). */
+export const repeatedCallResult: (name: string, times: number) => string = coreRepeatedCallResult
+
+/** Every stagnation detector off but the exact-repeat guard: the bench's "before". */
+export const STAGNATION_OFF: Partial<StagnationLimits> = {
+  sameFailure: Infinity,
+  noProgressRounds: Infinity,
+  sentenceRepeats: Infinity,
+  repeatedShare: Infinity,
+  theorizingChars: Infinity,
+  reversals: Infinity,
+  argumentSpan: Infinity,
 }
 
 /** Just the part of NestClient the loop needs, so tests can supply a fake. */
@@ -103,6 +135,8 @@ export type StopReason =
   | 'aborted'
   /** Hit the iteration cap with the model still calling tools. */
   | 'turn-cap'
+  /** Stopped as stuck (stagnation recovery level 3); the answer says what was tried. */
+  | 'stuck'
 
 export interface AgentResult {
   /** Everything the model said across all iterations, in order. */
@@ -115,6 +149,8 @@ export interface AgentResult {
   timings?: StreamTimings
   model?: string
   finishReason?: string
+  /** Every stagnation recovery in this run, oldest first. */
+  recoveries: Recovery[]
 }
 
 export interface AgentLoopHandlers extends StreamHandlers {
@@ -126,6 +162,31 @@ export interface AgentLoopHandlers extends StreamHandlers {
   onIteration?: (iteration: number) => void
   /** Older messages were trimmed to fit the context window before a request. */
   onContextTrimmed?: (report: FitReport) => void
+  /** The run was noticed going nowhere, and what is done about it. */
+  onRecovery?: (recovery: Recovery) => void
+  /** A tool call is being written: its name (once known) and its arguments'
+   *  length so far. Every DRAFT_STEP characters, not on every delta. */
+  onDrafting?: (tool: string, chars: number) => void
+  /** A line about the run for the turn's timeline (a reply cut off). */
+  onNotice?: (text: string) => void
+}
+
+/** The most tokens one reply may run to. llama-server's default is no limit:
+ *  Ornith on Crestline (2026-11-24) wrote 19,352 tokens into one tool call
+ *  over ten minutes. Long enough for a large file in one call; the
+ *  theorizing detector already stops reasoning near 10k tokens. */
+export const REPLY_MAX_TOKENS = 16_384
+
+/** How often a call being written is reported, in characters. */
+const DRAFT_STEP = 256
+
+/** What the model reads after a reply that hit REPLY_MAX_TOKENS. */
+export function cutOffNote(maxTokens: number, inCall: string | null): string {
+  return (
+    `[Your last reply was dropped: it reached the ${maxTokens}-token limit for one reply without finishing` +
+    (inCall ? `, inside a ${inCall} call` : '') +
+    '. That usually means it was repeating itself. Send a short, complete reply; write a long file in parts.]'
+  )
 }
 
 /**
@@ -158,7 +219,7 @@ export interface WriteOutcome {
  * user rejected it. Kept as an injected port for testability — the real one lives
  * in the host alongside `vscode`.
  */
-export type CommandApprovalGate = (pending: PendingCommand) => Promise<CommandOutcome | string | null>
+export type CommandApprovalGate = (pending: PendingCommand, signal?: AbortSignal) => Promise<CommandOutcome | string | null>
 
 /** What an approved command produced: the model's text, and whether it failed
  *  (non-zero exit, timeout, could not start), so the card shows it. */
@@ -203,6 +264,12 @@ export interface AgentLoopOptions {
   /** After a write is applied: the problems now reported in those files
    *  (absolute paths), appended to the result. Absent: nothing appended. */
   diagnosticsAfterWrite?: ((files: string[]) => Promise<string | null>) | undefined
+  /** Stagnation thresholds (agent-core STAGNATION_LIMITS). STAGNATION_OFF
+   *  leaves only the exact-repeat guard. */
+  stagnation?: Partial<StagnationLimits> | undefined
+  /** Remind the model to ys_note what a recovery taught it (keep-nudge.ts).
+   *  Default: on when ys_note is offered. */
+  keepNudges?: boolean | undefined
 }
 
 /**
@@ -281,17 +348,55 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   let iterations = 0
   /** Images of the result being stored, handed to extraParts right after. */
   let resultImages: string[] = []
-  /** How often each exact call (name + arguments) has been asked for. */
-  const callCounts = new Map<string, number>()
+  // The web tools this run has: the monitor's notes say to look a failure
+  // up, and never pause a lookup (agent-core lookup.mjs).
+  const lookupTools = LOOKUP_TOOLS.filter((t) => options.tools.names.includes(t))
+  const monitor = createStagnationMonitor(options.stagnation, { lookupTools })
+  /** A package.json newer than the model knows, said once per manifest. */
+  const versionNote = createVersionNotes(options.tools.names, options.toolContext.workspaceRoots)
+  const workingState = createWorkingState()
+  /** Asks the model to ys_note what a recovery taught it (keep-nudge.ts). */
+  const keep = createKeepNudge(options.keepNudges ?? options.tools.names.includes('ys_note'))
+  /** Old results have been trimmed in this run: the working state rides along. */
+  let trimmed = false
+  /** The note owed to the next request (a stagnation recovery). */
+  let pendingNote: string | null = null
+  /** Stopped as stuck: what the person reads instead of another request. */
+  let stuck: Recovery | null = null
+  /** Replies cut off at REPLY_MAX_TOKENS in this run: the first is asked
+   *  for again with a note, the second ends the run. */
+  let cutOffs = 0
+  /** A round of calls has run since the last request. */
+  let roundOpen = false
   let hitTurnCap = false
   let streamCut = false
   let last: StreamResult | undefined
+
+  /** End the flow on the stuck summary: it is the answer, painted as one. */
+  const answerStuck = (acc: { content: string; reasoning: string; toolCalls: unknown[] }, recovery: Recovery): void => {
+    handlers.onContent?.(recovery.note)
+    acc.content = recovery.note
+    acc.reasoning = ''
+    acc.toolCalls = []
+  }
 
   const ports: AgentPorts = {
     model: {
       streamTurn: async ({ acc, messages: turnMessages, signal: turnSignal }) => {
         iterations++
         handlers.onIteration?.(iterations)
+        // The round that just ended: does a pattern show?
+        if (roundOpen) {
+          roundOpen = false
+          const recovery = monitor.endRound()
+          if (recovery) {
+            handlers.onRecovery?.(recovery)
+            if (recovery.stop) stuck = recovery
+            else pendingNote = recovery.note
+          }
+        }
+        // Stuck: no request. The summary is the answer, and the flow ends.
+        if (stuck) return answerStuck(acc, stuck)
         const context = options.context
         // Fit the run to the window, editing its messages in place (see
         // context-budget.ts). `force` after the server refused: its numbers
@@ -302,36 +407,144 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           const limits = context.limits()
           if (!limits) return
           const report = fitMessages(turnMessages as BudgetMessage[], limits, force)
+          if (report.stubbed) trimmed = true
           if (report.stubbed || report.shrunk || report.capped) handlers.onContextTrimmed?.(report)
         }
-        const send = () => options.client.streamChatCompletion(
-          {
-            ...options.request,
-            messages: toWire(turnMessages),
-            // Sending tools changes what the gateway injects: it only claims
-            // Nest capabilities when a request actually carries them.
-            tools: toolPayload,
-          },
-          {
-            ...handlers,
-            // Fill the accumulator as chunks arrive, so the core still has the
-            // partial answer if the stream fails mid-turn.
-            onContent: (chunk) => {
-              acc.content += chunk
-              handlers.onContent?.(chunk)
-            },
-            onReasoning: (chunk) => {
-              acc.reasoning += chunk
-              handlers.onReasoning?.(chunk)
-            },
-          },
-          turnSignal,
-        )
+        /** A reasoning or argument loop caught while this response streamed
+         *  (set in a callback), and the call being written when it ended. */
+        const watch: { looping: Recovery | null; inCall: string | null } = { looping: null, inCall: null }
+        const send = (): Promise<StreamResult> => {
+          // Its own controller, so a reasoning loop can drop this response
+          // without ending the run.
+          const request = new AbortController()
+          const stop = () => request.abort()
+          if (turnSignal?.aborted) request.abort()
+          else turnSignal?.addEventListener('abort', stop, { once: true })
+          monitor.startResponse()
+          watch.inCall = null
+          /** This response's calls being written, by stream index. */
+          const drafts = new Map<number, { name: string; chars: number; reported: number }>()
+          workingState.setPlan(options.plan?.get())
+          const note = pendingNote
+          // A stuck run's note is the one to read: no reminder beside it.
+          const tail = [note ?? keep.take(options.plan?.get()), trimmed && !workingState.empty ? workingState.render() : null]
+          pendingNote = null
+          return options.client
+            .streamChatCompletion(
+              {
+                ...options.request,
+                messages: toWire(withTailNotes(turnMessages, tail)),
+                // Sending tools changes what the gateway injects: it only claims
+                // Nest capabilities when a request actually carries them.
+                tools: toolPayload,
+                max_tokens: options.request.max_tokens ?? REPLY_MAX_TOKENS,
+              },
+              {
+                ...handlers,
+                // Fill the accumulator as chunks arrive, so the core still has the
+                // partial answer if the stream fails mid-turn.
+                onContent: (chunk) => {
+                  acc.content += chunk
+                  handlers.onContent?.(chunk)
+                },
+                onReasoning: (chunk) => {
+                  acc.reasoning += chunk
+                  handlers.onReasoning?.(chunk)
+                  if (watch.looping) return
+                  const recovery = monitor.reasoning(chunk)
+                  if (recovery) {
+                    watch.looping = recovery
+                    request.abort()
+                  }
+                },
+                // A call's arguments as they are written: watched for a loop
+                // (detector f), and reported so the person sees it working.
+                onToolCalls: (deltas) => {
+                  handlers.onToolCalls?.(deltas)
+                  for (const delta of deltas) {
+                    const index = delta.index ?? 0
+                    const draft = drafts.get(index) ?? { name: '', chars: 0, reported: 0 }
+                    drafts.set(index, draft)
+                    if (delta.function?.name) draft.name = delta.function.name
+                    watch.inCall = draft.name || null
+                    const args = delta.function?.arguments ?? ''
+                    if (!args) continue
+                    draft.chars += args.length
+                    if (draft.chars - draft.reported >= DRAFT_STEP) {
+                      draft.reported = draft.chars
+                      handlers.onDrafting?.(draft.name, draft.chars)
+                    }
+                    if (watch.looping) continue
+                    const recovery = monitor.toolArguments(index, args, draft.name ? callKind(draft.name, '{}') : undefined)
+                    if (recovery) {
+                      watch.looping = recovery
+                      request.abort()
+                    }
+                  }
+                },
+              },
+              request.signal,
+            )
+            .catch((err: unknown) => {
+              // Refused before it streamed (too big, say): the retry still owes the note.
+              if (!watch.looping) pendingNote ??= note
+              throw err
+            })
+            .finally(() => turnSignal?.removeEventListener('abort', stop))
+        }
+        /** Send. A response dropped as a reasoning loop is asked for again
+         *  with the note, or ends the run as stuck (null). */
+        const sendWatched = async (): Promise<StreamResult | null> => {
+          for (;;) {
+            watch.looping = null
+            let result: StreamResult
+            try {
+              result = await send()
+            } catch (err) {
+              if (!watch.looping || turnSignal?.aborted) throw err
+              result = { content: acc.content, reasoning: acc.reasoning, toolCalls: [], aborted: true }
+            }
+            // Cut off at the reply limit: what arrived is not a whole reply,
+            // and a half-written call must not run. Asked for once more with
+            // a note; a second cut-off ends the run, said to the person.
+            if (!watch.looping && !result.aborted && result.finishReason === 'length' && !turnSignal?.aborted) {
+              cutOffs++
+              const maxTokens = options.request.max_tokens ?? REPLY_MAX_TOKENS
+              const where = watch.inCall ? ` inside a ${watch.inCall} call` : ''
+              if (cutOffs > 1) {
+                handlers.onNotice?.(`Stopped: a reply reached the ${maxTokens}-token limit again${where}.`)
+                return {
+                  ...result,
+                  toolCalls: [],
+                  content:
+                    `I stopped because my replies kept running to the ${maxTokens}-token limit without finishing${where}, ` +
+                    'which usually means the model was repeating itself. A hint, or a smaller step, would help. How would you like me to continue?',
+                }
+              }
+              handlers.onNotice?.(`Dropped a reply that reached the ${maxTokens}-token limit${where}; asking again.`)
+              pendingNote = cutOffNote(maxTokens, watch.inCall)
+              acc.content = ''
+              acc.reasoning = ''
+              continue
+            }
+            // Set by onReasoning or onToolCalls during send(), which TypeScript cannot see.
+            const caught = watch.looping as Recovery | null
+            if (!caught || turnSignal?.aborted) return result
+            handlers.onRecovery?.(caught)
+            if (caught.stop) {
+              stuck = caught
+              return null
+            }
+            pendingNote = caught.note
+            acc.content = ''
+            acc.reasoning = ''
+          }
+        }
         await fit(false)
         let estimate = totalTokens(turnMessages as BudgetMessage[])
-        let result: StreamResult
+        let sent: StreamResult | null
         try {
-          result = await send()
+          sent = await sendWatched()
         } catch (err) {
           // Too big after all: llama-server says how big the window is. Trim
           // to that and try once more; a second refusal is reported as usual.
@@ -339,8 +552,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           context.recordExceeded(err.contextExceeded.nCtx, err.contextExceeded.promptTokens, estimate)
           await fit(true)
           estimate = totalTokens(turnMessages as BudgetMessage[])
-          result = await send()
+          sent = await sendWatched()
         }
+        // Stuck while it streamed: the summary is the answer.
+        if (!sent) return answerStuck(acc, stuck!)
+        const result = sent
         // The prompt the server really processed: what the overhead is.
         if (context && typeof result.timings?.prompt_n === 'number') {
           context.recordPrompt(result.timings.prompt_n + (result.timings.cache_n ?? 0), estimate)
@@ -366,17 +582,29 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
         const recovered = call.id.startsWith(FALLBACK_ID_PREFIX)
         const toolCall = call as ToolCall
         handlers.onToolCall?.(toolCall, recovered)
-        const signature = callSignature(call.function.name, call.function.arguments)
-        const times = (callCounts.get(signature) ?? 0) + 1
-        callCounts.set(signature, times)
-        const resultForModel = times > MAX_IDENTICAL_CALLS
-          ? {
-              content: repeatedCallResult(call.function.name, times - 1),
-              isError: true,
-              summary: 'Not run: repeated call',
-              truncated: false,
-            }
-          : await review(await options.tools.execute(call.function.name, call.function.arguments, options.toolContext), options)
+        roundOpen = true
+        const info = callInfo(call.function.name, call.function.arguments)
+        const refused = monitor.check(info)
+        let resultForModel: ToolResult
+        let outcome: CallOutcome
+        if (refused) {
+          resultForModel = {
+            content: refused.refuse,
+            isError: true,
+            summary: refused.reason === 'repeated' ? 'Not run: repeated call' : 'Not run: paused until there is new evidence',
+            truncated: false,
+          }
+          outcome = { ok: false, refused: refused.reason, text: refused.refuse }
+        } else {
+          const planned = await options.tools.execute(call.function.name, call.function.arguments, options.toolContext)
+          resultForModel = await review(planned, options)
+          const note = versionNote(call.function.name, call.function.arguments, !resultForModel.isError)
+          if (note) resultForModel = { ...resultForModel, content: `${resultForModel.content}\n\n${note}` }
+          outcome = callOutcome(info, planned, resultForModel)
+        }
+        monitor.record(info, outcome)
+        workingState.observe(info, outcome)
+        keep.observe(info, outcome)
         handlers.onToolResult?.(toolCall, resultForModel)
         toolRuns.push({ call: toolCall, result: resultForModel, recovered })
         resultImages = resultForModel.images ?? []
@@ -430,8 +658,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
     },
   })
 
-  const aborted = signal?.aborted === true || last?.aborted === true
-  const stopReason: StopReason = aborted ? 'aborted' : hitTurnCap ? 'turn-cap' : 'complete'
+  const aborted = signal?.aborted === true || (!stuck && last?.aborted === true)
+  const stopReason: StopReason = aborted ? 'aborted' : stuck ? 'stuck' : hitTurnCap ? 'turn-cap' : 'complete'
   const result: AgentResult = {
     content: contentParts.join('\n\n'),
     reasoning: reasoningParts.join('\n\n'),
@@ -439,11 +667,137 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
     iterations,
     stopReason,
     aborted,
+    recoveries: monitor.firings,
   }
   if (last?.timings) result.timings = last.timings
   if (last?.model) result.model = last.model
   if (last?.finishReason) result.finishReason = last.finishReason
   return result
+}
+
+/** How agent-core's own tail notes (update-plan.mjs) begin. */
+const CORE_NOTE_PREFIX = '[Automatic note, not from the user]'
+
+/** The line above the notes appended to a tool result: who is speaking. */
+export const HARNESS_NOTE_HEADER = "--- From Yellowscript, the editor running this task (not part of the tool's output) ---"
+
+/**
+ * `messages` with notes for this request only, so the history the server has
+ * cached stays as it was.
+ *
+ * After a tool result they go INTO that result, under a line that says who
+ * wrote them, with agent-core's own tail note (the plan's) folded in too. A
+ * bracketed user message after a tool result reads as an injection: in the
+ * Crestline rerun (2026-11-24) Ornith reasoned "I'll disregard this injected
+ * note entirely. It's trying to manipulate me", and set the plan note and the
+ * stagnation notes aside. After an answer or a person's message there is no
+ * tool result to carry them, and they stay one user message.
+ */
+export function withTailNotes<M extends { role: string; content?: unknown }>(messages: M[], notes: ReadonlyArray<string | null | undefined>): M[] {
+  let list = messages
+  let core: string | null = null
+  const last = list[list.length - 1]
+  if (last && last.role === 'user' && typeof last.content === 'string' && last.content.startsWith(CORE_NOTE_PREFIX) && list.length > 1 && list[list.length - 2]!.role !== 'user') {
+    core = last.content
+    list = list.slice(0, -1)
+  }
+  const all = [core, ...notes].filter((n): n is string => !!n)
+  if (all.length === 0) return messages
+  const text = all.join('\n\n')
+  const tail = list[list.length - 1]
+  if (tail && tail.role === 'tool') {
+    const note = `${HARNESS_NOTE_HEADER}\n${text}`
+    const content =
+      typeof tail.content === 'string'
+        ? `${tail.content}\n\n${note}`
+        : Array.isArray(tail.content)
+          ? [...(tail.content as unknown[]), { type: 'text', text: note }]
+          : note
+    return [...list.slice(0, -1), { ...tail, content }]
+  }
+  return [...list, { role: 'user', content: text } as M]
+}
+
+/** What the stagnation monitor and the working state need to know of a call. */
+export function callInfo(name: string, args: string): CallInfo {
+  return { name, args, kind: callKind(name, args), signature: callSignature(name, args) }
+}
+
+/** What kind of evidence a call gathers, or what it changes. */
+export function callKind(name: string, args: string): CallKind {
+  switch (name) {
+    case 'ys_read_file':
+    case 'ys_editor_context':
+    case 'ys_process_output':
+      return 'read'
+    case 'ys_grep':
+    case 'ys_glob':
+    case 'ys_list_directory':
+    case 'ys_find_symbol':
+    case 'ys_references':
+    case 'ys_outline':
+      return 'search'
+    case 'ys_write_file':
+    case 'ys_edit_file':
+    case 'ys_replace':
+    case 'ys_delete_file':
+    case 'ys_move_file':
+    case 'ys_note':
+      return 'write'
+    case 'ys_run_command':
+    case 'ys_process_start':
+      return 'command'
+    case 'ys_process':
+      return isProcessStart(args) ? 'command' : 'read'
+    case 'ys_diagnostics':
+    case 'ys_check_page':
+      return 'diagnostics'
+    case 'call_tool': {
+      // Nest's catalog dispatcher: what the call it carries does.
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(args)
+      } catch {
+        return 'other'
+      }
+      const target = callToolTarget(name, parsed)
+      return target ? nestToolKind(target.name) : 'other'
+    }
+    default:
+      return nestToolKind(name)
+  }
+}
+
+/** A Nest tool's kind, by the words in its name. */
+function nestToolKind(name: string): CallKind {
+  if (/(^|_)(read|get|view|fetch|open|show)(_|$)/.test(name)) return 'read'
+  if (/(^|_)(search|list|find|query|grep|glob)(_|$)/.test(name)) return 'search'
+  if (/(^|_)(write|create|edit|update|delete|move|rename|replace|save)(_|$)/.test(name)) return 'write'
+  if (/(^|_)(run|exec|execute|python|shell)(_|$)/.test(name)) return 'command'
+  return 'other'
+}
+
+/** How a call went, for the monitor and the working state. */
+function callOutcome(info: CallInfo, planned: ToolResult, result: ToolResult): CallOutcome {
+  const effect = result.effect
+  const rejected = (effect?.kind === 'write' && !effect.applied) || (effect?.kind === 'command' && !effect.ran)
+  const outcome: CallOutcome = { ok: !result.isError && !rejected, text: result.content }
+  if (rejected) outcome.rejected = true
+  let args: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = JSON.parse(info.args)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>
+  } catch {
+    // Arguments that do not parse: nothing to read from them.
+  }
+  if (outcome.ok && info.kind === 'read' && typeof args.path === 'string') outcome.reads = [args.path]
+  if (effect?.kind === 'write' && effect.applied && planned.pendingWrite) {
+    outcome.writes = planned.pendingWrite.changes.map((c) => ({ path: c.path, before: c.before, after: c.after, isNew: c.isNew, isDeleted: c.isDeleted }))
+  }
+  if (info.name === 'ys_note' && outcome.ok && typeof args.text === 'string') {
+    outcome.note = `${typeof args.section === 'string' ? `${args.section}: ` : ''}${args.text}`
+  }
+  return outcome
 }
 
 /** The history as it may be sent: earlier calls with malformed arguments go as
@@ -527,7 +881,8 @@ async function review(toolResult: ToolResult, options: AgentLoopOptions): Promis
     // Always-ask: show verbatim → run on approval → capture output. The gate
     // returns the captured output, or null if rejected.
     const pending = toolResult.pendingCommand
-    const output = await options.approveCommand(pending)
+    // The run's signal: Stop ends a command that is still running.
+    const output = await options.approveCommand(pending, options.signal)
     return { ...withCommandNote(toolResult, output), effect: commandEffect(pending, output) }
   }
   return toolResult
@@ -552,11 +907,14 @@ function commandEffect(pending: PendingCommand, outcome: CommandOutcome | string
   return effect
 }
 
-/** The last line of a failed command's output worth quoting: not a header. */
+/** The line of a failed command's output worth quoting: the one that says
+ *  what failed, without colour codes or a CLI's frame (agent-core
+ *  failureLine; it skips the "Exit code 1 · 2.4s" header). Until 2026-11-24
+ *  it was the last line, which for Crestline's `sv` and `svelte-check` runs
+ *  was "└" and "[39m". */
 function lastMeaningfulLine(text: string): string | null {
-  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !/^(---|\[|Exit code )/.test(l))
-  const last = lines.at(-1)
-  return last ? last.slice(0, 120) : null
+  const line = failureLine(text)
+  return line ? line.slice(0, 120) : null
 }
 
 /** Replace a pending-write result's text with the honest "applied" outcome, so

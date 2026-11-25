@@ -36,6 +36,7 @@ import type { StreamChannel } from '../nest/streaming.ts'
 import type { ToolEffect } from '../tools/types.ts'
 import { parseAttachments } from './attachments.ts'
 import type { TurnPart } from './turn-parts.ts'
+import type { SettingView } from './settings.ts'
 
 export type { TurnPart } from './turn-parts.ts'
 
@@ -44,7 +45,7 @@ export type { TurnPart } from './turn-parts.ts'
  * version it was built with; a mismatch means VSCode served a cached bundle
  * from a previous install, and the host says so rather than half-working.
  */
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 // ---------------------------------------------------------------------------
 // Shared view model
@@ -63,6 +64,9 @@ export interface ChatMessageView {
   error?: string
   /** True while this turn is still streaming. */
   streaming?: boolean
+  /** A tool call the model is writing right now (webview only; cleared when
+   *  the call arrives whole or the turn ends). */
+  drafting?: { tool: string; chars: number }
   /** True when the user stopped this turn — partial content is still valid. */
   aborted?: boolean
   /** True while this prompt is queued behind a turn that is still running. It
@@ -235,7 +239,8 @@ export interface WorkflowView {
 }
 
 /** The pages that take over the panel. */
-export type PageName = 'projects' | 'workflows'
+export type PageName = 'projects' | 'workflows' | 'settings'
+export const PAGE_NAMES: readonly PageName[] = ['projects', 'workflows', 'settings']
 
 export const EMPTY_CONVERSATION_STATE: ConversationState = { question: null, plan: null, atTurnLimit: false, approval: null }
 
@@ -304,14 +309,11 @@ export interface SessionSnapshot {
  *  in the store, and shows in history and on hover. */
 export const TAB_LABEL_MAX = 25
 
-/** A chat's title cut to fit a tab: the sidebar strip and editor tabs alike. */
+/** A chat's title cut to fit its editor tab. */
 export function tabLabel(title: string): string {
   const t = title.trim() || 'New chat'
   return t.length <= TAB_LABEL_MAX ? t : `${t.slice(0, TAB_LABEL_MAX - 1).trimEnd()}…`
 }
-
-/** The sidebar view, or a chat opened as an editor tab. */
-export type SurfaceKind = 'sidebar' | 'editor'
 
 // ---------------------------------------------------------------------------
 // webview → host
@@ -337,10 +339,6 @@ export type WebviewMessage =
   | { type: 'runCommand'; command: 'connect' | 'signIn' | 'showStatus' }
   /** Save the Nest's address and connect to it. Empty: back to discovery. */
   | { type: 'setServerUrl'; url: string }
-  /** From an editor tab: put this chat back in the sidebar's strip. */
-  | { type: 'moveToSidebar' }
-  /** From the sidebar's strip: open this chat in an editor tab of its own. */
-  | { type: 'moveToEditor'; id: string }
   /** Webview-side sign-in form submission. Carries credentials directly so the
    *  host can call the manager without native dialogs. */
   | { type: 'signIn'; method: 'password'; username: string; password: string }
@@ -351,11 +349,13 @@ export type WebviewMessage =
   | { type: 'searchHistory'; query: string }
   | { type: 'deleteHistory'; id: string }
   | { type: 'restoreHistory'; id: string }
-  /** Load a page's data; the host answers with `projects` or `workflows`. The webview decides what is on screen. */
+  /** Load a page's data; the host answers with `projects`, `workflows` or `settings`. The webview decides what is on screen. */
   | { type: 'loadPage'; page: PageName }
   /** Link this workspace to a Nest project, or unlink it (null). */
   | { type: 'linkProject'; id: string | null }
   | { type: 'createProject'; name: string }
+  /** The Settings page: change one redstartYellowscript.* setting. The host checks `value` against the setting. */
+  | { type: 'updateSetting'; key: string; value: unknown }
   /** Run a workflow with its argument values. */
   | { type: 'runWorkflow'; name: string; args: Record<string, string> }
   /** Answer the open question (`id` is its QuestionView id); null skips it. */
@@ -391,9 +391,6 @@ export type HostMessage =
       messages: ChatMessageView[]
       conversationId: string | null
       state: ConversationState
-      /** Where this view lives. The sidebar keeps a tab strip of chats; an editor
-       *  tab is one chat, and VSCode's own tabs do the rest. */
-      surface: SurfaceKind
     }
   | { type: 'session'; session: SessionSnapshot }
    /** Replace the whole transcript (switch / restore). Now carries which tab it
@@ -403,6 +400,8 @@ export type HostMessage =
    | { type: 'projects'; projects: ProjectView[] | null; linkedId: string | null; error?: string }
    /** The account's workflows, for the page and for `/`. */
    | { type: 'workflows'; workflows: WorkflowView[] | null; error?: string }
+   /** The Settings page's data, sent again whenever a setting changes. */
+   | { type: 'settings'; settings: SettingView[] }
    /** Show a page (sent by a command, e.g. "Choose Project"). */
    | { type: 'showPage'; page: PageName }
    /** The question, plan or turn-limit wait changed for a conversation. */
@@ -416,6 +415,14 @@ export type HostMessage =
   | { type: 'turn/delta'; conversationId: string; id: string; channel: StreamChannel; text: string }
   | { type: 'turn/completed'; conversationId: string; id: string; stats?: TurnStats; aborted?: boolean }
   | { type: 'turn/failed'; conversationId: string; id: string; message: string }
+  /** Text for the composer: queued messages that Stop did not send. */
+  | { type: 'composerText'; conversationId: string; text: string }
+  /** A line about the run itself in the turn's timeline (a stagnation recovery). */
+  | { type: 'turn/notice'; conversationId: string; id: string; text: string }
+  /** The model is writing a tool call: its name (empty until known) and how
+   *  long its arguments are so far. Progress only; the call itself comes as
+   *  `tool/call` once it is whole. */
+  | { type: 'turn/drafting'; conversationId: string; id: string; tool: string; chars: number }
   // Tool activity gets its own message types rather than a third text channel.
   // A tool call is STRUCTURE, and `turn/delta` carries text — repurposing it
   // would mean the renderer parsing prose to find out what ran. Both carry the
@@ -534,10 +541,6 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
       return msg.command === 'connect' || msg.command === 'signIn' || msg.command === 'showStatus'
         ? { type: 'runCommand', command: msg.command }
         : null
-    case 'moveToSidebar':
-      return { type: 'moveToSidebar' }
-    case 'moveToEditor':
-      return typeof msg.id === 'string' ? { type: 'moveToEditor', id: msg.id } : null
     case 'setServerUrl':
       return typeof msg.url === 'string' && msg.url.length <= 2_000 ? { type: 'setServerUrl', url: msg.url } : null
     case 'signIn':
@@ -589,7 +592,9 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | null {
     case 'revertTask':
       return typeof msg.turnId === 'string' ? { type: 'revertTask', turnId: msg.turnId } : null
     case 'loadPage':
-      return msg.page === 'projects' || msg.page === 'workflows' ? { type: 'loadPage', page: msg.page } : null
+      return PAGE_NAMES.includes(msg.page as PageName) ? { type: 'loadPage', page: msg.page as PageName } : null
+    case 'updateSetting':
+      return typeof msg.key === 'string' && 'value' in msg ? { type: 'updateSetting', key: msg.key, value: msg.value } : null
     case 'linkProject':
       return msg.id === null || typeof msg.id === 'string' ? { type: 'linkProject', id: msg.id } : null
     case 'createProject':

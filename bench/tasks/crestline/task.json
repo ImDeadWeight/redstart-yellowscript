@@ -1,0 +1,8 @@
+{
+  "title": "Crestline: a quote estimator in SvelteKit, and a broken load to find",
+  "prompt": "This is a SvelteKit + TypeScript app with Svelte 5 and Vitest, already installed (do not reinstall it or add packages). Build a commercial cleaning quote estimator for \"Crestline Facility Care\" in `src/routes/+page.svelte`, with a shared layout in `src/routes/+layout.svelte`, and the pricing/hours logic extracted into `src/lib/quote.ts` so it is easy to test. Take the facility rates from the services that the route's `load` (`src/routes/+page.ts`) provides. Use Svelte 5 runes (`$state`, `$derived`) for square footage, facility type (`office`, `medical`, `retail`, `warehouse`), frequency (`weekly`, `biweekly`, `nightly`), and add-ons (`carpet-care`, `window-washing`, `restroom-deep-clean`), showing a live itemized total, estimated hours, and preset buttons (\"Small Office\", \"Medical Clinic\"). The page's list of services is currently empty: find out why, and fix it. Write Vitest unit tests in `src/lib/quote.test.ts` covering presets, add-ons, and frequency multipliers. Run `npm run check`, `npx vitest run`, and `npm run build`, fixing any failures until all pass.",
+  "maxTurns": 60,
+  "timeoutS": 2400,
+  "nodeModules": "crestline",
+  "tags": ["milestone", "svelte"]
+}

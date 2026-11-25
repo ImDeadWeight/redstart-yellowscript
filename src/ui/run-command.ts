@@ -20,8 +20,8 @@ import * as vscode from 'vscode'
 
 import { allowPrefixFor, isCommandAllowed } from '../tools/approval.ts'
 import { describeKillTargets, startInBackground, type BackgroundProcesses } from '../tools/background-processes.ts'
-import { formatCommandRun, runFailed } from '../tools/command-run.ts'
-import { endsProcesses } from '../tools/safe-commands.ts'
+import { formatCommandRun, runFailed, stripAnsi } from '../tools/command-run.ts'
+import { endsProcesses, withoutStderrRedirects } from '../tools/safe-commands.ts'
 import type { PendingCommand } from '../tools/types.ts'
 import type { CommandOutcome } from '../agent/loop.ts'
 import type { AskApproval } from '../chat/approvals.ts'
@@ -61,15 +61,20 @@ export interface CommandGateDeps {
  * null when the person declined to run it.
  */
 export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand) => Promise<CommandOutcome | null> {
-  return async (pending: PendingCommand): Promise<CommandOutcome | null> => {
+  return async (pending: PendingCommand, signal?: AbortSignal): Promise<CommandOutcome | null> => {
     const tier = deps.classify?.(pending) ?? null
     // Tier A and B run without asking; the person's own prefixes come after,
     // except for a line that discards work, which asks every time.
     const safe = tier && tier.tier !== 'C' ? tier : null
     const neverAlways = tier?.tier === 'C' ? tier.neverAlways : undefined
-    const allowedAlready = !safe && !neverAlways && isCommandAllowed(pending.command, allowedCommands())
+    // In a chain whose other parts are safe (`cd app && npm install`), the
+    // one part that asks is what "Always allow" is offered for and matched on.
+    // Matched without `2>&1` / `2>nul`: "npx svelte-kit" allowed is that line
+    // with them too.
+    const asked = withoutStderrRedirects(tier?.tier === 'C' && tier.asks ? tier.asks : pending.command)
+    const allowedAlready = !safe && !neverAlways && isCommandAllowed(asked, allowedCommands())
     if (!safe && !allowedAlready) {
-      const prefix = neverAlways ? null : allowPrefixFor(pending.command)
+      const prefix = neverAlways ? null : allowPrefixFor(asked)
       const choice = await deps.ask({
         kind: 'command',
         title: pending.background ? 'Start a command in the background' : 'Run a command',
@@ -112,7 +117,9 @@ export function makeCommandGate(deps: CommandGateDeps): (pending: PendingCommand
       ...(pending.timeoutMs ? { timeoutMs: pending.timeoutMs } : {}),
       ...(deps.conversationId ? { chat: deps.conversationId } : {}),
       nonInteractive: deps.nonInteractive?.() !== false,
-      onOutput: (chunk) => channel.append(chunk),
+      // Stop ends the command, and everything it started.
+      ...(signal ? { signal } : {}),
+      onOutput: (chunk) => channel.append(stripAnsi(chunk)),
     })
     const text = formatCommandRun(run)
     channel.appendLine(`[${text.split('\n')[0]}]`)

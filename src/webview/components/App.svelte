@@ -12,6 +12,7 @@
   import Composer from './Composer.svelte'
   import ProjectsPage from './ProjectsPage.svelte'
   import WorkflowsPage from './WorkflowsPage.svelte'
+  import SettingsPage from './SettingsPage.svelte'
 
   const s = $derived(view.current)
   const connected = $derived(s.session.connection === 'connected')
@@ -26,12 +27,14 @@
   <LoginScreen session={s.session} />
 {:else}
   <div class="shell">
-    <TabStrip tabs={s.tabs} activeId={s.conversationId} surface={s.surface} />
+    <TabStrip tabs={s.tabs} />
     {#if s.history.open}
       <HistoryPanel items={s.history.items} />
     {/if}
     {#if s.page === 'projects'}
       <ProjectsPage items={s.projects.items} linkedId={s.projects.linkedId} error={s.projects.error} />
+    {:else if s.page === 'settings'}
+      <SettingsPage settings={s.settings} />
     {:else if s.page === 'workflows'}
       <WorkflowsPage items={s.workflows.items} error={s.workflows.error} focus={view.workflowFocus} />
     {:else}

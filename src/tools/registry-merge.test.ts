@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { createToolRegistry } from './registry.ts'
-import { mergeNestTools, type NestToolRef } from './registry.ts'
+import { SHADOWED_NEST_TOOLS, mergeNestTools, type NestToolRef } from './registry.ts'
 
 const local = createToolRegistry({
   ripgrepPath: null,
@@ -31,10 +31,10 @@ function nestTool(name: string, execute?: NestToolRef['execute']): NestToolRef {
 
 describe('mergeNestTools', () => {
   it('coexists with local ys_* tools in the merged payload', () => {
-    const merged = mergeNestTools(local, [nestTool('read_file'), nestTool('postgres_query')])
+    const merged = mergeNestTools(local, [nestTool('read_document'), nestTool('postgres_query')])
     const names = merged.names
     assert.ok(names.includes('ys_read_file'), 'local ys_read_file should survive')
-    assert.ok(names.includes('read_file'), 'Nest read_file should be present')
+    assert.ok(names.includes('read_document'), 'Nest read_document should be present')
     assert.ok(names.includes('postgres_query'), 'Nest postgres_query should be present')
   })
 
@@ -50,7 +50,7 @@ describe('mergeNestTools', () => {
 
   it('rejects a duplicate Nest tool name within the same merge set', () => {
     assert.throws(
-      () => mergeNestTools(local, [nestTool('read_file'), nestTool('read_file')]),
+      () => mergeNestTools(local, [nestTool('read_document'), nestTool('read_document')]),
       /duplicates an existing tool name/,
     )
   })
@@ -64,16 +64,16 @@ describe('mergeNestTools', () => {
   })
 
   it('reports unknown tools with the full merged name list', async () => {
-    const merged = mergeNestTools(local, [nestTool('read_file')])
+    const merged = mergeNestTools(local, [nestTool('read_document')])
     const result = await merged.execute('nonexistent_tool', '{}', { workspaceRoots: [] })
     assert.equal(result.isError, true)
     assert.ok(result.content.includes('ys_read_file'), 'should name locals')
-    assert.ok(result.content.includes('read_file'), 'should name nest tools')
+    assert.ok(result.content.includes('read_document'), 'should name nest tools')
   })
 
   it('re-running merge with a different Nest set replaces the Nest tools', () => {
-    const first = mergeNestTools(local, [nestTool('read_file')])
-    assert.ok(first.names.includes('read_file'))
+    const first = mergeNestTools(local, [nestTool('read_document')])
+    assert.ok(first.names.includes('read_document'))
     assert.equal(first.names.includes('postgres_query'), false)
 
     const second = mergeNestTools(local, [nestTool('postgres_query')])
@@ -97,5 +97,23 @@ describe('mergeNestTools', () => {
     ])
     await merged.execute('postgres_query', '{}', { workspaceRoots: [], conversationId: 'conv_1' })
     assert.equal(seen, 'conv_1')
+  })
+
+  it("leaves out Nest's File System tools: the workspace's own do those jobs, in the right place", () => {
+    const merged = mergeNestTools(local, [nestTool('read_text_file'), nestTool('write_file'), nestTool('search_files'), nestTool('web_search')])
+    assert.ok(!merged.names.includes('read_text_file') && !merged.names.includes('write_file') && !merged.names.includes('search_files'))
+    assert.ok(merged.names.includes('web_search'), 'other Nest tools stay')
+    for (const local of Object.values(SHADOWED_NEST_TOOLS)) assert.match(local, /^ys_/)
+  })
+
+  it('answers a call_tool that reaches a shadowed tool with the local one, without calling the Nest', async () => {
+    let called = 0
+    const merged = mergeNestTools(local, [nestTool('call_tool', async () => { called++; return 'ran' })])
+    const result = await merged.execute('call_tool', JSON.stringify({ name: 'read_text_file', arguments: { path: 'a.txt' } }), { workspaceRoots: [] })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /read_text_file works on the Nest's own folders.*Use ys_read_file instead/)
+    assert.equal(called, 0)
+    const other = await merged.execute('call_tool', JSON.stringify({ name: 'web_search', arguments: {} }), { workspaceRoots: [] })
+    assert.equal(other.content, 'ran')
   })
 })

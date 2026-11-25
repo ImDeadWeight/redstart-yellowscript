@@ -6,6 +6,7 @@
   import Message from './Message.svelte'
   import Icon from './Icon.svelte'
   import { latestTaskId } from '../view-model.ts'
+  import { CREST_HTML } from '../crest.ts'
 
   let { messages, notices, generation, paused = false }: { messages: ChatMessageView[]; notices: Notice[]; generation: number; /** Waiting on the person (approval, question, turn limit), not the model. */ paused?: boolean } = $props()
 
@@ -126,6 +127,7 @@
 >
   {#if messages.length === 0}
     <div class="empty">
+      <div class="crest" aria-hidden="true">{@html CREST_HTML}</div>
       <p class="hello">Ask about this workspace, or ask for a change.</p>
       <p class="hint">Yellowscript reads files, searches, and checks diagnostics. Edits and commands wait for your approval.</p>
     </div>
@@ -175,11 +177,15 @@
   }
   .empty {
     margin: auto 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     text-align: center;
-    opacity: 0.75;
   }
-  .hello { margin: 0 0 4px; font-weight: 600; }
-  .hint { margin: 0; font-size: 0.9em; opacity: 0.8; }
+  .crest { margin-bottom: 12px; }
+  .crest :global(svg) { display: block; width: 96px; height: 96px; image-rendering: pixelated; }
+  .hello { margin: 0 0 4px; font-weight: 600; opacity: 0.75; }
+  .hint { margin: 0; font-size: 0.9em; opacity: 0.6; }
   .notice {
     display: flex;
     align-items: flex-start;
@@ -187,7 +193,7 @@
     padding: 6px 8px;
     border-radius: 4px;
     font-size: 0.9em;
-    border-left: 2px solid var(--vscode-textLink-foreground);
+    border-left: 2px solid var(--ys-accent);
     background: var(--vscode-textBlockQuote-background);
   }
   .notice.warning { border-left-color: var(--vscode-editorWarning-foreground); }
@@ -215,13 +221,13 @@
     padding: 3px 10px;
     font: inherit;
     font-size: 0.85em;
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-background);
+    color: var(--ys-on-accent);
+    background: var(--ys-accent);
     border: none;
     border-radius: 12px;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
     cursor: pointer;
   }
-  .latest:hover { background: var(--vscode-button-hoverBackground); }
+  .latest:hover { background: var(--ys-accent-hover); }
   .dismiss:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
 </style>

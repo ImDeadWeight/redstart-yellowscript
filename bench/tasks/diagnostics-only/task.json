@@ -1,0 +1,7 @@
+{
+  "title": "Fix what only the diagnostics show",
+  "prompt": "This project should type-check cleanly under its tsconfig.json, but the editor reports problems in it. Fix them without changing what `node src/main.ts` prints.",
+  "maxTurns": 16,
+  "timeoutS": 600,
+  "tags": ["core", "diagnostics"]
+}

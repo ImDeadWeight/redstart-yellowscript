@@ -172,6 +172,14 @@ export type ToolEffect =
       autoRule?: string
     }
   | { kind: 'stop'; processId: string }
+  /** The run was noticed going nowhere (agent-core stagnation.mjs), and what was done. */
+  | {
+      kind: 'recovery'
+      detector: string
+      /** 1 a note to the model, 2 the repeated action refused, 3 the run stopped. */
+      level: 1 | 2 | 3
+      evidence: string
+    }
   | {
       kind: 'check'
       target: string

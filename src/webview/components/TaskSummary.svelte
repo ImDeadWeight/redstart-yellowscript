@@ -101,7 +101,7 @@
   .link {
     padding: 0;
     font: inherit;
-    color: var(--vscode-textLink-foreground);
+    color: var(--ys-accent-text);
     background: none;
     border: none;
     cursor: pointer;

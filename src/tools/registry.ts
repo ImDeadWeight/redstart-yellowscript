@@ -23,6 +23,7 @@
 
 import { toolError, toolOk, type JsonSchema, type Tool, type ToolContext, type ToolResult } from './types.ts'
 import { migrateToolName } from './approval.ts'
+import { suggestTools, unknownToolText } from '../agent/agent-core.ts'
 import { createReadFileTool } from './read-file.ts'
 import { createNoteTool } from './notes.ts'
 import { createFindSymbolTool, createOutlineTool, createReferencesTool, type SymbolProvider } from './symbols.ts'
@@ -177,11 +178,12 @@ function registryOver(tools: readonly Tool[], byName: ReadonlyMap<string, Tool>,
       const args = legacy?.args ?? parsed.value
       const tool = runnable.get(target) ?? runnable.get(migrateToolName(target))
       if (!tool) {
-        // Name the alternatives: a model that invented `read_file` can correct
-        // itself to `ys_read_file` if told what exists.
-        return toolError(
-          `There is no tool called "${name}". Available tools: ${[...byName.keys()].join(', ')}.`,
-        )
+        // agent-core's teaching text: what happened, and the real tool for
+        // the job (`read_file` → ys_read_file). Without a match, every name,
+        // so the model can still correct itself.
+        const names = [...byName.keys()]
+        const known = suggestTools(name, names).tools.length > 0
+        return toolError(`${unknownToolText(name, names)}${known ? '' : ` Available tools: ${names.join(', ')}.`}`)
       }
 
       // The caller's context, roots and all: a local ys_* tool handed empty
@@ -234,6 +236,46 @@ export interface NestToolRef {
 }
 
 /**
+ * Nest's File System tools, and the ys_* tool that does each job in the
+ * workspace. Nest's work on the Nest's own folders, so a model that reaches
+ * for them reads, writes or searches the wrong place: in the Crestline run
+ * (2026-11-24) `read_text_file` read the Nest's `.vscode/extensions.json`,
+ * not the workspace's, and the model concluded it "needs forward slashes".
+ * They are left out of the merged catalog, and a call_tool that names one is
+ * answered with the local tool instead.
+ */
+export const SHADOWED_NEST_TOOLS: Readonly<Record<string, string>> = {
+  read_file: 'ys_read_file',
+  read_text_file: 'ys_read_file',
+  read_media_file: 'ys_read_file',
+  read_multiple_files: 'ys_read_file',
+  write_file: 'ys_write_file',
+  edit_file: 'ys_replace',
+  create_directory: 'ys_write_file (it creates the folders a new file needs)',
+  list_directory: 'ys_list_directory',
+  list_directory_with_sizes: 'ys_list_directory',
+  directory_tree: 'ys_list_directory',
+  move_file: 'ys_move_file',
+  search_files: 'ys_glob (by name) or ys_grep (by content)',
+  get_file_info: 'ys_list_directory',
+  list_allowed_directories: 'ys_list_directory',
+}
+
+/** What the model reads when it reaches a shadowed Nest tool through call_tool. */
+export function shadowedToolText(name: string): string {
+  return (
+    `Not run: ${name} works on the Nest's own folders, not this workspace, so it would read or change the wrong files. ` +
+    `Use ${SHADOWED_NEST_TOOLS[name]} instead.`
+  )
+}
+
+/** The tool a call_tool call names, when it is a shadowed Nest file tool. */
+function shadowedTarget(args: unknown): string | null {
+  const target = args && typeof args === 'object' ? (args as { name?: unknown }).name : undefined
+  return typeof target === 'string' && Object.hasOwn(SHADOWED_NEST_TOOLS, target.trim()) ? target.trim() : null
+}
+
+/**
  * Merge local ys_* tools with live Nest MCP tools, enforcing the disjointness
  * invariant (HANDOFF 4.3 / correction 1): no Nest tool name may begin with `ys_`,
  * and the two sets must not overlap at all.
@@ -251,6 +293,8 @@ export function mergeNestTools(
   const byName = new Map(local.tools.map((t) => [t.definition.name, t] as const))
 
   for (const nest of nestTools) {
+    // The workspace's own tools do these jobs, in the right place.
+    if (Object.hasOwn(SHADOWED_NEST_TOOLS, nest.name)) continue
     // The ys_ namespace is the local tool contract (HANDOFF correction 1). A
     // Nest tool leaking in here is the silent, dangerous failure this prevents:
     // the model calls `write_file` intending a workspace write and hits Nest's
@@ -279,6 +323,9 @@ export function mergeNestTools(
     // Wire the real execution delegate: calls back into McpHost.callTool.
     const ref = nest
     wrapped.execute = (args: unknown, context: ToolContext) => {
+      // Nest's catalog dispatcher can still reach a shadowed tool by name.
+      const shadowed = ref.name === 'call_tool' ? shadowedTarget(args) : null
+      if (shadowed) return Promise.resolve(toolError(shadowedToolText(shadowed)))
       return ref.execute(args, context).then((content) => ({
         content,
         isError: false,

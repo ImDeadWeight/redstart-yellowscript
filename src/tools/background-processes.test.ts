@@ -18,7 +18,7 @@ import {
   formatProcessList,
   startInBackground,
 } from './background-processes.ts'
-import { LABEL_CHAT, LABEL_RUN, formatCommandRun, looksLikePrompt, runCommandLine, runFailed } from './command-run.ts'
+import { LABEL_CHAT, LABEL_RUN, formatCommandRun, looksLikePrompt, runCommandLine, runFailed, unresolvedHashImport, type CommandRun } from './command-run.ts'
 import { createProcessTool, legacyProcessCall } from './process-tools.ts'
 import { allowPrefixFor, isCommandAllowed } from './approval.ts'
 
@@ -171,6 +171,18 @@ describe('processes Yellowscript can name', () => {
     assert.equal(looksLikePrompt(''), null)
   })
 
+  it('a clack run that finished is not a prompt (Crestline, 2026-11-24: a working `sv add` read as one)', () => {
+    const done = '┌  Welcome to the Svelte CLI! (v1.7.1)\n│\n◆  Successfully setup add-ons: vitest\n│\n│  To skip prompts next time, run:\n●  npx sv@1.7.1 add vitest="usages:unit" --no-git-check --no-install\n│\n└  You\'re all set!\n'
+    assert.equal(looksLikePrompt(done), null)
+    // A ◆ line that asks nothing and offers no choices is a message, even without the outro.
+    assert.equal(looksLikePrompt('┌  sv\n│\n◆  Successfully setup add-ons: vitest\n│\n●  npx sv add vitest'), null)
+    // The two real questions from the same run are still caught.
+    const multi = '┌  Welcome to the Svelte CLI! (v1.7.1)\n\u001b[?25l│\n◆  What do you want to use vitest for?\n│  ◼ unit testing\n│  ◼ component testing\n│  ↑/↓ to navigate • Space: select • Enter: confirm\n└'
+    assert.equal(looksLikePrompt(multi), 'What do you want to use vitest for?')
+    const verify = '┌  Welcome to the Svelte CLI! (v1.7.1)\n│\n◇  Verifications not met ─────╮\n│  - clean working directory (Uncommitted changes found)  │\n├──────╯\n\u001b[?25l│\n◆  Verifications failed. Do you wish to continue?\n│  ○ Yes / ● No\n└'
+    assert.equal(looksLikePrompt(verify), 'Verifications failed. Do you wish to continue?')
+  })
+
   it('stops a command that sits on a prompt, and says what it asked', async () => {
     const run = await runCommandLine({
       command: nodeLine("process.stdout.write('Continue? (y/N) '); setInterval(() => {}, 1000)"),
@@ -258,5 +270,27 @@ describe('processes Yellowscript can name', () => {
     const missing = await tool.execute({ action: 'stop', id: 'c9' }, { workspaceRoots: [cwd], readRoots: [] } as never)
     assert.equal(missing.isError, true)
     assert.match(missing.content, /no process "c9" started by Yellowscript/)
+  })
+})
+
+describe('an unresolved #-import gets a hint (Crestline, 2026-11-24)', () => {
+  const run = (stdout: string): CommandRun => ({ exitCode: 1, signal: null, stdout, stderr: '', durationMs: 10, timedOut: false })
+  it('says an imports pattern needs the extension', () => {
+    const text = formatCommandRun(run(`Error: Cannot find module '#lib/quote' or its corresponding type declarations.`))
+    assert.match(text, /"imports" field of package\.json/)
+    assert.match(text, /"#lib\/quote\.js"/)
+  })
+  it('stays quiet when the import has an extension, or is not a # import', () => {
+    assert.equal(unresolvedHashImport(`Cannot find module '#lib/quote.js'`), null)
+    assert.equal(unresolvedHashImport(`Cannot find module '$lib/quote'`), null)
+    assert.equal(unresolvedHashImport(`Failed to resolve import "#lib/quote" from "src/routes/+page.svelte"`), '#lib/quote')
+  })
+})
+
+describe('terminal colours (2026-11-24)', () => {
+  it('are taken out of what the model and the card read', () => {
+    const text = formatCommandRun({ exitCode: 1, signal: null, stdout: '\u001b[31mError\u001b[39m: \u001b[35mpreset\u001b[36m.label', stderr: '', durationMs: 5, timedOut: false })
+    assert.ok(!text.includes('\u001b'), text)
+    assert.match(text, /Error: preset\.label/)
   })
 })

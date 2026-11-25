@@ -1,9 +1,11 @@
 // =============================================================================
-// Surfaces: the sidebar and the editor tabs, each on its own conversation.
+// Surfaces: the editor tabs, each on its own conversation.
 // =============================================================================
-// A chat lives in one place at a time. An editor tab is one chat (VSCode's own
-// tabs, movable between groups and windows); the sidebar has a strip of every
-// other open chat. Switching in one never moves another.
+// A chat is an editor tab (VSCode's own tabs, movable between groups and
+// windows), and is in one tab at a time. There was a sidebar view too, with a
+// strip of every chat not in a tab; a chat in a tab was then on no list the
+// sidebar showed, and a blank sidebar chat looked like the running one
+// (2026-11-24). History lists every chat, running ones first.
 //
 // This decides which conversation each view shows and keeps the views' tab
 // lists, titles, history panel and snapshots current. It reaches the sessions
@@ -21,7 +23,7 @@ import { isBlank, type Conversation, type ConversationStore, type HistoryEntry }
 /** The parts of the chat view this uses. */
 export type ChatView = Pick<
   ChatViewProvider,
-  'surfaces' | 'sidebar' | 'editorFor' | 'focused' | 'postTo' | 'setTitle' | 'openEditor' | 'closeEditor' | 'reveal' | 'revealSidebar' | 'sendInit'
+  'surfaces' | 'editorFor' | 'focused' | 'postTo' | 'setTitle' | 'openEditor' | 'closeEditor' | 'reveal' | 'sendInit'
 >
 
 /** What the views need from the conversations' sessions. */
@@ -52,8 +54,8 @@ export interface SurfacesDeps {
   /** The signed-in account, or null. */
   account: () => string | null
   sessions: SurfaceSessions
-  /** The projects and workflows pages. */
-  pages: { push(to: Surface): Promise<void>; pushWorkflows(to: Surface): Promise<void> }
+  /** The projects, workflows and settings pages. */
+  pages: { push(to: Surface): Promise<void>; pushWorkflows(to: Surface): Promise<void>; pushSettings(to: Surface): void }
   notifier: Notifier
 }
 
@@ -69,11 +71,7 @@ export interface Surfaces {
   /** The conversation on a surface, opening a new chat there when it has none. */
   conversationOn(surface: Surface): string
   /** A chat in a new editor tab, or the tab it is already in. */
-  openInEditor(id: string): void
-  /** The sidebar's chat, moved to an editor tab of its own. */
-  moveSidebarToEditor(): void
-  /** An editor tab's chat, moved back into the sidebar's strip. */
-  moveEditorToSidebar(surface: Surface | undefined): void
+  openInEditor(id: string): Surface | undefined
   /** A view announced itself (first open, or rebuilt): give it everything. */
   ready(from: Surface, restoredId: string | undefined): void
   /** The view's + button. */
@@ -91,10 +89,13 @@ export interface Surfaces {
   restore(from: Surface, id: string): void
   /** Signed in: a view still on another account's chat moves to this one's. */
   followAccount(): void
-  /** Bring the chat a command lands in to the front; undefined: there is none. */
+  /** Bring the chat a command lands in to the front: the one used last, else
+   *  a new one in a tab. Undefined only when no tab can be opened. */
   revealTarget(): Promise<Surface | undefined>
-  /** The New Chat command: a new chat in the sidebar's strip. */
-  newChat(): Promise<void>
+  /** The New Chat command: a new chat in a tab of its own. */
+  newChat(): void
+  /** The Open Chat command (and the status bar): the chat used last, else a new one. */
+  openChat(): Promise<void>
   /** Reveal the panel on a page, and load its data. */
   showPage(page: PageName): void
   /** The Open History command. */
@@ -108,19 +109,11 @@ export interface Surfaces {
 export function createSurfaces(deps: SurfacesDeps): Surfaces {
   const { conversations, sessions } = deps
   const view = deps.view
-  /** A conversation the sidebar should open on once VSCode creates its view
-   *  (a command ran before the view existed). */
-  let pendingSidebarConversation: string | null = null
 
   function pushSession(): void {
     for (const surface of view()?.surfaces() ?? []) {
       view()?.postTo(surface, { type: 'session', session: sessions.snapshot(surface.conversationId) })
     }
-  }
-
-  /** The sidebar's tab strip: open chats of this account not in an editor tab. */
-  function sidebarConversations(): Conversation[] {
-    return conversations.list(deps.account() ?? undefined).filter((c) => !view()?.editorFor(c.id))
   }
 
   function toViews(list: Conversation[]): ConversationView[] {
@@ -132,10 +125,6 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
 
   function pushConversations(): void {
     for (const surface of view()?.surfaces() ?? []) {
-      if (surface.kind === 'sidebar') {
-        view()?.postTo(surface, { type: 'conversationList', conversations: toViews(sidebarConversations()), activeId: surface.conversationId })
-        continue
-      }
       const own = surface.conversationId ? conversations.get(surface.conversationId) : undefined
       view()?.postTo(surface, { type: 'conversationList', conversations: own ? toViews([own]) : [], activeId: surface.conversationId })
       if (own) view()?.setTitle(surface, editorTitle(own))
@@ -144,23 +133,6 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
 
   function create(): Conversation {
     return conversations.create('New chat', [], deps.account() ?? undefined)
-  }
-
-  /**
-   * The chat the sidebar should show: `preferred` when it is open, this
-   * account's and not in an editor tab; else the first of the strip; else a new one.
-   */
-  function pickSidebarConversation(preferred: string | null | undefined): string {
-    const candidates = sidebarConversations()
-    const account = deps.account()
-    if (preferred) {
-      const conv = conversations.get(preferred)
-      if (conv && !view()?.editorFor(preferred) && (!account || !conv.accountId || conv.accountId === account)) {
-        if (conv.archived) conversations.unarchive(preferred)
-        return preferred
-      }
-    }
-    return candidates[0]?.id ?? create().id
   }
 
   /** Paint a surface's conversation: its transcript and what sits around it. */
@@ -183,29 +155,19 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
     pushConversations()
   }
 
-  function openInEditor(id: string): void {
+  function openInEditor(id: string): Surface | undefined {
     const chatView = view()
     const existing = chatView?.editorFor(id)
     if (existing) {
       void chatView?.reveal(existing)
-      return
+      return existing
     }
     const conv = conversations.get(id)
-    if (!conv || !chatView) return
+    if (!conv || !chatView) return undefined
     if (conv.archived) conversations.unarchive(id)
-    // Off the sidebar first, so it is never on screen in two places.
-    const sidebar = chatView.sidebar()
-    chatView.openEditor(id, editorTitle(conv))
-    if (sidebar && sidebar.conversationId === id) showIn(sidebar, pickSidebarConversation(null))
+    const opened = chatView.openEditor(id, editorTitle(conv))
     pushConversations()
-  }
-
-  /** Show a conversation in the sidebar, or once it exists; then bring it up. */
-  async function showInSidebar(id: string): Promise<void> {
-    const sidebar = view()?.sidebar()
-    if (sidebar) showIn(sidebar, id)
-    else pendingSidebarConversation = id
-    await view()?.revealSidebar()
+    return opened
   }
 
   /** Close a chat: to history, or deleted outright when there was nothing in it. */
@@ -215,12 +177,10 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
     else conversations.archive(id)
   }
 
-  /** A chat is gone from the strip: an editor tab on it closes, the sidebar moves on. */
+  /** A chat is gone: the tab on it closes. */
   function vacate(id: string): void {
     for (const surface of view()?.surfaces() ?? []) {
-      if (surface.conversationId !== id) continue
-      if (surface.kind === 'editor') view()?.closeEditor(surface)
-      else showIn(surface, pickSidebarConversation(null))
+      if (surface.conversationId === id) view()?.closeEditor(surface)
     }
   }
 
@@ -241,25 +201,21 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
     view()?.postTo(to, { type: 'historyList', conversations: historyItems() })
   }
 
-  /** Bring the chat a command lands in to the front. With none in focus it is
-   *  the sidebar's. */
+  /** Bring the chat a command lands in to the front: the one used last, else a
+   *  new chat in a tab. A tab just opened takes what is posted to it once its
+   *  page has loaded (ChatViewProvider queues it). */
   async function revealTarget(): Promise<Surface | undefined> {
-    const to = view()?.focused() ?? view()?.sidebar()
-    await view()?.reveal(to)
-    return to ?? view()?.sidebar()
+    const to = view()?.focused()
+    if (to) {
+      await view()?.reveal(to)
+      return to
+    }
+    return openInEditor(create().id)
   }
 
   async function showConversation(conversationId: string): Promise<void> {
-    // Wherever it is on screen; else it comes up in the sidebar.
-    const shownIn = view()?.surfaces().find((s) => s.conversationId === conversationId)
-    if (shownIn) {
-      await view()?.reveal(shownIn)
-      return
-    }
-    const conv = conversations.get(conversationId)
-    if (!conv) return
-    if (conv.archived) conversations.unarchive(conversationId)
-    await showInSidebar(conversationId)
+    // In its tab, or a tab opened on it.
+    openInEditor(conversationId)
   }
 
   return {
@@ -273,43 +229,17 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
     },
     openInEditor,
 
-    moveSidebarToEditor() {
-      openInEditor(view()?.sidebar()?.conversationId ?? create().id)
-    },
-
-    moveEditorToSidebar(surface) {
-      const chatView = view()
-      // The tab closes without that counting as closing the chat: a run carries on.
-      if (!surface || surface.kind !== 'editor' || !chatView) return
-      const id = surface.conversationId
-      chatView.closeEditor(surface)
-      if (!id) return
-      const sidebar = chatView.sidebar()
-      if (sidebar) showIn(sidebar, id)
-      else pendingSidebarConversation = id
-      void chatView.revealSidebar()
-    },
-
     // Fires on first open AND every time VSCode rebuilds a view it destroyed
     // while hidden — so this must be a complete handoff, not a delta.
     ready(from, restoredId) {
-      if (from.kind === 'editor') {
-        // The chat this tab was opened on, or showed before a reload. Gone
-        // (deleted meanwhile) means a fresh chat rather than an empty tab.
-        let id = from.conversationId ?? restoredId ?? null
-        const conv = id ? conversations.get(id) : undefined
-        if (!conv) id = create().id
-        else if (conv.archived) conversations.unarchive(conv.id)
-        from.conversationId = id
-        // A chat lives in one place. The sidebar may have picked it up while
-        // this tab was still being restored.
-        const sidebar = view()?.sidebar()
-        if (sidebar && sidebar.conversationId === id) showIn(sidebar, pickSidebarConversation(null))
-      } else {
-        from.conversationId = pickSidebarConversation(pendingSidebarConversation ?? restoredId ?? from.conversationId)
-        pendingSidebarConversation = null
-      }
-      const id = from.conversationId!
+      // The chat this tab was opened on, or showed before a reload. Gone
+      // (deleted meanwhile) means a fresh chat rather than an empty tab.
+      let opened = from.conversationId ?? restoredId ?? null
+      const existing = opened ? conversations.get(opened) : undefined
+      if (!existing) opened = create().id
+      else if (existing.archived) conversations.unarchive(existing.id)
+      from.conversationId = opened
+      const id = opened!
       const conv = conversations.get(id)
       const session = sessions.get(id)
       // A saved transcript and nothing streaming: seed the session so the
@@ -319,17 +249,15 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
       pushConversations()
     },
 
-    newIn(from) {
-      // An editor tab is one chat: a new one gets a tab of its own, like any
-      // other editor. The sidebar keeps a strip of them.
-      if (from.kind === 'editor') openInEditor(create().id)
-      else showIn(from, create().id)
+    newIn() {
+      // A tab is one chat: a new one gets a tab of its own, like any other editor.
+      openInEditor(create().id)
     },
 
     switchTo(from, id) {
       const editor = view()?.editorFor(id)
       if (editor && editor !== from) void view()?.reveal(editor)
-      else showIn(from, id)
+      else if (!editor) openInEditor(id)
     },
 
     close(id) {
@@ -343,8 +271,8 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
     closed(surface) {
       const id = surface.conversationId
       if (!id) return
-      // A run still going is not thrown away with its tab: it carries on in
-      // the sidebar's strip, where it can be found.
+      // A run still going is not thrown away with its tab: it carries on, and
+      // History lists it as running, where it can be opened again.
       if (sessions.find(id)?.busy) {
         pushConversations()
         return
@@ -382,30 +310,30 @@ export function createSurfaces(deps: SurfacesDeps): Surfaces {
         return
       }
       conversations.unarchive(id)
-      if (from.kind === 'editor') openInEditor(id)
-      else showIn(from, id)
+      openInEditor(id)
     },
 
     followAccount() {
-      const account = deps.account()
-      for (const surface of view()?.surfaces() ?? []) {
-        const conv = surface.conversationId ? conversations.get(surface.conversationId) : undefined
-        if (surface.kind === 'sidebar' && conv && account && conv.accountId && conv.accountId !== account) {
-          showIn(surface, pickSidebarConversation(null))
-        }
-      }
+      // Each tab is the chat it was opened on, whoever is signed in now.
       pushConversations()
     },
 
     revealTarget,
 
-    newChat: () => showInSidebar(create().id),
+    newChat() {
+      openInEditor(create().id)
+    },
+
+    async openChat() {
+      await revealTarget()
+    },
 
     showPage(page) {
       void revealTarget().then((target) => {
         if (!target) return
         view()?.postTo(target, { type: 'showPage', page })
         if (page === 'projects') void deps.pages.push(target)
+        else if (page === 'settings') deps.pages.pushSettings(target)
         else void deps.pages.pushWorkflows(target)
       })
     },

@@ -78,7 +78,7 @@ async function settled(sessions: ReturnType<typeof setup>['sessions'], id: strin
 describe('sending', () => {
   test('a surface with no chat gets one, titled from the prompt, and the run is saved', async () => {
     const { sessions, conversations, opened, events } = setup()
-    const surface: Surface = { id: 's1', kind: 'sidebar', conversationId: null }
+    const surface: Surface = { id: 's1', conversationId: null }
     sessions.send(surface, '  Make   the player jump higher when Space is held down  ')
     const id = surface.conversationId!
     assert.deepEqual(opened, [surface])
@@ -96,7 +96,7 @@ describe('sending', () => {
     const { sessions, conversations } = setup()
     const conv = conversations.create('New chat', [], 'pat')
     conversations.setDraft(conv.id, 'half-typed')
-    sessions.send({ id: 's1', kind: 'sidebar', conversationId: conv.id }, 'long composed text', { name: 'review', title: 'Review the diff' })
+    sessions.send({ id: 's1', conversationId: conv.id }, 'long composed text', { name: 'review', title: 'Review the diff' })
     await settled(sessions, conv.id)
     assert.equal(conversations.get(conv.id)?.title, 'Review the diff')
     assert.equal(conversations.get(conv.id)?.draft ?? '', '')
@@ -105,7 +105,7 @@ describe('sending', () => {
   test('only the views of that conversation are sent its messages', async () => {
     const { sessions, conversations, posted } = setup()
     const conv = conversations.create('New chat', [], 'pat')
-    sessions.send({ id: 's1', kind: 'sidebar', conversationId: conv.id }, 'hi')
+    sessions.send({ id: 's1', conversationId: conv.id }, 'hi')
     await settled(sessions, conv.id)
     assert.ok(posted.length > 0)
     assert.ok(posted.every((p) => p.id === conv.id))
@@ -119,6 +119,15 @@ describe('a session', () => {
     const conv = conversations.create('New chat', [], 'pat')
     assert.deepEqual(sessions.get(conv.id).planSnapshot()?.map((s) => s.text), ['Add the jump'])
     assert.match(logs.join('\n'), /plan: carried 1 step/)
+  })
+
+  test('a fresh conversation leaves the plan alone while the chat that keeps it is open', () => {
+    const plan: PlanStep[] = [{ text: 'Add the jump', status: 'in_progress' }]
+    const { sessions, conversations } = setup({ plan })
+    const owner = conversations.create('Running', [{ id: 'm1', role: 'user', content: 'go' }] as never, 'pat')
+    conversations.save({ ...owner, plan: plan as never })
+    const blank = conversations.create('New chat', [], 'pat')
+    assert.equal(sessions.get(blank.id).planSnapshot(), null)
   })
 
   test('is made once, and dropped on close', () => {

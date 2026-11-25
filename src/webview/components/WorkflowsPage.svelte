@@ -94,7 +94,7 @@
   .title { font-weight: 600; }
   .slash { font-size: 0.82em; opacity: 0.6; font-family: var(--vscode-editor-font-family); }
   .desc { font-size: 0.88em; opacity: 0.75; overflow-wrap: anywhere; }
-  .run { font-size: 0.85em; color: var(--vscode-textLink-foreground); white-space: nowrap; }
+  .run { font-size: 0.85em; color: var(--ys-accent-text); white-space: nowrap; }
   .inputs { display: flex; flex-direction: column; gap: 8px; padding: 0 8px 8px; }
   label { display: flex; flex-direction: column; gap: 3px; font-size: 0.88em; }
   label span { opacity: 0.8; text-transform: capitalize; }
@@ -107,7 +107,7 @@
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 4px;
   }
-  textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  textarea:focus { outline: 1px solid var(--ys-accent); outline-offset: -1px; }
   .inputs .primary { align-self: flex-end; }
   .muted { display: flex; align-items: center; gap: 6px; margin: 0; opacity: 0.7; }
   .error { margin: 0; color: var(--vscode-errorForeground); }

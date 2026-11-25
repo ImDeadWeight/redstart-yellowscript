@@ -124,8 +124,8 @@
     cursor: pointer;
   }
   .option.active {
-    background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
-    color: var(--vscode-list-activeSelectionForeground, inherit);
+    background: var(--ys-accent-faint);
+    box-shadow: inset 2px 0 0 var(--ys-accent);
   }
   .menu-note { display: flex; align-items: center; gap: 6px; padding: 6px 8px; opacity: 0.7; }
 </style>

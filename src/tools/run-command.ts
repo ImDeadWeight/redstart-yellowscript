@@ -26,6 +26,9 @@
 // testable with a string store.
 // =============================================================================
 
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+
 import {
   assertWorkspaceToolName,
   stringArg,
@@ -108,6 +111,8 @@ export const runCommandTool: Tool = {
         'ys_run_command — refused: does nothing',
       )
     }
+    const escaped = packageJsonEscapeError(trimmed, cwd, context.workspaceRoots, 'ys_run_command')
+    if (escaped) return escaped
     const pending: PendingCommand = { command: trimmed, cwd, label }
     const timeoutS = Number((args as { timeout_s?: unknown })?.timeout_s)
     if (Number.isFinite(timeoutS) && timeoutS > 0) pending.timeoutMs = Math.round(timeoutS * 1000)
@@ -121,6 +126,101 @@ export const runCommandTool: Tool = {
       pending,
     )
   },
+}
+
+/** Package managers, and their subcommands that need no project of their own. */
+const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun'])
+const PROJECTLESS = new Set([
+  'exec', 'x', 'dlx', 'create', 'init', 'help', 'config', 'cache', 'view', 'info', 'show', 'search',
+  'login', 'logout', 'whoami', 'ping', 'doctor', 'completion', '-v', '--version', '-h', '--help',
+])
+
+/**
+ * A package manager that would act on a project outside the workspace. npm,
+ * pnpm, yarn and bun look upward for the nearest package.json: run where
+ * there is none, `npm run build` builds whatever project sits above. A model
+ * that left out "cwd" ran Yellowscript's own check, test and build from
+ * sample-workspace, rebuilding the extension it was running in (2026-11-24).
+ * npx and `create`/`init` need no project, so they are left alone: a new
+ * folder has no package.json until the scaffold writes one.
+ */
+export function packageJsonEscape(
+  command: string,
+  cwd: string,
+  roots: readonly string[],
+): { program: string; label: string; found: string; projects: string[] } | null {
+  let here = cwd
+  for (const part of command.split('&&').map((p) => p.trim())) {
+    const cd = /^cd\s+(?:\/d\s+)?(?:"([^"]+)"|(\S+))$/i.exec(part)
+    if (cd) {
+      here = path.resolve(here, cd[1] ?? cd[2]!)
+      continue
+    }
+    const words = part.split(/\s+/)
+    const program = (words[0] ?? '').toLowerCase().replace(/\.(cmd|exe|bat)$/, '')
+    if (!PACKAGE_MANAGERS.has(program)) continue
+    const sub = words.slice(1).find((w) => !/^--?(?:prefix|C|cwd|dir)$/i.test(w))
+    if (words.slice(1).some((w) => /^--?(?:prefix|C|cwd|dir)(?:=|$)/i.test(w))) continue
+    if (sub !== undefined && PROJECTLESS.has(sub.toLowerCase())) continue
+    const found = nearestPackageJson(here)
+    if (!found || roots.some((root) => isInside(root, found))) continue
+    return { program, label: describeWorkspacePath(roots, here), found, projects: projectsUnder(roots) }
+  }
+  return null
+}
+
+/** The refusal for a command packageJsonEscape catches, or null to plan it. */
+export function packageJsonEscapeError(command: string, cwd: string, roots: readonly string[], tool: string): ToolResult | null {
+  const escape = packageJsonEscape(command, cwd, roots)
+  if (!escape) return null
+  const where = escape.projects.length ? ` The projects in the workspace: ${escape.projects.map((p) => `"${p}"`).join(', ')}.` : ''
+  return toolError(
+    `Not run: there is no package.json in "${escape.label}", so ${escape.program} would use ${escape.found}, ` +
+      `which is outside the workspace, and act on that project instead. Pass "cwd" with the project's folder.${where}`,
+    `${tool} — refused: its package.json is outside the workspace`,
+  )
+}
+
+function isInside(root: string, file: string): boolean {
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync.native(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  const rel = path.relative(real(root), real(file))
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+function nearestPackageJson(from: string): string | null {
+  for (let dir = path.resolve(from); ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, 'package.json')
+    if (fs.existsSync(candidate)) return candidate
+    if (path.dirname(dir) === dir) return null
+  }
+}
+
+/** Folders up to two levels into the workspace that hold a package.json, as the model would name them. */
+function projectsUnder(roots: readonly string[]): string[] {
+  const found: string[] = []
+  const visit = (dir: string, depth: number) => {
+    if (found.length >= 5) return
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+      const sub = path.join(dir, entry.name)
+      if (fs.existsSync(path.join(sub, 'package.json'))) found.push(describeWorkspacePath(roots, sub))
+      else if (depth < 2) visit(sub, depth + 1)
+    }
+  }
+  for (const root of roots) visit(root, 1)
+  return found
 }
 
 /**

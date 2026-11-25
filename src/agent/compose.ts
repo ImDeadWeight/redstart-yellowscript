@@ -21,9 +21,9 @@ import type { BackgroundProcesses } from '../tools/background-processes.ts'
 import { describeRunning } from '../tools/background-processes.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import { buildWorkspaceContext } from '../tools/workspace-context.ts'
-import type { PlanStep } from './agent-core.ts'
-import type { ContextTracker } from './context-budget.ts'
-import type { ApprovalGate, CommandApprovalGate } from './loop.ts'
+import type { PlanStep, StagnationLimits } from './agent-core.ts'
+import type { ContextTracker, FitReport } from './context-budget.ts'
+import type { AgentResult, ApprovalGate, CommandApprovalGate } from './loop.ts'
 
 /** The folders the agent works in, and the ones it may only read. */
 export interface AgentWorkspace {
@@ -63,6 +63,9 @@ export interface AgentSetup {
   onPlanChanged?: (steps: PlanStep[] | null) => void
   /** Round trips before the person is asked whether to keep going. */
   maxTurns(): number
+  /** Stagnation thresholds (agent-core STAGNATION_LIMITS); absent: the defaults.
+   *  The bench's STAGNATION_OFF keeps only the exact-repeat guard. */
+  stagnation?: () => Partial<StagnationLimits> | undefined
   log: { info(line: string): void; warn(line: string): void }
 }
 
@@ -73,6 +76,12 @@ export interface SessionHooks {
   onPersist(): void
   /** The connected client's context window. */
   context(): ContextTracker | null
+  /** A run ended: everything it did. The bench records it; the editor does not need it. */
+  onAgentResult?: (result: AgentResult) => void
+  /** Old messages were trimmed to fit the window (besides the log line). */
+  onContextTrimmed?: (report: FitReport) => void
+  /** A turn started or ended: the views' busy state (the Stop button) changed. */
+  onBusyChanged?: () => void
 }
 
 /** One conversation's ChatSession, with everything its agent runs against. */
@@ -97,7 +106,10 @@ export function composeSession(setup: AgentSetup, conversationId: string, hooks:
     },
     liveState: () => describeRunning(setup.processes.list()),
     maxTurns: () => setup.maxTurns(),
+    ...(setup.stagnation ? { stagnation: setup.stagnation } : {}),
+    ...(hooks.onAgentResult ? { onAgentResult: hooks.onAgentResult } : {}),
     onContextTrimmed: (report) => {
+      hooks.onContextTrimmed?.(report)
       log.info(
         `context: trimmed to fit (~${report.before} → ~${report.after} of ${report.usable ?? '?'} usable tokens; ` +
           `${report.stubbed} old results stubbed, ${report.shrunk} calls shrunk, ${report.capped} messages capped)` +
@@ -136,10 +148,11 @@ export function composeSession(setup: AgentSetup, conversationId: string, hooks:
       }
       return setup.gates.change({ conversationId, root, ask })(pending)
     },
-    approveCommand: (pending) => setup.gates.command({ conversationId, ask })(pending),
+    approveCommand: (pending, signal) => setup.gates.command({ conversationId, ask })(pending, signal),
     conversationId,
     projectId: () => setup.project()?.id ?? null,
     onPersist: hooks.onPersist,
+    ...(hooks.onBusyChanged ? { onBusyChanged: hooks.onBusyChanged } : {}),
     emit: hooks.emit,
   })
   return session

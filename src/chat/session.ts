@@ -32,9 +32,9 @@ import type {
   TurnStats,
 } from './protocol.ts'
 import { ApprovalQueue, type ApprovalRequest } from './approvals.ts'
-import { runAgentLoop, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
+import { runAgentLoop, type AgentResult, type ApprovalGate, type CommandApprovalGate } from '../agent/loop.ts'
 import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
-import type { AskAnswer, AskRequest, PlanStep } from '../agent/agent-core.ts'
+import type { AskAnswer, AskRequest, PlanStep, Recovery, StagnationLimits } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext, ToolEffect } from '../tools/types.ts'
 import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
@@ -61,6 +61,10 @@ export const RESUME_PROMPT = 'Continue the task from where it stopped.'
 const INCLUDE_REASONING_IN_CONTEXT = false
 
 export interface SessionDeps {
+  /** A turn started or ended (queued ones too): the Stop button and the tab's
+   *  busy dot read it. Until 2026-11-24 only the first send and the end of the
+   *  whole queue were reported, so a queued turn ran with no Stop button. */
+  onBusyChanged?: () => void
   /** Resolves the currently connected client, or null when not connected. */
   getClient: () => NestClient | null
   /** Called when a request comes back 401 so the connection can re-prompt. */
@@ -92,6 +96,9 @@ export interface SessionDeps {
   context?: () => ContextTracker | null
   /** Round trips before the person is asked whether to keep going. */
   maxTurns?: () => number
+  /** Stagnation thresholds for each run (agent-core STAGNATION_LIMITS);
+   *  STAGNATION_OFF keeps only the exact-repeat guard. Absent: the defaults. */
+  stagnation?: () => Partial<StagnationLimits> | undefined
   /** A system message about the workspace (its instructions, its files),
    *  sent first on every request that carries tools. */
   workspaceContext?: () => string | null
@@ -104,6 +111,8 @@ export interface SessionDeps {
   diagnosticsAfterWrite?: (files: string[]) => Promise<string | null>
   /** Older messages of a run were trimmed to fit the window (for the log). */
   onContextTrimmed?: (report: FitReport) => void
+  /** A run of the agent loop ended: everything it did (the bench's record). */
+  onAgentResult?: (result: AgentResult) => void
   /**
    * The conversation this session owns. Every protocol message it emits is
    * tagged with this id so the webview can route a delta to the right tab even
@@ -329,13 +338,30 @@ export class ChatSession {
 
   /** Stop the running turn. Whatever streamed so far stays on screen — the user
    *  asked it to stop, not to throw the answer away. */
+  /**
+   * Stop: the running turn, and the queue behind it. Queued messages are not
+   * sent; their text goes back to the composer, so nothing typed is lost. Stop
+   * that only ended the current turn let the next queued one start at once,
+   * and it read as Stop not working.
+   *
+   * The session stays busy until the turn has actually unwound (runTurn's
+   * finally clears the controller and reports it), so the Stop button does
+   * not disappear while a command is still being ended.
+   */
   abort(): void {
     this.controller?.abort()
-    this.controller = null
     // A flow waiting on the person ends with the abort: nobody will answer.
     if (this.question) this.answer(this.question.view.id, null)
     this.approvals.denyAll()
     this.continueAtLimit(false)
+    if (this.pending.length > 0) {
+      const text = this.pending.map((p) => p.prompt).filter(Boolean).join('\n\n')
+      this.pending = []
+      // The greyed bubbles go: the transcript is what was actually sent.
+      this.emit({ type: 'conversation', messages: this.snapshot(), state: this.state() })
+      if (text) this.emit({ type: 'composerText', text })
+      this.deps.onPersist?.()
+    }
   }
 
   /**
@@ -430,6 +456,7 @@ export class ChatSession {
 
     const controller = new AbortController()
     this.controller = controller
+    this.deps.onBusyChanged?.()
     // What the run changes, kept as it happens: a turn that fails after three
     // writes still made those writes, and the next message must know.
     const effects: ToolEffect[] = []
@@ -488,8 +515,26 @@ export class ChatSession {
             context: this.deps.context?.() ?? undefined,
             diagnosticsAfterWrite: this.deps.diagnosticsAfterWrite,
             ...(this.deps.maxTurns ? { maxIterations: this.deps.maxTurns() } : {}),
+            stagnation: this.deps.stagnation?.(),
             handlers: {
               ...handlers,
+              // A stagnation recovery: a line in the timeline, an entry in the run log.
+              onDrafting: (tool: string, chars: number) => {
+                this.emit({ type: 'turn/drafting', id: turn.id, tool, chars })
+              },
+              onNotice: (text: string) => {
+                turn.parts = appendPart(turn.parts, { kind: 'notice', text })
+                this.emit({ type: 'turn/notice', id: turn.id, text })
+                this.deps.onPersist?.()
+              },
+              onRecovery: (recovery: Recovery) => {
+                const text = recoveryLine(recovery)
+                turn.parts = appendPart(turn.parts, { kind: 'notice', text })
+                effects.push({ kind: 'recovery', detector: recovery.detector, level: recovery.level, evidence: recovery.evidence })
+                turn.run = [...effects]
+                this.emit({ type: 'turn/notice', id: turn.id, text })
+                this.deps.onPersist?.()
+              },
               onContextTrimmed: (report: FitReport) => {
                 this.trimmed++
                 this.emitState()
@@ -559,6 +604,7 @@ export class ChatSession {
             },
           })
         : await client.streamChatCompletion(this.buildRequest(null), handlers, controller.signal)
+      if (registry) this.deps.onAgentResult?.(result as AgentResult)
 
       turn.streaming = false
       turn.aborted = result.aborted
@@ -601,7 +647,10 @@ export class ChatSession {
         await this.deps.onUnauthorized()
       }
     } finally {
-      if (this.controller === controller) this.controller = null
+      if (this.controller === controller) {
+        this.controller = null
+        this.deps.onBusyChanged?.()
+      }
       this.inFlight = null
       this.deps.onPersist?.()
     }
@@ -798,4 +847,22 @@ function describeFailure(err: unknown): string {
     return `The Nest returned an error (${err.status}): ${err.message}`
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * A stagnation recovery as one line of the turn's timeline. Levels 1 and 2
+ * changed what the model does next; level 3 ended the run, and the answer
+ * after it says what was tried.
+ */
+export function recoveryLine(recovery: Pick<Recovery, 'level' | 'evidence' | 'action'>): string {
+  if (recovery.level === 3) return `Stopped: not making progress. ${recovery.evidence}`
+  const paused = recovery.level === 2 && recovery.action ? ` Paused ${pausedLabel(recovery.action)} until there is new evidence.` : ''
+  return `Changed approach: ${recovery.evidence}${paused}`
+}
+
+/** `kind:search` → "searches"; an action family → the command or target. */
+function pausedLabel(action: string): string {
+  if (action.startsWith('kind:')) return ({ search: 'searches', write: 'edits', command: 'commands', read: 'reads' } as Record<string, string>)[action.slice(5)] ?? 'that'
+  const at = action.indexOf(':')
+  return at === -1 ? action : `\`${action.slice(at + 1)}\``
 }

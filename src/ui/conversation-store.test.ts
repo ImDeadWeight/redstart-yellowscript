@@ -138,17 +138,20 @@ describe('conversation-store drafts', () => {
     assert.equal(store.get(conv.id)?.draft, undefined)
   })
 
-  it('pruneBlank removes closed empty chats and keeps drafts and open tabs', () => {
+  it('pruneBlank removes empty chats, open or closed, and keeps drafts and plans', () => {
     const store = makeStore()
     const blankClosed = store.create('New chat', [], 'acct')
     const draftClosed = store.create('New chat', [], 'acct')
     const blankOpen = store.create('New chat', [], 'acct')
+    const planned = store.create('New chat', [], 'acct')
+    store.save({ ...planned, plan: [{ text: 'Step', status: 'pending' }] as never })
     store.setDraft(draftClosed.id, 'keep me')
     store.archive(blankClosed.id)
     store.archive(draftClosed.id)
-    assert.equal(store.pruneBlank(), 1)
+    assert.equal(store.pruneBlank(), 2)
     assert.equal(store.get(blankClosed.id), undefined)
-    assert.ok(store.get(blankOpen.id))
+    assert.equal(store.get(blankOpen.id), undefined)
+    assert.ok(store.get(planned.id))
     const history = store.history('acct')
     assert.deepEqual(history.map((h) => [h.id, h.draft]), [[draftClosed.id, true]])
   })

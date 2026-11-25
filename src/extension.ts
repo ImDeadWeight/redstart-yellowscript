@@ -8,6 +8,7 @@
 //
 //   host/connection-commands  the Nest connection, sign-in, the account
 //   host/projects             the workspace's Nest project, the workflows
+//   host/settings             the Yellowscript Settings page
 //   host/tooling              the ys_* tools, the Nest's tools, processes
 //   host/tasks                each run's checkpoints, reverts, the plan file
 //   host/sessions             one ChatSession per conversation
@@ -31,6 +32,7 @@ import { config } from './host/config.ts'
 import { createConnectionCommands, loggedDiscovery, type ConnectionCommands } from './host/connection-commands.ts'
 import { FIX_DIAGNOSTIC_COMMAND, createEditorActions, type EditorActions } from './host/editor-actions.ts'
 import { createProjects, type Projects } from './host/projects.ts'
+import { createSettings } from './host/settings.ts'
 import { createSessions, type Sessions } from './host/sessions.ts'
 import { createSurfaces, type Surfaces } from './host/surfaces.ts'
 import { createTasks, type Tasks } from './host/tasks.ts'
@@ -71,8 +73,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (pruned > 0) {
     output.info(`history: pruned ${pruned} conversation(s) older than 14 days`)
   }
-  // Closed chats that never had anything in them, left over from before
-  // closing a blank chat deleted it.
+  // Chats that never had anything in them: closed ones from before closing a
+  // blank chat deleted it, open ones from the sidebar's strip.
   const blank = conversations.pruneBlank()
   if (blank > 0) output.info(`history: removed ${blank} empty conversation(s)`)
 
@@ -127,6 +129,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     projectId: () => projects.linked()?.id,
   })
 
+  const settings = createSettings({
+    post: (to, message) => chatView?.postTo(to, message),
+    broadcast: (message) => chatView?.broadcast(message),
+    log: output,
+  })
+
   // What every chat's agent runs against: the workspace, the tools, the gates.
   const agentSetup = createAgentSetup({ manager, tooling, projects, tasks, log: output })
   // A session is created lazily per conversation. No singleton: the tab strip
@@ -149,13 +157,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     createSession: (conversationId, hooks) => composeSession(agentSetup, conversationId, hooks),
   })
   // Which conversation each view shows is decided when that view announces
-  // itself (onReady): the sidebar and every editor tab each have their own.
+  // itself (onReady): every editor tab has its own.
   const surfaces = createSurfaces({
     view: () => chatView,
     conversations,
     account: () => connection.account(),
     sessions,
-    pages: projects,
+    pages: { push: (to) => projects.push(to), pushWorkflows: (to) => projects.pushWorkflows(to), pushSettings: (to) => settings.push(to) },
     notifier: {
       focused: () => vscode.window.state.focused,
       enabled: () => config().get<boolean>('notifyWhenWaiting') !== false,
@@ -180,6 +188,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       editorActions,
       tasks,
       tooling,
+      settings,
       conversations,
       post: (to, message) => view.postTo(to, message),
       runCommand: (command) => void vscode.commands.executeCommand(`redstartYellowscript.${command}`),
@@ -191,6 +200,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const command = (name: string, run: (...args: never[]) => unknown) => vscode.commands.registerCommand(`redstartYellowscript.${name}`, run)
   context.subscriptions.push(
     ...tooling.disposables,
+    ...settings.disposables,
     output,
     statusBar,
     manager.onDidChangeState((state) => connection.onStateChanged(state)),
@@ -201,22 +211,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     // Chats opened as editor tabs, restored on their chat after a window reload.
     vscode.window.registerWebviewPanelSerializer(ChatViewProvider.panelType, view),
-    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, view, {
-      // Keep the transcript alive when the panel is hidden. Without this the
-      // webview is torn down and the user loses their place in the conversation
-      // every time they switch to the file explorer.
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
     command('openInEditor', () => surfaces.openInEditor(surfaces.create().id)),
-    command('moveToEditor', () => surfaces.moveSidebarToEditor()),
-    command('moveToSidebar', () => surfaces.moveEditorToSidebar(view.activeEditor())),
+    command('openChat', () => surfaces.openChat()),
     command('connect', () => connection.connect()),
     command('disconnect', () => connection.disconnect()),
     command('signIn', () => connection.signIn()),
     command('signOut', () => connection.signOut()),
     command('showStatus', () => connection.showStatus()),
     command('newChat', () => surfaces.newChat()),
-    command('openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', 'redstartYellowscript')),
+    command('openSettings', () => surfaces.showPage('settings')),
     command('openHistory', () => surfaces.showHistory()),
     command('chooseProject', () => surfaces.showPage('projects')),
     command('runWorkflow', () => surfaces.showPage('workflows')),
@@ -230,7 +233,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     command('showWaiting', () => {
       const id = sessions.firstWaiting()
-      return id ? surfaces.showConversation(id) : view.reveal()
+      return id ? surfaces.showConversation(id) : surfaces.openChat()
     }),
   )
 

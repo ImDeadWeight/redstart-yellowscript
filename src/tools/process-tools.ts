@@ -20,6 +20,7 @@ import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from '.
 import { formatProcessList, type BackgroundProcesses } from './background-processes.ts'
 import { capHeadTail } from './command-run.ts'
 import { redactUrlCredentials } from './safe-commands.ts'
+import { packageJsonEscapeError } from './run-command.ts'
 
 /** What an "output" read shows of new output at most. */
 export const OUTPUT_CAP_CHARS = 12_000
@@ -67,6 +68,8 @@ function planStart(args: unknown, context: ToolContext): ToolResult {
   if (!command) return toolError('ys_process start requires a "command" string, e.g. {"action": "start", "command": "npm run dev"}.')
   const where = resolveCwd(context, stringArg(args, 'cwd'))
   if (!where.ok) return where.error
+  const escaped = packageJsonEscapeError(command, where.cwd, context.workspaceRoots, 'ys_process start')
+  if (escaped) return escaped
   const label = describeWorkspacePath(context.workspaceRoots, where.cwd)
   const pending: PendingCommand = { command, cwd: where.cwd, label, background: true }
   return toolOk(

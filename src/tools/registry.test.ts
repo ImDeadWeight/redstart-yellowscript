@@ -145,7 +145,7 @@ describe('execute', () => {
     // A model that invented `read_file` should be able to find `ys_read_file`.
     const result = await registry().execute('read_file', '{"path":"a.txt"}', ctx)
     assert.equal(result.isError, true)
-    assert.match(result.content, /no tool called "read_file"/)
+    assert.match(result.content, /no tool named "read_file" here, so nothing was run/)
     assert.match(result.content, /ys_read_file/)
   })
 

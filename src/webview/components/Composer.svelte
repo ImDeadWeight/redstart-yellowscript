@@ -65,6 +65,15 @@
     if (query !== null && workflows === null) post({ type: 'loadPage', page: 'workflows' })
   })
 
+  // Queued messages Stop did not send, back in the box: nothing typed is lost.
+  $effect(() => {
+    if (viewState.composerText === null) return
+    untrack(() => {
+      const back = view.takeComposerText()
+      if (back) text = text.trim() ? `${back}\n\n${text}` : back
+    })
+  })
+
   // Chips the host sent (the editor's "Add to Yellowscript").
   $effect(() => {
     if (viewState.inbox.length === 0) return
@@ -263,7 +272,7 @@
     border: 1px solid var(--vscode-input-border, var(--ys-card-border));
     background: var(--vscode-input-background);
   }
-  .composer:focus-within { border-color: var(--vscode-focusBorder); }
+  .composer:focus-within { border-color: var(--ys-accent-border); }
   textarea {
     width: 100%;
     min-height: 44px;

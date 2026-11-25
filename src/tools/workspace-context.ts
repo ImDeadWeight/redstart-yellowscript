@@ -20,6 +20,7 @@
 import * as nodeFs from 'node:fs'
 import * as nodePath from 'node:path'
 
+import { lookupGuidance } from '../agent/agent-core.ts'
 import { SKIPPED_DIRECTORIES } from './fallback-search.ts'
 import { NOTES_FILE, notesForContext } from './notes.ts'
 
@@ -131,7 +132,10 @@ export function keepingGuide(options: KeepingOptions = {}): string | null {
   if (has('ys_note')) {
     lines.push(
       `- What you learn about this workspace (how to build and check it, where things live, decisions and why, ` +
-        `known problems): ys_note. It keeps ${KEEP_DIR}/NOTES.md, which comes with every request; do not edit that file directly.`,
+        `known problems): ys_note. It keeps ${KEEP_DIR}/NOTES.md, which comes with every request; do not edit that file directly. ` +
+        'Write one when you find it out, not at the end: a command that needed a flag or a cwd you did not expect, ' +
+        'a tool or library that works differently from what you knew.' +
+        (has('update_plan') ? ' Not the task itself; that is the plan.' : ''),
     )
   }
   if (has('ys_write_file')) {
@@ -168,6 +172,11 @@ export function buildWorkspaceContext(root: string, fs: ContextFs = nodeContextF
     `The workspace is ${nodePath.basename(root)} (${root}). Paths you pass to the ys_ tools are relative to it. ${shellNote()}`,
   ]
 
+  // When to look something up instead of reasoning from memory: only with a
+  // web tool in this run (agent-core lookup.mjs; Crestline on SvelteKit 3).
+  const lookup = lookupGuidance(keeping.tools ?? [])
+  if (lookup) parts.push(lookup)
+
   for (const name of INSTRUCTION_FILES) {
     const text = fs.readFile(nodePath.join(root, name))
     if (text === null || text.trim() === '') continue
@@ -199,7 +208,8 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
     const shell = (env.ComSpec ?? 'cmd.exe').split(/[\\/]/).pop() ?? 'cmd.exe'
     return (
       `Commands (ys_run_command, ys_process) run in Windows ${shell}, not bash: use dir, type, ` +
-      'findstr, cd (no ls, cat, rm, pwd, grep, true). Node, npm and npx work as usual. ' +
+      'findstr, cd (no ls, cat, rm, pwd, grep, true), and backslashes in paths (cmd reads dir a/b as dir a /b). ' +
+      'Node, npm and npx work as usual. ' +
       FILES_NOTE
     )
   }
@@ -210,8 +220,9 @@ export function shellNote(platform: NodeJS.Platform = process.platform, env: Nod
  *  changing files belongs to the ys_ tools, which checkpoint; and where the
  *  processes it started are. */
 const FILES_NOTE =
-  'Read-only commands and the project\'s test, build and lint scripts run without asking; a chained or piped ' +
-  'line asks. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir. ' +
+  'Read-only commands and the project\'s test, build and lint scripts run without asking, and so does a line ' +
+  'chained with && when each part would; a piped or redirected line asks. To run in a subfolder, pass "cwd" ' +
+  'instead of starting with cd. Change files with the ys_ tools (they keep a checkpoint), not with del, move, copy or mkdir. ' +
   'Commands cannot answer prompts: pass the non-interactive flag (--yes, -y, …); one that waits for input is stopped. ' +
   'Every process you start gets an id (c1 for a command, p1 for a background one) and its pid in the result, and ' +
   'ys_process {"action":"list"} shows them all; do not look for your processes with tasklist, Get-Process or ps, ' +

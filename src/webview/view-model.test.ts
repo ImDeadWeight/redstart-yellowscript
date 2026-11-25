@@ -5,6 +5,7 @@ import { EMPTY_CONVERSATION_STATE, PROTOCOL_VERSION, type HostMessage } from '..
 import {
   commandView,
   contextMeter,
+  draftingNote,
   waitingNote,
   applyHostMessage,
   atQuery,
@@ -34,16 +35,10 @@ const init = (over: Partial<Extract<HostMessage, { type: 'init' }>> = {}): HostM
   messages: [],
   conversationId: 'c1',
   state: EMPTY_CONVERSATION_STATE,
-  surface: 'sidebar',
   ...over,
 })
 
 describe('applyHostMessage', () => {
-  test('init says whether this view is the sidebar or an editor tab', () => {
-    assert.equal(run(init()).surface, 'sidebar')
-    assert.equal(run(init({ surface: 'editor' })).surface, 'editor')
-  })
-
   test('init replaces everything; a different protocol marks the panel stale', () => {
     const s = run(init({ messages: [{ id: 'm1', role: 'user', content: 'hi' }] }))
     assert.equal(s.messages.length, 1)
@@ -65,6 +60,39 @@ describe('applyHostMessage', () => {
     assert.equal(s.messages[0]?.reasoning, 'hmm')
     assert.equal(s.messages[0]?.streaming, false)
     assert.equal(s.messages[0]?.stats?.tokensPerSecond, 12)
+  })
+
+  test("a notice goes into the turn's timeline, between what came before and after", () => {
+    const s = run(
+      init(),
+      { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '', streaming: true } },
+      { type: 'turn/delta', conversationId: 'c1', id: 't1', channel: 'reasoning', text: 'again and again' },
+      { type: 'turn/notice', conversationId: 'c1', id: 't1', text: 'Changed approach: going in a circle' },
+      { type: 'turn/notice', conversationId: 'other', id: 't1', text: 'NO' },
+      { type: 'turn/delta', conversationId: 'c1', id: 't1', channel: 'reasoning', text: 'fresh' },
+    )
+    assert.deepEqual(s.messages[0]?.parts, [
+      { kind: 'reasoning', text: 'again and again' },
+      { kind: 'notice', text: 'Changed approach: going in a circle' },
+      { kind: 'reasoning', text: 'fresh' },
+    ])
+  })
+
+  test('a call being written shows on its turn until it arrives, is dropped, or the turn ends', () => {
+    const msg = { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '', streaming: true } } as const
+    const drafting = { type: 'turn/drafting', conversationId: 'c1', id: 't1', tool: 'ys_run_command', chars: 12_400 } as const
+    const writing = run(init(), msg, drafting)
+    assert.deepEqual(writing.messages[0]?.drafting, { tool: 'ys_run_command', chars: 12_400 })
+    assert.equal(draftingNote(writing.messages[0]!.drafting!), 'Writing the ys_run_command call · 12k characters')
+    assert.equal(draftingNote({ tool: '', chars: 512 }), 'Writing a tool call · 512 characters')
+    const arrived = run(init(), msg, drafting, {
+      type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'c1', name: 'ys_run_command', arguments: '{}', recovered: false,
+    })
+    assert.equal(arrived.messages[0]?.drafting, undefined)
+    const dropped = run(init(), msg, drafting, { type: 'turn/notice', conversationId: 'c1', id: 't1', text: 'Changed approach' })
+    assert.equal(dropped.messages[0]?.drafting, undefined)
+    const ended = run(init(), msg, drafting, { type: 'turn/completed', conversationId: 'c1', id: 't1', aborted: true })
+    assert.equal(ended.messages[0]?.drafting, undefined)
   })
 
   test('a queued prompt with the same id updates in place', () => {
@@ -280,5 +308,17 @@ describe('commandView', () => {
     assert.equal(read.output, '')
     assert.equal(commandView({ name: 'ys_process', arguments: '{"action":"list"}' }), null)
     assert.equal(commandView({ name: 'ys_read_file', arguments: '{}' }), null)
+  })
+})
+
+describe('text handed back to the composer', () => {
+  test("queued messages Stop did not send are kept for the composer, and another tab's are not", () => {
+    const s = run(
+      init(),
+      { type: 'composerText', conversationId: 'c1', text: 'two' },
+      { type: 'composerText', conversationId: 'c1', text: 'three' },
+      { type: 'composerText', conversationId: 'other', text: 'NO' },
+    )
+    assert.equal(s.composerText, 'two\n\nthree')
   })
 })

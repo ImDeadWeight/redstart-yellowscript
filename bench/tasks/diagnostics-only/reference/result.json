@@ -1,0 +1,1 @@
+{ "answer": "Two lines had a string where the Line type wants a number.", "stopReason": "complete", "questions": 0, "calls": [{ "name": "ys_diagnostics", "args": "{}", "isError": false }] }

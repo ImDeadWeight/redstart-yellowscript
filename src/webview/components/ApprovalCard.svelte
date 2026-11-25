@@ -188,7 +188,7 @@
     padding: 2px 4px;
     font: inherit;
     font-size: 0.85em;
-    color: var(--vscode-textLink-foreground);
+    color: var(--ys-accent-text);
     background: none;
     border: none;
     cursor: pointer;

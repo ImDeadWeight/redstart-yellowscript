@@ -342,6 +342,8 @@ export interface ChatCompletionRequest {
   }>
   model?: string
   temperature?: number
+  /** The most tokens one reply may run to (llama-server's default is no limit). */
+  max_tokens?: number
   /** Phase 2. Sending these changes the gateway's injected system context: it
    *  only claims Nest capabilities when a request actually carries tools. */
   tools?: unknown[]
@@ -366,6 +368,8 @@ export interface StreamHandlers {
   onReasoning?: (text: string) => void
   onModel?: (model: string) => void
   onTimings?: (timings: StreamTimings) => void
+  /** Tool call deltas as they arrive: a call's name, then its arguments in pieces. */
+  onToolCalls?: (deltas: ToolCallDelta[]) => void
 }
 
 export interface StreamResult {
@@ -391,6 +395,7 @@ function apply(chunk: ParsedChunk, result: StreamResult, handlers: StreamHandler
   }
   if (chunk.toolCalls) {
     result.toolCalls.push(...chunk.toolCalls)
+    handlers.onToolCalls?.(chunk.toolCalls)
   }
   if (chunk.model && !result.model) {
     result.model = chunk.model

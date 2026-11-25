@@ -5,7 +5,8 @@
 // second message used to start without knowing what the first one built.
 // After a run, its tool effects (ToolResult.effect: writes, commands, process
 // starts, page checks) are stored on the assistant message, and this renders
-// them as one compact block sent after that message's text:
+// them as one compact block, sent at the start of the next user message
+// (RUN_LOG_NOTE says why not after the assistant's own text):
 //
 //   [What this run did]
 //   created src/game.js, src/art.js; changed index.html
@@ -35,6 +36,13 @@ const NAMES_PER_LINE = 8
 const COMMANDS_LISTED = 4
 
 export const RUN_LOG_HEADER = '[What this run did]'
+
+/**
+ * The line above the logs at the start of the next user message. They used to
+ * follow the assistant's own text, and a model that read them as its own
+ * words wrote one itself, on replies that ran nothing (agent/phantom-call.ts).
+ */
+export const RUN_LOG_NOTE = '(From Yellowscript, not the person: what the reply above actually did.)'
 
 type FileState = 'created' | 'changed' | 'deleted'
 

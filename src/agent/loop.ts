@@ -67,6 +67,8 @@ import {
   type StagnationLimits,
   runAgentLoop as runCoreLoop,
   wireSafeToolCalls,
+  parseToolCallsFromTurn,
+  type ToolCallParserConfig,
   type AgentMessage,
   type AgentPorts,
   type AgentToolCall,
@@ -77,6 +79,7 @@ import {
 import type { ToolPayloadEntry } from '../tools/registry.ts'
 import { fitMessages, totalTokens, type BudgetMessage, type ContextTracker, type FitReport } from './context-budget.ts'
 import { createKeepNudge } from './keep-nudge.ts'
+import { phantomCall, phantomNote } from './phantom-call.ts'
 import { createVersionNotes } from './version-note.ts'
 
 /**
@@ -366,6 +369,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   /** Replies cut off at REPLY_MAX_TOKENS in this run: the first is asked
    *  for again with a note, the second ends the run. */
   let cutOffs = 0
+  /** Replies dropped for narrating a call they did not make (phantom-call.ts):
+   *  the first is asked for again with a note; after that a reply stands. */
+  let phantoms = 0
   /** A round of calls has run since the last request. */
   let roundOpen = false
   let hitTurnCap = false
@@ -379,6 +385,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
     acc.reasoning = ''
     acc.toolCalls = []
   }
+
+  /** How the core recovers a call written as text; none after a cut stream. */
+  const fallbackParser = (): ToolCallParserConfig | null =>
+    streamCut
+      ? null
+      : {
+          patterns: ['braces', 'xml', 'fn', 'json'],
+          availableTools: options.tools.names.map((name) => ({ name })),
+        }
 
   const ports: AgentPorts = {
     model: {
@@ -527,6 +542,21 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
               acc.reasoning = ''
               continue
             }
+            // No calls, but it reads like it made some: dropped once and asked
+            // again. Only when the fallback parser has nothing to recover;
+            // a call written as text is the core's to run, not a phantom.
+            if (!watch.looping && !result.aborted && result.toolCalls.length === 0 && !turnSignal?.aborted && phantoms === 0) {
+              const reason = phantomCall(result.content, toolRuns.length > 0)
+              const parser = fallbackParser()
+              if (reason && !(parser && parseToolCallsFromTurn(result.content, result.reasoning, parser).length > 0)) {
+                phantoms++
+                handlers.onNotice?.('Dropped a reply that described tool calls without making them; asking again.')
+                pendingNote = phantomNote(reason)
+                acc.content = ''
+                acc.reasoning = ''
+                continue
+              }
+            }
             // Set by onReasoning or onToolCalls during send(), which TypeScript cannot see.
             const caught = watch.looping as Recovery | null
             if (!caught || turnSignal?.aborted) return result
@@ -633,10 +663,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
       },
     },
     steering: { pending: () => false },
-    fallbackParser: () => streamCut ? null : ({
-      patterns: ['braces', 'xml', 'fn', 'json'],
-      availableTools: options.tools.names.map((name) => ({ name })),
-    }),
+    fallbackParser,
     // A host-resolved call (ask_user, update_plan) also shows as a card.
     ...(options.ask ? { ask: wrapAsk(options.ask, handlers) } : {}),
     ...(options.plan ? { plan: options.plan } : {}),

@@ -37,7 +37,8 @@ import type { ContextTracker, FitReport } from '../agent/context-budget.ts'
 import type { AskAnswer, AskRequest, PlanStep, Recovery, StagnationLimits } from '../agent/agent-core.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import type { ToolContext, ToolEffect } from '../tools/types.ts'
-import { FULL_LOGS_KEPT, collapsedRunLog, formatRunLog } from './run-log.ts'
+import { FULL_LOGS_KEPT, RUN_LOG_NOTE, collapsedRunLog, formatRunLog } from './run-log.ts'
+import { withoutCopiedTail } from '../agent/phantom-call.ts'
 import { userContent } from './attachments.ts'
 import { appendPart } from './turn-parts.ts'
 
@@ -747,6 +748,8 @@ export class ChatSession {
     const vision = this.deps.context?.()?.vision === true
     const fullFrom = assistants.length - FULL_LOGS_KEPT
     let assistantIndex = -1
+    /** Run logs owed to the next user message. */
+    const logs: string[] = []
 
     for (const message of this.messages) {
       if (message.role === 'assistant') {
@@ -754,35 +757,35 @@ export class ChatSession {
         const log = message.run?.length
           ? assistantIndex >= fullFrom ? formatRunLog(message.run) : collapsedRunLog(message.run)
           : null
+        // What the run did is real even when the turn failed. It rides on
+        // the next user message, never in the assistant's own words: a model
+        // that sees the log as something it said writes one itself, and did,
+        // on replies that ran nothing (agent/phantom-call.ts).
+        if (log) logs.push(log)
         // A failed turn's text stays out (replaying an error teaches the model
-        // to imitate it), but what its run did is real.
-        if (message.error) {
-          if (log) messages.push({ role: 'assistant', content: log })
-          continue
-        }
-        if (!message.content && !message.reasoning && !log) continue
-        const entry: ChatCompletionRequest['messages'][number] = {
-          role: 'assistant',
-          content: log ? (message.content ? `${message.content}\n\n${log}` : log) : message.content,
-        }
-        if (INCLUDE_REASONING_IN_CONTEXT && message.reasoning) {
-          entry.reasoning_content = message.reasoning
-        }
+        // to imitate it).
+        if (message.error) continue
+        const content = replayText(message)
+        const reasoning = INCLUDE_REASONING_IN_CONTEXT ? message.reasoning : undefined
+        if (!content && !reasoning) continue
+        const entry: ChatCompletionRequest['messages'][number] = { role: 'assistant', content }
+        if (reasoning) entry.reasoning_content = reasoning
         messages.push(entry)
       } else {
-        messages.push({ role: 'user', content: userContent(message.content, message.attachments, vision) })
+        let content = userContent(message.content, message.attachments, vision)
+        if (logs.length) content = prependText(content, runLogNote(logs.splice(0)))
+        messages.push({ role: 'user', content })
       }
     }
+    // A run log with no user message after it (not the usual send) still goes.
+    if (logs.length) messages.push({ role: 'user', content: runLogNote(logs) })
 
     // Live state goes on the newest message, not in the system message: it
     // changes whenever a process starts or stops, and a change at the start
     // of the request would cost the whole prompt cache.
     const live = registry ? (this.deps.liveState?.() ?? null) : null
     const newest = messages.at(-1)
-    if (live && newest?.role === 'user') {
-      if (typeof newest.content === 'string') newest.content = `[${live}]\n\n${newest.content}`
-      else newest.content = newest.content.map((part, i) => (i === 0 && part.type === 'text' ? { ...part, text: `[${live}]\n\n${part.text}` } : part))
-    }
+    if (live && newest?.role === 'user') newest.content = prependText(newest.content, `[${live}]`)
 
     // No `tools` in Phase 1. That is load-bearing, not an omission: the gateway
     // only claims Nest capabilities in its injected system prompt when the
@@ -795,6 +798,58 @@ export class ChatSession {
   private nextId(): string {
     return this.deps.newId ? this.deps.newId() : `m${Date.now()}${Math.random().toString(36).slice(2, 8)}`
   }
+}
+
+type RequestContent = ChatCompletionRequest['messages'][number]['content']
+
+/**
+ * What an earlier assistant turn is replayed as: its answer, the text after
+ * the run's last tool call (or a dropped reply's notice). The narration in
+ * between ("Let me read Hero.svelte:") goes without the calls it announced,
+ * so replayed it reads as announcing a call and going straight on, and the
+ * model learned to do exactly that (agent/phantom-call.ts).
+ *
+ * `content` is the record and `parts` only what was painted, so the parts are
+ * used only when their text is the content: a turn saved before `parts`
+ * existed, or a reply the host set without painting it, is sent whole. A run
+ * log or think tag the model wrote itself is cut off either way.
+ */
+export function replayText(message: Pick<ChatMessageView, 'content' | 'parts'>): string {
+  let text = message.content
+  const parts = message.parts ?? []
+  const painted = parts.map((part) => (part.kind === 'text' ? part.text : '')).join('')
+  // A reply dropped by the loop was painted but is not in the content.
+  const kept = parts.some((part) => part.kind === 'notice') || sameText(painted, message.content)
+  if (parts.length && kept) {
+    let from = 0
+    parts.forEach((part, i) => {
+      if (part.kind === 'tool' || part.kind === 'notice') from = i + 1
+    })
+    text = parts
+      .slice(from)
+      .map((part) => (part.kind === 'text' ? part.text : ''))
+      .join('')
+  }
+  return withoutCopiedTail(text).trim()
+}
+
+/** The same text but for whitespace (the loop joins replies with blank lines). */
+function sameText(a: string, b: string): boolean {
+  const squash = (s: string) => s.replace(/\s+/g, '')
+  return squash(a) === squash(b)
+}
+
+/** The run logs owed to a user message, said to be Yellowscript's. */
+function runLogNote(logs: readonly string[]): string {
+  return `${RUN_LOG_NOTE}\n${logs.join('\n\n')}`
+}
+
+/** `text` and a blank line before a user message's content. */
+function prependText(content: RequestContent, text: string): RequestContent {
+  if (typeof content === 'string') return `${text}\n\n${content}`
+  const first = content[0]
+  if (first?.type === 'text') return [{ ...first, text: `${text}\n\n${first.text}` }, ...content.slice(1)]
+  return [{ type: 'text', text }, ...content]
 }
 
 function buildStats(timings: StreamTimings | undefined, finishReason: string | undefined): TurnStats | undefined {

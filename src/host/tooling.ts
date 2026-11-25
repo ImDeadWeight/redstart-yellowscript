@@ -17,7 +17,7 @@ import type { AskApproval } from '../chat/approvals.ts'
 import { PLAN_DIR } from '../chat/plan-file.ts'
 import type { HostMessage } from '../chat/protocol.ts'
 import { approvalInfo, callWithApproval } from '../nest/approval.ts'
-import type { NestClient } from '../nest/client.ts'
+import { nestFetch, type NestClient } from '../nest/client.ts'
 import { McpHost, withProjectMeta, type McpTool } from '../nest/mcp-host.ts'
 import { BackgroundProcesses } from '../tools/background-processes.ts'
 import { stripAnsi } from '../tools/command-run.ts'
@@ -143,7 +143,7 @@ export function createTooling(deps: ToolingDeps): Tooling {
       {
         baseUrl: client.baseUrl,
         listMcpServers: (signal) => client.listMcpServers(signal),
-        fetch: (input, init) => fetch(input, init),
+        fetch: nestFetch,
         getCredential: () => client.getCredential(),
       },
       {

@@ -376,6 +376,34 @@ npm run icons      # regenerate media/ icons from assets/mascot/
 npm run package    # check + build + vsce package
 ```
 
+### Installing and releasing
+
+To use Yellowscript in any folder rather than the F5 development host, build
+the package and install it into VS Code:
+
+```bash
+npm run package
+code --install-extension redstart-yellowscript-<version>.vsix --force
+```
+
+Then reload any open windows (*Developer: Reload Window*). `--force` replaces
+an installed copy of the same version. In the F5 development host, the
+development copy still takes precedence over the installed one.
+
+A release is a tag that matches `package.json`'s version, made on `main`.
+`.github/workflows/release.yml` runs `npm run package` on Windows and attaches
+the `.vsix` to a GitHub release with generated notes:
+
+```bash
+npm version patch          # or minor / major; commits and tags v<version>
+git push --follow-tags
+```
+
+A version with a pre-release part (`0.2.0-beta.1`) becomes a pre-release. A
+tag that does not match `package.json` fails the run. To build the `.vsix`
+without releasing, run the workflow by hand (Actions → Release → Run
+workflow) and download it from the run's artifacts.
+
 ### The agent loop is agent-core
 
 The loop (turns, the per-reply call limit, recovering calls a model wrote as

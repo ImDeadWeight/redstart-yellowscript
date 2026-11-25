@@ -5,6 +5,7 @@ import { EMPTY_CONVERSATION_STATE, PROTOCOL_VERSION, type HostMessage } from '..
 import {
   commandView,
   contextMeter,
+  draftingNote,
   waitingNote,
   applyHostMessage,
   atQuery,
@@ -75,6 +76,23 @@ describe('applyHostMessage', () => {
       { kind: 'notice', text: 'Changed approach: going in a circle' },
       { kind: 'reasoning', text: 'fresh' },
     ])
+  })
+
+  test('a call being written shows on its turn until it arrives, is dropped, or the turn ends', () => {
+    const msg = { type: 'message', conversationId: 'c1', message: { id: 't1', role: 'assistant', content: '', streaming: true } } as const
+    const drafting = { type: 'turn/drafting', conversationId: 'c1', id: 't1', tool: 'ys_run_command', chars: 12_400 } as const
+    const writing = run(init(), msg, drafting)
+    assert.deepEqual(writing.messages[0]?.drafting, { tool: 'ys_run_command', chars: 12_400 })
+    assert.equal(draftingNote(writing.messages[0]!.drafting!), 'Writing the ys_run_command call · 12k characters')
+    assert.equal(draftingNote({ tool: '', chars: 512 }), 'Writing a tool call · 512 characters')
+    const arrived = run(init(), msg, drafting, {
+      type: 'tool/call', conversationId: 'c1', turnId: 't1', callId: 'c1', name: 'ys_run_command', arguments: '{}', recovered: false,
+    })
+    assert.equal(arrived.messages[0]?.drafting, undefined)
+    const dropped = run(init(), msg, drafting, { type: 'turn/notice', conversationId: 'c1', id: 't1', text: 'Changed approach' })
+    assert.equal(dropped.messages[0]?.drafting, undefined)
+    const ended = run(init(), msg, drafting, { type: 'turn/completed', conversationId: 'c1', id: 't1', aborted: true })
+    assert.equal(ended.messages[0]?.drafting, undefined)
   })
 
   test('a queued prompt with the same id updates in place', () => {

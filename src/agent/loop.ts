@@ -107,6 +107,7 @@ export const STAGNATION_OFF: Partial<StagnationLimits> = {
   repeatedShare: Infinity,
   theorizingChars: Infinity,
   reversals: Infinity,
+  argumentSpan: Infinity,
 }
 
 /** Just the part of NestClient the loop needs, so tests can supply a fake. */
@@ -163,6 +164,29 @@ export interface AgentLoopHandlers extends StreamHandlers {
   onContextTrimmed?: (report: FitReport) => void
   /** The run was noticed going nowhere, and what is done about it. */
   onRecovery?: (recovery: Recovery) => void
+  /** A tool call is being written: its name (once known) and its arguments'
+   *  length so far. Every DRAFT_STEP characters, not on every delta. */
+  onDrafting?: (tool: string, chars: number) => void
+  /** A line about the run for the turn's timeline (a reply cut off). */
+  onNotice?: (text: string) => void
+}
+
+/** The most tokens one reply may run to. llama-server's default is no limit:
+ *  Ornith on Crestline (2026-11-24) wrote 19,352 tokens into one tool call
+ *  over ten minutes. Long enough for a large file in one call; the
+ *  theorizing detector already stops reasoning near 10k tokens. */
+export const REPLY_MAX_TOKENS = 16_384
+
+/** How often a call being written is reported, in characters. */
+const DRAFT_STEP = 256
+
+/** What the model reads after a reply that hit REPLY_MAX_TOKENS. */
+export function cutOffNote(maxTokens: number, inCall: string | null): string {
+  return (
+    `[Your last reply was dropped: it reached the ${maxTokens}-token limit for one reply without finishing` +
+    (inCall ? `, inside a ${inCall} call` : '') +
+    '. That usually means it was repeating itself. Send a short, complete reply; write a long file in parts.]'
+  )
 }
 
 /**
@@ -339,6 +363,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
   let pendingNote: string | null = null
   /** Stopped as stuck: what the person reads instead of another request. */
   let stuck: Recovery | null = null
+  /** Replies cut off at REPLY_MAX_TOKENS in this run: the first is asked
+   *  for again with a note, the second ends the run. */
+  let cutOffs = 0
   /** A round of calls has run since the last request. */
   let roundOpen = false
   let hitTurnCap = false
@@ -383,8 +410,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           if (report.stubbed) trimmed = true
           if (report.stubbed || report.shrunk || report.capped) handlers.onContextTrimmed?.(report)
         }
-        /** A reasoning loop caught while this response streamed (set in a callback). */
-        const watch: { looping: Recovery | null } = { looping: null }
+        /** A reasoning or argument loop caught while this response streamed
+         *  (set in a callback), and the call being written when it ended. */
+        const watch: { looping: Recovery | null; inCall: string | null } = { looping: null, inCall: null }
         const send = (): Promise<StreamResult> => {
           // Its own controller, so a reasoning loop can drop this response
           // without ending the run.
@@ -393,6 +421,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
           if (turnSignal?.aborted) request.abort()
           else turnSignal?.addEventListener('abort', stop, { once: true })
           monitor.startResponse()
+          watch.inCall = null
+          /** This response's calls being written, by stream index. */
+          const drafts = new Map<number, { name: string; chars: number; reported: number }>()
           workingState.setPlan(options.plan?.get())
           const note = pendingNote
           // A stuck run's note is the one to read: no reminder beside it.
@@ -406,6 +437,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
                 // Sending tools changes what the gateway injects: it only claims
                 // Nest capabilities when a request actually carries them.
                 tools: toolPayload,
+                max_tokens: options.request.max_tokens ?? REPLY_MAX_TOKENS,
               },
               {
                 ...handlers,
@@ -423,6 +455,31 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
                   if (recovery) {
                     watch.looping = recovery
                     request.abort()
+                  }
+                },
+                // A call's arguments as they are written: watched for a loop
+                // (detector f), and reported so the person sees it working.
+                onToolCalls: (deltas) => {
+                  handlers.onToolCalls?.(deltas)
+                  for (const delta of deltas) {
+                    const index = delta.index ?? 0
+                    const draft = drafts.get(index) ?? { name: '', chars: 0, reported: 0 }
+                    drafts.set(index, draft)
+                    if (delta.function?.name) draft.name = delta.function.name
+                    watch.inCall = draft.name || null
+                    const args = delta.function?.arguments ?? ''
+                    if (!args) continue
+                    draft.chars += args.length
+                    if (draft.chars - draft.reported >= DRAFT_STEP) {
+                      draft.reported = draft.chars
+                      handlers.onDrafting?.(draft.name, draft.chars)
+                    }
+                    if (watch.looping) continue
+                    const recovery = monitor.toolArguments(index, args, draft.name ? callKind(draft.name, '{}') : undefined)
+                    if (recovery) {
+                      watch.looping = recovery
+                      request.abort()
+                    }
                   }
                 },
               },
@@ -447,7 +504,30 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentResu
               if (!watch.looping || turnSignal?.aborted) throw err
               result = { content: acc.content, reasoning: acc.reasoning, toolCalls: [], aborted: true }
             }
-            // Set by onReasoning during send(), which TypeScript cannot see.
+            // Cut off at the reply limit: what arrived is not a whole reply,
+            // and a half-written call must not run. Asked for once more with
+            // a note; a second cut-off ends the run, said to the person.
+            if (!watch.looping && !result.aborted && result.finishReason === 'length' && !turnSignal?.aborted) {
+              cutOffs++
+              const maxTokens = options.request.max_tokens ?? REPLY_MAX_TOKENS
+              const where = watch.inCall ? ` inside a ${watch.inCall} call` : ''
+              if (cutOffs > 1) {
+                handlers.onNotice?.(`Stopped: a reply reached the ${maxTokens}-token limit again${where}.`)
+                return {
+                  ...result,
+                  toolCalls: [],
+                  content:
+                    `I stopped because my replies kept running to the ${maxTokens}-token limit without finishing${where}, ` +
+                    'which usually means the model was repeating itself. A hint, or a smaller step, would help. How would you like me to continue?',
+                }
+              }
+              handlers.onNotice?.(`Dropped a reply that reached the ${maxTokens}-token limit${where}; asking again.`)
+              pendingNote = cutOffNote(maxTokens, watch.inCall)
+              acc.content = ''
+              acc.reasoning = ''
+              continue
+            }
+            // Set by onReasoning or onToolCalls during send(), which TypeScript cannot see.
             const caught = watch.looping as Recovery | null
             if (!caught || turnSignal?.aborted) return result
             handlers.onRecovery?.(caught)

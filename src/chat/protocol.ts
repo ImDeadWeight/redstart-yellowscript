@@ -64,6 +64,9 @@ export interface ChatMessageView {
   error?: string
   /** True while this turn is still streaming. */
   streaming?: boolean
+  /** A tool call the model is writing right now (webview only; cleared when
+   *  the call arrives whole or the turn ends). */
+  drafting?: { tool: string; chars: number }
   /** True when the user stopped this turn — partial content is still valid. */
   aborted?: boolean
   /** True while this prompt is queued behind a turn that is still running. It
@@ -416,6 +419,10 @@ export type HostMessage =
   | { type: 'composerText'; conversationId: string; text: string }
   /** A line about the run itself in the turn's timeline (a stagnation recovery). */
   | { type: 'turn/notice'; conversationId: string; id: string; text: string }
+  /** The model is writing a tool call: its name (empty until known) and how
+   *  long its arguments are so far. Progress only; the call itself comes as
+   *  `tool/call` once it is whole. */
+  | { type: 'turn/drafting'; conversationId: string; id: string; tool: string; chars: number }
   // Tool activity gets its own message types rather than a third text channel.
   // A tool call is STRUCTURE, and `turn/delta` carries text — repurposing it
   // would mean the renderer parsing prose to find out what ran. Both carry the

@@ -99,6 +99,14 @@ export function initialViewState(): ViewState {
 
 let noticeId = 0
 
+/** The message without a call being written (it arrived, or was dropped). */
+function undrafted(m: ChatMessageView): ChatMessageView {
+  if (!m.drafting) return m
+  const next = { ...m }
+  delete next.drafting
+  return next
+}
+
 /** Update one message by id; a no-op when it is not on screen. */
 function patch(state: ViewState, id: string, change: (m: ChatMessageView) => ChatMessageView): ViewState {
   let hit = false
@@ -184,12 +192,18 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
 
     case 'turn/notice':
       if (elsewhere(state, message.conversationId)) return state
-      return patch(state, message.id, (m) => ({ ...m, parts: appendPart(m.parts, { kind: 'notice', text: message.text }) }))
+      // A notice mid-stream is a dropped reply: the call it was writing is gone.
+      return patch(state, message.id, (m) => ({ ...undrafted(m), parts: appendPart(m.parts, { kind: 'notice', text: message.text }) }))
+
+    case 'turn/drafting':
+      if (elsewhere(state, message.conversationId)) return state
+      return patch(state, message.id, (m) => ({ ...m, drafting: { tool: message.tool, chars: message.chars } }))
 
     case 'turn/completed':
       if (elsewhere(state, message.conversationId)) return state
       return patch(state, message.id, (m) => {
         const next: ChatMessageView = { ...m, streaming: false }
+        delete next.drafting
         if (message.stats) next.stats = message.stats
         if (message.aborted) next.aborted = true
         return next
@@ -197,7 +211,7 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
 
     case 'turn/failed':
       if (elsewhere(state, message.conversationId)) return state
-      return patch(state, message.id, (m) => ({ ...m, streaming: false, error: message.message }))
+      return patch(state, message.id, (m) => ({ ...undrafted(m), streaming: false, error: message.message }))
 
     case 'tool/call':
       if (elsewhere(state, message.conversationId)) return state
@@ -205,7 +219,7 @@ export function applyHostMessage(state: ViewState, message: HostMessage): ViewSt
         const tools = m.tools ?? []
         if (tools.some((t) => t.callId === message.callId)) return m
         return {
-          ...m,
+          ...undrafted(m),
           tools: [
             ...tools,
             {
@@ -414,6 +428,13 @@ export function contextMeter(usage: { used: number; size: number | null; trimmed
 
 /** What a streaming turn is waiting on, for the line under it; null while
  *  tokens are arriving. `idleMs` is the time since anything last arrived. */
+/** What the bubble says while the model writes a tool call, which shows
+ *  nothing else until the call is whole. */
+export function draftingNote(drafting: { tool: string; chars: number }): string {
+  const size = drafting.chars >= 10_000 ? `${Math.round(drafting.chars / 1_000)}k` : drafting.chars.toLocaleString('en-US')
+  return `Writing ${drafting.tool ? `the ${drafting.tool} call` : 'a tool call'} · ${size} characters`
+}
+
 export function waitingNote(idleMs: number, afterTool: boolean): string | null {
   if (idleMs < 3_000) return null
   const seconds = Math.floor(idleMs / 1_000)

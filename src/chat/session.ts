@@ -519,6 +519,14 @@ export class ChatSession {
             handlers: {
               ...handlers,
               // A stagnation recovery: a line in the timeline, an entry in the run log.
+              onDrafting: (tool: string, chars: number) => {
+                this.emit({ type: 'turn/drafting', id: turn.id, tool, chars })
+              },
+              onNotice: (text: string) => {
+                turn.parts = appendPart(turn.parts, { kind: 'notice', text })
+                this.emit({ type: 'turn/notice', id: turn.id, text })
+                this.deps.onPersist?.()
+              },
               onRecovery: (recovery: Recovery) => {
                 const text = recoveryLine(recovery)
                 turn.parts = appendPart(turn.parts, { kind: 'notice', text })

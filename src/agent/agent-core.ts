@@ -142,7 +142,7 @@ export interface CallOutcome {
   note?: string
 }
 
-export type Detector = 'same-failure' | 'oscillation' | 'no-progress' | 'reasoning-loop' | 'theorizing'
+export type Detector = 'same-failure' | 'oscillation' | 'no-progress' | 'reasoning-loop' | 'theorizing' | 'argument-loop'
 
 export interface Recovery {
   detector: Detector
@@ -169,6 +169,10 @@ export interface StagnationLimits {
   reversals: number
   /** Reasoning characters reversals also need before they fire. */
   reversalChars: number
+  /** How much of a call's arguments must repeat one stretch to fire. */
+  argumentSpan: number
+  /** The longest stretch that counts as repeating. */
+  argumentPeriod: number
 }
 
 export interface StagnationMonitor {
@@ -177,6 +181,8 @@ export interface StagnationMonitor {
   check(call: CallInfo): { refuse: string; reason: 'repeated' | 'blocked' } | null
   record(call: CallInfo, outcome: CallOutcome): void
   reasoning(chunk: string): Recovery | null
+  /** As a tool call's arguments stream: `index` is its place in the response. */
+  toolArguments(index: number, chunk: string, kind?: CallKind): Recovery | null
   endRound(): Recovery | null
   readonly firings: Recovery[]
   readonly level: number

@@ -14,6 +14,7 @@ import {
   withHostTools,
   withTailNotes,
   HARNESS_NOTE_HEADER,
+  REPLY_MAX_TOKENS,
   type CompletionStreamer,
 } from './loop.ts'
 import { MAX_TOOL_CALLS_PER_REPLY, type PlanStep } from './agent-core.ts'
@@ -899,6 +900,60 @@ describe('runAgentLoop — a run that is going nowhere', () => {
     assert.equal(result.content, 'Fixed.')
     assert.equal(result.stopReason, 'complete')
     assert.equal(result.aborted, false)
+  })
+
+  test('a tool call whose arguments loop is caught while it streams, and what it wrote is shown as it goes', async () => {
+    // Crestline, 2026-11-24: 19,352 tokens into one call, seen as "waiting".
+    const requests: ChatCompletionRequest[] = []
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers, signal) {
+        requests.push(structuredClone(request))
+        if (requests.length === 1) {
+          handlers.onToolCalls?.([{ index: 0, id: 'c1', function: { name: 'ys_run_command', arguments: '{"command":"npx sv add vitest","answer":"' } }])
+          for (let i = 0; i < 2000 && !signal?.aborted; i++) handlers.onToolCalls?.([{ index: 0, function: { arguments: 'unit testing, ' } }])
+          return streamResult({ aborted: signal?.aborted === true })
+        }
+        handlers.onContent?.('Done.')
+        return streamResult({ content: 'Done.' })
+      },
+    }
+    const seen: string[] = []
+    const drafts: Array<[string, number]> = []
+    const result = await runAgentLoop({
+      client, request: baseRequest, tools: registry(), toolContext,
+      handlers: { onRecovery: (r) => seen.push(r.detector), onDrafting: (tool, chars) => drafts.push([tool, chars]) },
+    })
+    assert.deepEqual(seen, ['argument-loop'])
+    assert.equal(requests.length, 2)
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /tool call's arguments had reached \d+ characters/)
+    assert.ok(drafts.length > 3 && drafts.every(([tool]) => tool === 'ys_run_command'), JSON.stringify(drafts.slice(0, 3)))
+    assert.ok(drafts.at(-1)![1] < 5_000, 'caught within a few thousand characters, not ten minutes')
+    assert.equal(result.toolRuns.length, 0, 'the half-written call did not run')
+    assert.equal(result.content, 'Done.')
+  })
+
+  test('every request caps the reply; a reply cut off at the cap is asked for again once, then the run stops', async () => {
+    const requests: ChatCompletionRequest[] = []
+    const cut = (): ReturnType<typeof streamResult> => ({
+      ...streamResult({ toolCalls: [{ index: 0, id: 'c1', function: { name: 'ys_write_file', arguments: '{"path":"a.ts","content":"x' } }] }),
+      finishReason: 'length',
+    })
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers) {
+        requests.push(structuredClone(request))
+        handlers.onToolCalls?.([{ index: 0, id: 'c1', function: { name: 'ys_write_file', arguments: '{"path":"a.ts","content":"x' } }])
+        return cut()
+      },
+    }
+    const notices: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onNotice: (t) => notices.push(t) } })
+    assert.ok(requests.every((r) => r.max_tokens === REPLY_MAX_TOKENS), 'the cap rides on every request')
+    assert.equal(requests.length, 2)
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /reached the 16384-token limit for one reply without finishing, inside a ys_write_file call/)
+    assert.equal(result.toolRuns.length, 0, 'a half-written call never runs')
+    assert.match(notices[0]!, /^Dropped a reply/)
+    assert.match(notices[1]!, /^Stopped: a reply reached the 16384-token limit again inside a ys_write_file call/)
+    assert.match(result.content, /How would you like me to continue\?$/)
   })
 })
 

@@ -29,6 +29,8 @@ import {
 import { PathScopeError, describeWorkspacePath, resolveWithinWorkspace } from './workspace-path.ts'
 import { previewOf, summariseChanges, type WriteFs } from './write-file.ts'
 import type { FileChange } from './diff-apply.ts'
+import { noteSeen, seenState } from './read-ledger.ts'
+import { closestText, looseReplace, showLine } from './replace-match.ts'
 
 /** Resolve a workspace path for a write tool, or a model-readable error. */
 function resolveTarget(
@@ -113,10 +115,14 @@ export function createReplaceTool(fs: WriteFs): Tool {
 
       const found = occurrences(before, oldString)
       if (found.length === 0) {
-        return toolError(
-          `old_string was not found in ${requested}. It must match the file exactly, including indentation ` +
-            'and blank lines. Read the file again and copy the text from it.',
-        )
+        // Off only in indentation, and in one place: made there (replace-match.ts).
+        const loose = replaceAll ? null : looseReplace(before, oldRaw, newRaw)
+        if (loose) {
+          noteSeen(context, target.absolute, loose.after)
+          return proposed(requested, target.absolute, before, loose.after, context, `line ${loose.line}`,
+            "old_string matched once with its indentation set aside, so the file's indentation was kept and new_string was indented to fit. Copy indentation exactly next time.")
+        }
+        return toolError(notFound(requested, before, oldRaw, seenState(context, target.absolute, before)))
       }
       if (found.length > 1 && !replaceAll) {
         const lines = found.slice(0, 5).map((i) => lineOf(before, i)).join(', ')
@@ -127,27 +133,61 @@ export function createReplaceTool(fs: WriteFs): Tool {
       }
 
       const after = replaceAll ? before.split(oldString).join(newString) : before.replace(oldString, () => newString)
-      const change: FileChange = {
-        relativePath: requested,
-        absolutePath: target.absolute,
-        isNew: false,
-        isDeleted: false,
-        before,
-        after,
-      }
-      const previews = [previewOf(change, context.workspaceRoots)]
-      const pending: PendingWrite = { label: summariseChanges(previews), changes: previews }
-      const where = describeWorkspacePath(context.workspaceRoots, target.absolute)
+      // Once approved this is the file, and the model wrote it (read-ledger.ts).
+      noteSeen(context, target.absolute, after)
       const count = replaceAll ? `${found.length} occurrence${found.length === 1 ? '' : 's'}` : `line ${lineOf(before, found[0]!)}`
-      return toolOk(
-        `Proposed edit (pending review): replace in ${where} at ${count}.\n` +
-          'The change is staged for your review and will be written only after you approve it.',
-        `ys_replace — ${where} (pending approval)`,
-        false,
-        pending,
-      )
+      return proposed(requested, target.absolute, before, after, context, count)
     },
   }
+}
+
+/** The planned edit, as ys_replace returns it. */
+function proposed(
+  requested: string,
+  absolute: string,
+  before: string,
+  after: string,
+  context: ToolContext,
+  at: string,
+  note?: string,
+): ToolResult {
+  const change: FileChange = { relativePath: requested, absolutePath: absolute, isNew: false, isDeleted: false, before, after }
+  const previews = [previewOf(change, context.workspaceRoots)]
+  const pending: PendingWrite = { label: summariseChanges(previews), changes: previews }
+  const where = describeWorkspacePath(context.workspaceRoots, absolute)
+  return toolOk(
+    `Proposed edit (pending review): replace in ${where} at ${at}.\n` +
+      (note ? `${note}\n` : '') +
+      'The change is staged for your review and will be written only after you approve it.',
+    `ys_replace — ${where} (pending approval)`,
+    false,
+    pending,
+  )
+}
+
+/**
+ * Why old_string is not there, and the file's own text where it comes
+ * closest, so the next call can copy from it without another read.
+ */
+function notFound(requested: string, file: string, oldString: string, seen: 'unread' | 'current' | 'changed'): string {
+  const lines = [`old_string was not found in ${requested}. It must match the file exactly, including indentation and blank lines.`]
+  if (seen === 'changed') lines.push('The file has changed since you last read it (your own earlier edits are in it), so text from that read may be out of date.')
+  else if (seen === 'unread') lines.push('You have not read this file in this run; old_string must be copied from the file, not recalled.')
+  const near = closestText(file, oldString)
+  if (!near || near.matched === 0) {
+    lines.push('None of its lines are in the file. Read the file again and copy the text from it.')
+    return lines.join('\n')
+  }
+  const range = near.startLine === near.endLine ? `line ${near.startLine}` : `lines ${near.startLine}-${near.endLine}`
+  lines.push(`Closest: ${range}, where ${near.matched} of its ${near.total} lines match with whitespace aside.`)
+  if (near.firstDiff) {
+    lines.push(
+      `First difference: your line ${near.firstDiff.wantedLine} is "${showLine(near.firstDiff.wanted)}"; ` +
+        `the file's line ${near.firstDiff.fileLine} is "${showLine(near.firstDiff.actual)}" (\\t is a tab).`,
+    )
+  }
+  lines.push(`The file's ${range}, exactly as it has them:`, '---', near.text, '---')
+  return lines.join('\n')
 }
 
 export function createDeleteFileTool(fs: WriteFs): Tool {

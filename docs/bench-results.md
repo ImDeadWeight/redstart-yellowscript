@@ -61,6 +61,81 @@ about 3,050 tokens and the core set about 2,150, before Nest's tools.
 | Date | Model | Catalog | Pass | Turns/task | Wrong tool | Recovered | Tool list tokens |
 |---|---|---|---|---|---|---|---|
 
+## Hand-run Crestline
+
+The Crestline prompt run by hand in the product, not through `npm run bench`:
+Yellowscript signed in as the `bench` account, in `sample-workspace/` (the
+chats are in that workspace's VS Code storage, `state.vscdb`). Each run starts
+from a fresh scaffold. `npx sv create` and `sv add` install the latest
+releases, so these runs got **SvelteKit 3.x, Vitest 5.1, Vite 8 and TypeScript
+6**, all newer than either model knows. Both models had Nest's tools,
+`web_search` and `web_fetch` included. Context window 131k.
+
+Pass means `npm run check`, `npx vitest run` and `npm run build` all green,
+with no help from the person.
+
+| Date | Model | Chat | Turns | Tool calls (errors) | Web lookups | Recoveries | Outcome |
+|---|---|---|---|---|---|---|---|
+| 2026-11-24 09:59 | Ornith 1.5 9B Q6_K | `468eh9` | 3 | 86 (21) | 0 | (before the checks) | Stopped by hand: theorizing over `sv add`, then a reasoning loop. The evidence for the stuck-run checks ([PLAN-agent-runtime.md](PLAN-agent-runtime.md)) |
+| 2026-11-24 15:35 | Ornith 1.5 9B Q6_K | `0kyy38` | 3 | 100 (32) | 0 | same-failure ×2 | Stopped by hand at the check/test step |
+| 2026-11-24 16:25 | Ornith 1.5 9B Q6_K | `23nvku` | 2 | 55 (12) | 0 | same-failure, reasoning-loop (L2) | Stopped by hand: wrote `$lib/quote` the SvelteKit 2 way and hunted for a `.svelte-kit/tsconfig.json` that SvelteKit 3 no longer writes. Prompted the lookup guidance |
+| 2026-11-24 17:08 | Ornith 1.5 9B Q6_K | `3pq4f7` | 1 | 12 (4) | 0 | none | Stopped by hand after 577 s "waiting": 19,352 tokens inside one tool call, unseen. Prompted the argument-loop check, `max_tokens` and the "Writing the … call" line |
+| 2026-11-24 17:33 | Ornith 1.5 9B Q6_K | (not kept) | 1 | about 100 | 3 | none | Stopped by hand. Scaffolded at the workspace root, not `Crestline/`. `check` green by 17:55 (round 49), then blocked on `npx vitest run` (below) and still investigating after 19:00 (round 73+). Prompted [PLAN-blocked-handoff.md](PLAN-blocked-handoff.md) |
+| 2026-11-24 19:08 | **Qwen3.6 35B A3B UD-Q4_K_XL** | `4rz9mg` | 1 | 84 (19) | 7 | same-failure ×2, oscillation | **Pass** in 38 minutes (19:09 to 19:47), 32 tests, in `Crestline/` as asked |
+
+### The Vitest blocker
+
+From the 17:33 run on, `npx vitest run` failed at the first `describe(` with
+`TypeError: Cannot read properties of undefined (reading 'config')`, and the
+scaffold's own `greet.spec.ts` failed the same way. It is not the model's code:
+
+- It comes and goes. The same command, with no file changed, sometimes runs
+  the tests (11 of 12 passed in the Ornith run's code) and sometimes fails.
+- When it fails, the transformed test file loads `vitest` through Vite's
+  module runner (`/node_modules/vitest/dist/index.js`), a second copy of the
+  module that the test worker never set up, so `describe` finds no runner.
+- Turning off Vitest's module cache (`--no-fsModuleCache`), its dependency
+  pre-bundling, or parallel test files does not stop it. A config with no
+  plugins passed. So the trigger is the SvelteKit plugin in the test
+  pipeline, with Vitest 5.1, SvelteKit 3.4 and Vite 8 together. The exact
+  cause is not known.
+
+**What Qwen did.** It took the SvelteKit plugin out of the test path rather
+than debugging the clash: a standalone `vitest.config.ts` (no plugins,
+`globals: true`, `environment: 'node'`) beside `vite.config.ts`, which keeps
+the plugin for dev and build. It also switched the tests to Vitest's globals,
+so they no longer import `vitest` at all; that leaves no second copy to load.
+`svelte-check` then needed `"types": ["$app/types", "vitest/globals"]` in
+`tsconfig.json`. This fits this project because `quote.ts` is plain
+TypeScript. Component tests would need the plugin back.
+
+It also found the SvelteKit 3 changes Ornith had stumbled on: `$lib` is now
+`#lib` (the build failed until it switched), and there is no
+`svelte.config.js`, as the configuration moved into the `sveltekit()` plugin.
+It wrote a `svelte.config.js` and then took it back out, which the
+oscillation check caught. Its 7 lookups (5 `web_search`, 2 `web_fetch`) were
+mostly about the SvelteKit 3 config layout, one of them to the `wikipedia`
+source.
+
+### What the runs show
+
+- **The model size gap is real.** Qwen3.6 35B A3B runs at about the same
+  speed as the 9B here (about 32 tokens/s), because only 3B parameters are
+  active per token. On the same task and the same toolchain break, it found a
+  workaround and finished. The 9B investigated well but never stepped back.
+- **For the 9B, the right outcome was a hand-off, not a fix.** The blocker
+  was not in its code, and its three lookups turned up nothing it used. It should have told
+  the person around round 61 instead of investigating for another hour:
+  [PLAN-blocked-handoff.md](PLAN-blocked-handoff.md).
+- **The task is not fixed.** Unpinned scaffolding means each run can get
+  different releases, and the break above came with this week's. Pin `sv` and
+  the dependency versions for comparisons over time, and keep a "latest"
+  variant for testing how a model copes with new releases.
+- **The harness changes held up.** Both models used the lookup tools once
+  the guidance was in, Qwen on the SvelteKit 3 differences, and the stuck-run
+  checks fired three times in the Qwen run without stopping a run that was
+  getting somewhere.
+
 ## Notes on runs
 
 (None yet.)

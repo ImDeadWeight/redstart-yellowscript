@@ -129,7 +129,9 @@ describe('runTask', () => {
     const record = await runTask(followUp, { client, label: 'scripted' })
     assert.equal(record.pass, true, record.check)
     const second = client.requests[2]!.messages
-    assert.equal(second.at(-2)!.content, 'Added greet in src/lib/greeting.js.\n\n[What this run did]\ncreated src/lib/greeting.js')
+    assert.equal(second.at(-2)!.content, 'Added greet in src/lib/greeting.js.')
+    // The log rides on the follow-up, not in the assistant's words.
+    assert.match(String(second.at(-1)!.content), /^\(From Yellowscript, not the person: [^\n]*\)\n\[What this run did\]\ncreated src\/lib\/greeting\.js\n\n/)
     assert.match(String(second.at(-1)!.content), /optional second parameter/)
   })
 

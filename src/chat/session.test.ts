@@ -996,8 +996,11 @@ describe('ChatSession run log', () => {
     emptyResult({ toolCalls: [{ index: 0, id: `c-${name}`, function: { name, arguments: JSON.stringify(args) } }] })
   const assistantTexts = (req: ChatCompletionRequest) =>
     req.messages.filter((m) => m.role === 'assistant').map((m) => m.content as string)
+  const userTexts = (req: ChatCompletionRequest) =>
+    req.messages.filter((m) => m.role === 'user').map((m) => m.content as string)
+  const NOTE = '(From Yellowscript, not the person: what the reply above actually did.)'
 
-  test('the second message knows which file the first one wrote', async () => {
+  test('the second message knows which file the first one wrote, from a note on the user message', async () => {
     const { s, requests } = session([
       call('ys_write_file', { path: 'src/new.js', content: 'export const a = 1\n' }),
       says('Created src/new.js.'),
@@ -1006,7 +1009,13 @@ describe('ChatSession run log', () => {
     await s.send('build X')
     await s.send('now change the file you made')
     const second = requests.at(-1)!
-    assert.deepEqual(assistantTexts(second), ['Created src/new.js.\n\n[What this run did]\ncreated src/new.js'])
+    // Never in the assistant's own words: a model that reads the log as its
+    // own writes one itself (agent/phantom-call.ts).
+    assert.deepEqual(assistantTexts(second), ['Created src/new.js.'])
+    assert.deepEqual(userTexts(second), [
+      'build X',
+      `${NOTE}\n[What this run did]\ncreated src/new.js\n\nnow change the file you made`,
+    ])
   })
 
   test('a rejected write is sent as rejected', async () => {
@@ -1016,7 +1025,7 @@ describe('ChatSession run log', () => {
     )
     await s.send('change x')
     await s.send('again')
-    assert.match(assistantTexts(requests.at(-1)!)[0]!, /rejected, NOT written: game\.js/)
+    assert.match(userTexts(requests.at(-1)!)[1]!, /rejected, NOT written: game\.js/)
   })
 
   test('a turn that failed after a write still sends what it did, without its error', async () => {
@@ -1029,9 +1038,44 @@ describe('ChatSession run log', () => {
     ])
     await s.send('build')
     await s.send('what happened?')
-    const texts = assistantTexts(requests.at(-1)!)
-    assert.deepEqual(texts, ['[What this run did]\ncreated half.js'])
-    assert.ok(!texts.join('').includes('stream died'))
+    const last = requests.at(-1)!
+    assert.deepEqual(assistantTexts(last), [])
+    assert.equal(userTexts(last)[1], `${NOTE}\n[What this run did]\ncreated half.js\n\nwhat happened?`)
+    assert.ok(!JSON.stringify(last.messages).includes('stream died'))
+  })
+
+  test("an earlier turn is replayed as its answer, without the narration between its calls", async () => {
+    // redstart-website, 2026-11-25: replayed as "Let me read page.txt:\n\nThe
+    // link is …", the narration taught the model to announce a call and go on
+    // without making it.
+    fs.writeFileSync(path.join(workspace, 'page.txt'), 'old link\n')
+    const { s, requests } = session([
+      async (_req, handlers) => {
+        handlers.onContent?.('Let me read page.txt:')
+        return emptyResult({ content: 'Let me read page.txt:', toolCalls: [{ index: 0, id: 'c1', function: { name: 'ys_read_file', arguments: '{"path":"page.txt"}' } }] })
+      },
+      says('The link is on line 1.'),
+      says('ok'),
+    ])
+    await s.send('where is the link?')
+    await s.send('thanks')
+    assert.deepEqual(assistantTexts(requests.at(-1)!), ['The link is on line 1.'])
+  })
+
+  test('a run log the model wrote itself is cut off before it is replayed; the real one goes', async () => {
+    // After real calls a copied log is not asked again (the loop's phantom
+    // check), so it reaches the transcript, and is cut off here.
+    const { s, requests } = session([
+      call('ys_write_file', { path: 'pinned.js', content: '1\n' }),
+      says('Done — links pinned.\n\n[What this run did]\nran `git commit` → fb95909'),
+      says('ok'),
+    ])
+    await s.send('pin the links')
+    await s.send('thanks')
+    const last = requests.at(-1)!
+    assert.deepEqual(assistantTexts(last), ['Done — links pinned.'])
+    assert.equal(userTexts(last)[1], `${NOTE}\n[What this run did]\ncreated pinned.js\n\nthanks`)
+    assert.ok(!JSON.stringify(last.messages).includes('fb95909'), 'the invented line is gone')
   })
 
   test('a run that only read sends no log', async () => {
@@ -1048,10 +1092,11 @@ describe('ChatSession run log', () => {
     const { s, requests } = session(scripts)
     for (let i = 0; i < 7; i++) await s.send(`make f${i}`)
     await s.send('done?')
-    const texts = assistantTexts(requests.at(-1)!)
-    assert.equal(texts.length, 7)
-    assert.equal(texts[0], 'made f0\n\n[Earlier run: wrote 1 file]')
-    assert.equal(texts[1], 'made f1\n\n[What this run did]\ncreated f1.js')
+    const last = requests.at(-1)!
+    assert.equal(assistantTexts(last).length, 7)
+    const users = userTexts(last)
+    assert.equal(users[1], `${NOTE}\n[Earlier run: wrote 1 file]\n\nmake f1`)
+    assert.equal(users[2], `${NOTE}\n[What this run did]\ncreated f1.js\n\nmake f2`)
   })
 
   test('the live line goes on the newest message only, and is not stored', async () => {

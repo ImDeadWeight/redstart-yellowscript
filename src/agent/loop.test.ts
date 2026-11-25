@@ -955,6 +955,53 @@ describe('runAgentLoop — a run that is going nowhere', () => {
     assert.match(notices[1]!, /^Stopped: a reply reached the 16384-token limit again inside a ys_write_file call/)
     assert.match(result.content, /How would you like me to continue\?$/)
   })
+
+  // redstart-website, 2026-11-25: "Let me find the exact line:" and a run log
+  // the model wrote itself, with no call. The person was told the edit was made.
+  const phantom = 'Let me find the exact line:\n\n[What this run did]\nchanged src/routes/+page.svelte'
+
+  test('a reply that narrates a call it did not make is dropped and asked for again, with a note', async () => {
+    fs.writeFileSync(path.join(base, 'page.txt'), 'old link\n')
+    const requests: ChatCompletionRequest[] = []
+    const client: CompletionStreamer = {
+      async streamChatCompletion(request, handlers) {
+        requests.push(structuredClone(request))
+        if (requests.length === 1) {
+          handlers.onContent?.(phantom)
+          return streamResult({ content: phantom })
+        }
+        if (requests.length === 2) return streamResult({ toolCalls: [callDelta('ys_read_file', '{"path":"page.txt"}')] })
+        return streamResult({ content: 'The link is on line 1.' })
+      },
+    }
+    const notices: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onNotice: (t) => notices.push(t) } })
+    assert.equal(requests.length, 3)
+    assert.match(String(requests[1]!.messages.at(-1)!.content), /Your last reply was dropped: it said it would use a tool, made no tool call/)
+    assert.deepEqual(notices, ['Dropped a reply that described tool calls without making them; asking again.'])
+    assert.deepEqual(result.toolRuns.map((r) => r.call.function.name), ['ys_read_file'])
+    assert.equal(result.content, 'The link is on line 1.', 'the dropped text is not part of the answer')
+  })
+
+  test('only the first phantom in a run is asked again; the next one stands', async () => {
+    const client = scriptedStreamer([streamResult({ content: phantom }), streamResult({ content: phantom })])
+    const notices: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onNotice: (t) => notices.push(t) } })
+    assert.equal(client.requests.length, 2)
+    assert.equal(notices.length, 1)
+    assert.equal(result.content, phantom)
+  })
+
+  test('a call written as text goes to the fallback parser, not the phantom check', async () => {
+    fs.writeFileSync(path.join(base, 'page.txt'), 'old link\n')
+    const text = 'Let me read it:\n\n<tool_call>\n{"name": "ys_read_file", "arguments": {"path": "page.txt"}}\n</tool_call>'
+    const client = scriptedStreamer([streamResult({ content: text }), streamResult({ content: 'Line 1.' })])
+    const notices: string[] = []
+    const result = await runAgentLoop({ client, request: baseRequest, tools: registry(), toolContext, handlers: { onNotice: (t) => notices.push(t) } })
+    assert.deepEqual(notices, [])
+    assert.equal(result.toolRuns.length, 1)
+    assert.equal(result.toolRuns[0]!.recovered, true)
+  })
 })
 
 describe('withTailNotes', () => {

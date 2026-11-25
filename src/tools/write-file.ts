@@ -30,6 +30,8 @@
 
 import * as fs from 'node:fs'
 
+import { noteSeen } from './read-ledger.ts'
+
 import {
   assertWorkspaceToolName,
   stringArg,
@@ -253,6 +255,8 @@ export function createWriteFileTool(fs: WriteFs): Tool {
       }
       const previews = [previewOf(change, context.workspaceRoots)]
       const pending: PendingWrite = { label: summariseChanges(previews), changes: previews }
+      // The model wrote it, so it knows this version (read-ledger.ts).
+      noteSeen(context, absolute, content)
 
       const body =
         `Proposed write (pending review): ${isNew ? 'CREATE' : 'REPLACE'} ` +

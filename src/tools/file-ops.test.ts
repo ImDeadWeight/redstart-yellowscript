@@ -13,6 +13,9 @@ import { autoApplyReason, type ApprovalStore } from './approval.ts'
 import { CheckpointManager, type GitBackend } from './checkpoint.ts'
 import type { WriteFs } from './write-file.ts'
 import type { ToolContext } from './types.ts'
+import { noteSeen } from './read-ledger.ts'
+import { createReadFileTool } from './read-file.ts'
+import { nodeWriteFs } from './write-file.ts'
 
 // Containment resolves real paths, so the workspace root must exist; the files
 // themselves live in memory.
@@ -72,6 +75,118 @@ describe('ys_replace', () => {
   it('a "$" in new_string is literal, not a replacement pattern', async () => {
     const result = await tool.execute({ path: 'a.ts', old_string: 'const b = 2', new_string: "const b = '$&$1'" }, ctx)
     assert.match(result.pendingWrite!.changes[0]!.after, /const b = '\$&\$1'/)
+  })
+})
+
+// The redstart-website chats (2026-11-25): 44 of 173 ys_replace calls failed,
+// nearly all on indentation, most often the first line's, in tab-indented
+// CRLF Svelte files.
+describe('ys_replace when old_string is off', () => {
+  const page = [
+    '<script>',
+    '\tconst projects = [',
+    '\t\t{',
+    "\t\t\tname: 'Dungeonbooks',",
+    "\t\t\tdescription: 'Old',",
+    '\t\t},',
+    '\t];',
+    '</script>',
+    '',
+  ].join('\r\n')
+  const twice = '<div>\n\t<p>a</p>\n</div>\n<div>\n\t<p>a</p>\n</div>\n'
+  const fs = memoryFs({ 'page.svelte': page, 'twice.svelte': twice })
+  const tool = createReplaceTool(fs)
+  const fresh = (): ToolContext => ({ workspaceRoots: [root] })
+
+  it('a first line indented wrong is matched, and the file keeps its indentation', async () => {
+    // (One indented short is a plain substring of the file's line, and
+    // matches exactly already.)
+    const result = await tool.execute({
+      path: 'page.svelte',
+      old_string: "\t\t\t\t{\n\t\t\tname: 'Dungeonbooks',\n\t\t\tdescription: 'Old',",
+      new_string: "\t\t\t\t{\n\t\t\tname: 'Dungeonbooks',\n\t\t\tdescription: 'Android and Windows',",
+    }, fresh())
+    assert.equal(result.isError, false, result.content)
+    assert.equal(result.pendingWrite!.changes[0]!.after, page.replace("'Old'", "'Android and Windows'"))
+    assert.match(result.content, /line 3/)
+    assert.match(result.content, /indentation set aside/)
+  })
+
+  it('a block shifted by one tab throughout is shifted back, new lines with it', async () => {
+    const result = await tool.execute({
+      path: 'page.svelte',
+      old_string: "\t\tname: 'Dungeonbooks',\n\t\tdescription: 'Old',",
+      new_string: "\t\tname: 'Dungeonbooks',\n\t\ticon: '/db.png',\n\t\tdescription: 'Old',",
+    }, fresh())
+    assert.equal(result.isError, false, result.content)
+    assert.equal(result.pendingWrite!.changes[0]!.after, page.replace("\t\t\tdescription", "\t\t\ticon: '/db.png',\r\n\t\t\tdescription"))
+  })
+
+  it('indentation off by different amounts on different lines is not guessed at', async () => {
+    const result = await tool.execute({
+      path: 'page.svelte',
+      old_string: "\t{\n\tname: 'Dungeonbooks',\n\t\t\t\t\tdescription: 'Old',",
+      new_string: 'x',
+    }, fresh())
+    assert.equal(result.isError, true)
+    assert.equal(result.pendingWrite, undefined)
+    assert.match(result.content, /Closest: lines 3-5, where 3 of its 3 lines match with whitespace aside/)
+    assert.match(result.content, /your line 1 is "\\t\{"; the file's line 3 is "\\t\\t\{"/)
+    assert.match(result.content, /exactly as it has them:\n---\n\t\t\{\n\t\t\tname: 'Dungeonbooks',\n\t\t\tdescription: 'Old',\n---$/)
+  })
+
+  it('a loose match in two places is not made', async () => {
+    const result = await tool.execute({ path: 'twice.svelte', old_string: '<p>a</p>', new_string: '<p>b</p>' }, fresh())
+    // The exact text is in it twice: the usual ambiguity error.
+    assert.match(result.content, /appears 2 times/)
+    const loose = await tool.execute({ path: 'twice.svelte', old_string: '<div>\n<p>a</p>', new_string: '<div>\n<p>b</p>' }, fresh())
+    assert.equal(loose.isError, true)
+    assert.equal(loose.pendingWrite, undefined)
+  })
+
+  it('a wrong line is pointed at, with the file text to copy', async () => {
+    const result = await tool.execute({
+      path: 'page.svelte',
+      old_string: "\t\t\tname: 'Dungeonbooks',\n\t\t\tdescription: 'A digital tool',",
+      new_string: 'x',
+    }, fresh())
+    assert.equal(result.isError, true)
+    assert.match(result.content, /Closest: lines 4-5, where 1 of its 2 lines match/)
+    assert.match(result.content, /your line 2 is "\\t\\t\\tdescription: 'A digital tool',"; the file's line 5 is "\\t\\t\\tdescription: 'Old',"/)
+  })
+
+  it('says when the file changed since it was read, or was never read', async () => {
+    const context = fresh()
+    const absolute = path.join(root, 'page.svelte')
+    const wrong = { path: 'page.svelte', old_string: "description: 'Older'", new_string: 'x' }
+    assert.match((await tool.execute(wrong, context)).content, /You have not read this file in this run/)
+    noteSeen(context, absolute, 'an earlier version\n')
+    assert.match((await tool.execute(wrong, context)).content, /changed since you last read it/)
+    noteSeen(context, absolute, page)
+    const current = (await tool.execute(wrong, context)).content
+    assert.doesNotMatch(current, /changed since|not read/)
+  })
+
+  it('ys_read_file is what makes a file read', async () => {
+    const context = fresh()
+    nodeFs.writeFileSync(path.join(root, 'real.svelte'), '<p>one</p>\r\n')
+    const real = createReplaceTool(nodeWriteFs)
+    const wrong = { path: 'real.svelte', old_string: '<p>two</p>', new_string: 'x' }
+    assert.match((await real.execute(wrong, context)).content, /not read this file/)
+    await createReadFileTool().execute({ path: 'real.svelte' }, context)
+    assert.doesNotMatch((await real.execute(wrong, context)).content, /changed since|not read/)
+    nodeFs.writeFileSync(path.join(root, 'real.svelte'), '<p>three</p>\r\n')
+    assert.match((await real.execute(wrong, context)).content, /changed since you last read it/)
+  })
+
+  it('a planned edit counts as seen: the next edit to the same file is not called stale', async () => {
+    const context = fresh()
+    const first = await tool.execute({ path: 'page.svelte', old_string: "'Old'", new_string: "'New'" }, context)
+    assert.equal(first.isError, false)
+    // Approved: the file is now what the first edit planned.
+    const after = createReplaceTool(memoryFs({ 'page.svelte': first.pendingWrite!.changes[0]!.after }))
+    const second = await after.execute({ path: 'page.svelte', old_string: "'Gone'", new_string: 'x' }, context)
+    assert.doesNotMatch(second.content, /changed since|not read/)
   })
 })
 

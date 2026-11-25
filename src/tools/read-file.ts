@@ -18,6 +18,7 @@ import {
 } from './types.ts'
 import { PathScopeError, describeWorkspacePath } from './workspace-path.ts'
 import { resolveReadPath } from './read-scope.ts'
+import { noteSeen } from './read-ledger.ts'
 import { secretReason } from './protected-paths.ts'
 import { formatOutline, outlineOf, type SymbolProvider } from './symbols.ts'
 
@@ -128,6 +129,9 @@ export function createReadFileTool(symbols: SymbolProvider | null = null): Tool 
       if (buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
         return toolError(`${label} looks like a binary file, so it was not read.`)
       }
+
+      // What ys_replace checks old_string's source against (read-ledger.ts).
+      noteSeen(context, absolute, buffer.toString('utf8'))
 
       if (stat.size === 0) {
         return toolOk(`${label} is empty (0 bytes).`, `Read ${label} — empty`)

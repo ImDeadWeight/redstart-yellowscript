@@ -10,6 +10,7 @@ import {
   discoverNests,
   localSubnets,
   localAddresses,
+  secureUrl,
   type DiscoveredNest,
 } from './discovery.ts'
 
@@ -123,6 +124,8 @@ describe('localSubnets / localAddresses', () => {
 })
 
 describe('discoverNests', () => {
+  // No https origin to find: these are about the sweep.
+  const noSecureUrl = async () => null
   const nest = (ip: string, port = 19080, running = true): DiscoveredNest => ({
     ip,
     port,
@@ -133,6 +136,7 @@ describe('discoverNests', () => {
   test('always probes loopback, even with no LAN subnets', async () => {
     const probed: string[] = []
     const found = await discoverNests({
+      secureUrl: noSecureUrl,
       subnets: [],
       selfAddresses: [],
       probe: async (ip) => {
@@ -147,6 +151,7 @@ describe('discoverNests', () => {
   test('sweeps .1 through .254 of each subnet', async () => {
     const probed: string[] = []
     await discoverNests({
+      secureUrl: noSecureUrl,
       subnets: ['192.168.1', '10.0.0'],
       selfAddresses: [],
       probe: async (ip) => {
@@ -164,6 +169,7 @@ describe('discoverNests', () => {
 
   test('collapses the same local Nest answering on both loopback and LAN', async () => {
     const found = await discoverNests({
+      secureUrl: noSecureUrl,
       subnets: ['192.168.1'],
       selfAddresses: ['192.168.1.50'],
       probe: async (ip) => {
@@ -178,6 +184,7 @@ describe('discoverNests', () => {
 
   test('keeps a different machine on the LAN', async () => {
     const found = await discoverNests({
+      secureUrl: noSecureUrl,
       subnets: ['192.168.1'],
       selfAddresses: ['192.168.1.50'],
       probe: async (ip) => {
@@ -191,6 +198,7 @@ describe('discoverNests', () => {
 
   test('orders running instances ahead of idle ones', async () => {
     const found = await discoverNests({
+      secureUrl: noSecureUrl,
       subnets: ['192.168.1'],
       selfAddresses: [],
       probe: async (ip) => {
@@ -209,6 +217,7 @@ describe('discoverNests', () => {
     const controller = new AbortController()
     let probes = 0
     const found = await discoverNests({
+      secureUrl: noSecureUrl,
       subnets: ['192.168.1'],
       selfAddresses: [],
       signal: controller.signal,
@@ -220,5 +229,100 @@ describe('discoverNests', () => {
     })
     assert.deepEqual(found, [])
     assert.ok(probes < 255, `expected an early stop, ran ${probes} probes`)
+  })
+})
+
+describe('the https origin', () => {
+  test('the beacon may carry a bare https origin; anything else is dropped', () => {
+    assert.deepEqual(parseBeaconPayload('{"app":"redstart-nest","running":true,"port":80,"origin":"https://a4jxay.nest.example.com"}'), {
+      running: true,
+      port: 80,
+      origin: 'https://a4jxay.nest.example.com',
+    })
+    for (const origin of ['http://x.example.com', 'https://x.example.com/path', 'https://x.example.com:8443', 'javascript:alert(1)', 42]) {
+      assert.deepEqual(parseBeaconPayload(JSON.stringify({ app: 'redstart-nest', running: true, port: 80, origin })), { running: true, port: 80 }, String(origin))
+    }
+  })
+
+  /** A fake network: what each URL answers, and what each name resolves to. */
+  function net(routes: Record<string, { status: number; location?: string } | 'down'>, dns: Record<string, string[]>) {
+    const asked: string[] = []
+    return {
+      asked,
+      deps: {
+        selfAddresses: new Set(['192.168.0.213']),
+        timeoutMs: 100,
+        lookup: async (name: string) => {
+          const found = dns[name]
+          if (!found) throw new Error('ENOTFOUND')
+          return found
+        },
+        fetch: async (url: string) => {
+          asked.push(url)
+          const route = routes[url]
+          if (!route || route === 'down') throw new Error('ECONNREFUSED')
+          return new Response(null, { status: route.status, headers: route.location ? { location: route.location } : {} })
+        },
+      },
+    }
+  }
+  const hit = (ip: string, origin?: string): DiscoveredNest => ({ ip, port: 80, running: true, url: `http://${ip}:80`, ...(origin ? { origin } : {}) })
+
+  test("2026-11-24: the beacon's origin was dead and port 80's redirect was right, so the redirect is used", async () => {
+    const { deps } = net(
+      {
+        'http://127.0.0.1:80/auth/config': { status: 308, location: 'https://a4jxay.nest.example.com/auth/config' },
+        'https://redstarttest.duckdns.org/auth/config': 'down',
+        'https://a4jxay.nest.example.com/auth/config': { status: 200 },
+      },
+      { 'redstarttest.duckdns.org': ['192.168.0.213'], 'a4jxay.nest.example.com': ['192.168.0.213'] },
+    )
+    assert.equal(await secureUrl(hit('127.0.0.1', 'https://redstarttest.duckdns.org'), deps), 'https://a4jxay.nest.example.com')
+  })
+
+  test("the beacon's origin is used when it answers", async () => {
+    const { deps } = net(
+      { 'http://192.168.0.142:80/auth/config': { status: 200 }, 'https://nest.example.com/auth/config': { status: 200 } },
+      { 'nest.example.com': ['192.168.0.142'] },
+    )
+    assert.equal(await secureUrl(hit('192.168.0.142', 'https://nest.example.com'), deps), 'https://nest.example.com')
+  })
+
+  test('a name that does not point at the address that answered is never used', async () => {
+    // A spoofed beacon, or a redirect to somewhere else: http is kept.
+    const { deps, asked } = net(
+      {
+        'http://192.168.0.50:80/auth/config': { status: 308, location: 'https://evil.example.com/' },
+        'https://evil.example.com/auth/config': { status: 200 },
+        'https://bank.example.com/auth/config': { status: 200 },
+      },
+      { 'evil.example.com': ['203.0.113.9'], 'bank.example.com': ['198.51.100.1'] },
+    )
+    assert.equal(await secureUrl(hit('192.168.0.50', 'https://bank.example.com'), deps), null)
+    assert.ok(!asked.some((u) => u.startsWith('https://')), `nothing was sent to a name that points elsewhere: ${asked.join(', ')}`)
+  })
+
+  test('loopback: the name must resolve to one of this machine\'s addresses', async () => {
+    const routes = { 'http://127.0.0.1:80/auth/config': { status: 200 }, 'https://nest.example.com/auth/config': { status: 200 } }
+    const here = net(routes, { 'nest.example.com': ['192.168.0.213'] })
+    assert.equal(await secureUrl(hit('127.0.0.1', 'https://nest.example.com'), here.deps), 'https://nest.example.com')
+    const elsewhere = net(routes, { 'nest.example.com': ['192.168.0.99'] })
+    assert.equal(await secureUrl(hit('127.0.0.1', 'https://nest.example.com'), elsewhere.deps), null)
+  })
+
+  test('no origin and no redirect: plain http stays', async () => {
+    const { deps } = net({ 'http://192.168.0.142:19080/auth/config': { status: 200 } }, {})
+    assert.equal(await secureUrl({ ip: '192.168.0.142', port: 19080, running: true, url: 'http://192.168.0.142:19080' }, deps), null)
+  })
+
+  test('discoverNests uses the verified origin as the url, and says it is secure', async () => {
+    const found = await discoverNests({
+      subnets: [],
+      selfAddresses: [],
+      probe: async (ip) => (ip === '127.0.0.1' ? hit('127.0.0.1') : null),
+      secureUrl: async () => 'https://nest.example.com',
+    })
+    assert.equal(found[0]?.url, 'https://nest.example.com')
+    assert.equal(found[0]?.secure, true)
   })
 })

@@ -26,7 +26,7 @@ import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
-import { NestClient } from '../nest/client.ts'
+import { NestClient, nestFetch } from '../nest/client.ts'
 import { McpHost, type McpTool } from '../nest/mcp-host.ts'
 import type { NestToolRef } from '../tools/registry.ts'
 import { CATALOGS, loadTasks, runTask, summarize, type Catalog, type RunRecord } from './harness.ts'
@@ -100,7 +100,7 @@ async function listNestTools(): Promise<NestToolRef[]> {
     {
       baseUrl: client.baseUrl,
       listMcpServers: (signal) => client.listMcpServers(signal),
-      fetch: (input, init) => fetch(input, init),
+      fetch: nestFetch,
       getCredential: () => client.getCredential(),
     },
     { onTools: (tools) => (listed = tools), onConnection: () => {}, onError: (err) => console.error(`  mcp: ${err.message}`) },

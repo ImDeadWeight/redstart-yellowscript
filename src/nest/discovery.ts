@@ -44,9 +44,18 @@ export interface DiscoveredNest {
   port: number
   /** True when a model is loaded and the gateway is actually serving. */
   running: boolean
-  /** Connection URL, built locally from `ip` + `port`. */
+  /** Connection URL: built locally from `ip` + `port`, or the Nest's https
+   *  origin once verified (secureUrl). */
   url: string
+  /** The https origin the beacon advertised, if any. Not trusted until
+   *  secureUrl() has checked it. */
+  origin?: string
+  /** True when `url` is the Nest's verified https origin. */
+  secure?: boolean
 }
+
+/** A bare https origin, nothing else (the beacon's own rule, beacon.mjs). */
+const ORIGIN_RE = /^https:\/\/([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)$/
 
 /**
  * Validate a beacon body. Returns null for anything that isn't a Redstart Nest
@@ -56,7 +65,7 @@ export interface DiscoveredNest {
  * has no model loaded is a genuinely different situation from "nothing found",
  * and telling the user which one they are in is worth the extra field.
  */
-export function parseBeaconPayload(raw: string): { running: boolean; port: number } | null {
+export function parseBeaconPayload(raw: string): { running: boolean; port: number; origin?: string } | null {
   let data: unknown
   try {
     data = JSON.parse(raw)
@@ -71,7 +80,10 @@ export function parseBeaconPayload(raw: string): { running: boolean; port: numbe
   const port = obj.port
   if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) return null
 
-  return { running: obj.running === true, port }
+  // `origin` (Nest TLS plan C7): the https name, while Nest's HTTPS serves.
+  // Anything but a bare https origin is dropped.
+  const origin = typeof obj.origin === 'string' && ORIGIN_RE.test(obj.origin) ? obj.origin : undefined
+  return origin ? { running: obj.running === true, port, origin } : { running: obj.running === true, port }
 }
 
 /**
@@ -114,7 +126,9 @@ export async function probeBeacon(
       onError?.('not-a-beacon')
       return null
     }
-    return { ip, port: parsed.port, running: parsed.running, url: `http://${ip}:${parsed.port}` }
+    const found: DiscoveredNest = { ip, port: parsed.port, running: parsed.running, url: `http://${ip}:${parsed.port}` }
+    if (parsed.origin) found.origin = parsed.origin
+    return found
   } catch (err) {
     onError?.(failureReason(err))
     return null
@@ -244,6 +258,8 @@ export interface DiscoverOptions {
    *  that is all `timeout` is being silently dropped; one that is all
    *  `ECONNREFUSED` reached the hosts and found nothing listening. */
   onFailureSummary?: (reasons: Record<string, number>) => void
+  /** Injected for tests: the https origin for a hit (default secureUrl). */
+  secureUrl?: (hit: DiscoveredNest, deps: SecureUrlDeps) => Promise<string | null>
 }
 
 /**
@@ -292,5 +308,111 @@ export async function discoverNests(options: DiscoverOptions = {}): Promise<Disc
     return !(selfAddresses.has(hit.ip) && loopbackPorts.has(hit.port))
   })
 
-  return deduped.sort((a, b) => Number(b.running) - Number(a.running))
+  // Only the few hits, not the sweep: is there an https address to use?
+  const secured = await Promise.all(
+    deduped.map(async (hit) => {
+      if (options.signal?.aborted) return hit
+      const url = await (options.secureUrl ?? secureUrl)(hit, { selfAddresses })
+      return url ? { ...hit, url, secure: true } : hit
+    }),
+  )
+
+  return secured.sort((a, b) => Number(b.running) - Number(a.running))
+}
+
+// --- the https origin ------------------------------------------------------------
+
+export interface SecureUrlDeps {
+  /** This machine's IPv4 addresses: a Nest answering on 127.0.0.1 has a name
+   *  that resolves to one of these, never to loopback. */
+  selfAddresses?: ReadonlySet<string>
+  lookup?: (name: string) => Promise<string[]>
+  fetch?: (input: string, init?: RequestInit) => Promise<Response>
+  timeoutMs?: number
+}
+
+/**
+ * The Nest's https origin, when there is one to trust; else null, and the
+ * caller keeps http://<ip>:<port>.
+ *
+ * A Nest in LAN-HTTPS mode serves its API on https://<name> and answers
+ * http://<ip>:80 only with a redirect there. Following that redirect from a
+ * request drops the token (a cross-origin redirect), so the connection must
+ * be made to the https name from the start.
+ *
+ * The candidates are the beacon's `origin` and the Location of the plain
+ * address's redirect. One is used only when:
+ *   1. it is a bare https origin;
+ *   2. its name resolves to the IP that answered the beacon (or, for
+ *      127.0.0.1, to one of this machine's addresses), as Twig checks
+ *      (redstart-twig network.mjs verifiedOrigin): a spoofed beacon or
+ *      redirect can then only name a host that already points at itself;
+ *   3. it answers. Nest 2026-11-24 advertised its own-name setting while
+ *      serving the automatic name, so the beacon's origin was dead and the
+ *      redirect's was right.
+ */
+export async function secureUrl(hit: DiscoveredNest, deps: SecureUrlDeps = {}): Promise<string | null> {
+  const doFetch = deps.fetch ?? ((input: string, init?: RequestInit) => fetch(input, init))
+  const lookup = deps.lookup ?? defaultLookup
+  const timeoutMs = deps.timeoutMs ?? 3_000
+  const self = deps.selfAddresses ?? new Set(localAddresses())
+
+  const candidates: string[] = []
+  if (hit.origin) candidates.push(hit.origin)
+  const redirected = await redirectOrigin(hit.url, doFetch, timeoutMs)
+  if (redirected && !candidates.includes(redirected)) candidates.push(redirected)
+
+  for (const origin of candidates) {
+    const name = ORIGIN_RE.exec(origin)?.[1]
+    if (!name) continue
+    let addresses: string[]
+    try {
+      addresses = await lookup(name)
+    } catch {
+      continue
+    }
+    const pointsHere = addresses.includes(hit.ip) || (hit.ip === '127.0.0.1' && addresses.some((a) => self.has(a)))
+    if (!pointsHere) continue
+    if (await answers(`${origin}/auth/config`, doFetch, timeoutMs)) return origin
+  }
+  return null
+}
+
+/** Where the plain address redirects to, as a bare https origin, or null. */
+async function redirectOrigin(
+  url: string,
+  doFetch: (input: string, init?: RequestInit) => Promise<Response>,
+  timeoutMs: number,
+): Promise<string | null> {
+  try {
+    const response = await doFetch(`${url}/auth/config`, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+    await response.body?.cancel()
+    if (response.status < 300 || response.status >= 400) return null
+    const location = response.headers.get('location')
+    if (!location) return null
+    const origin = new URL(location, url).origin
+    return ORIGIN_RE.test(origin) ? origin : null
+  } catch {
+    return null
+  }
+}
+
+/** Any HTTP answer (not a redirect), within the time. */
+async function answers(
+  url: string,
+  doFetch: (input: string, init?: RequestInit) => Promise<Response>,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    const response = await doFetch(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+    await response.body?.cancel()
+    return response.status < 300 || response.status >= 400
+  } catch {
+    return false
+  }
+}
+
+async function defaultLookup(name: string): Promise<string[]> {
+  const { lookup } = await import('node:dns/promises')
+  return (await lookup(name, { all: true, family: 4 })).map((a) => a.address)
 }
